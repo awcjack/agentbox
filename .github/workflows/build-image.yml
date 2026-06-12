@@ -1,0 +1,93 @@
+name: build-image
+
+# Builds the agentbox OCI image with Nix and (on pushes to the default branch
+# or tags) publishes it to GitHub Container Registry. The flake depends only on
+# nixpkgs, so no secrets are needed to *build* — only to push.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "flake.nix"
+      - "flake.lock"
+      - "image.nix"
+      - "packages.nix"
+      - "neovim.nix"
+      - "package.nix"
+      - "modules/**"
+      - ".github/workflows/build-image.yml"
+  pull_request:
+    paths:
+      - "flake.nix"
+      - "image.nix"
+      - "packages.nix"
+      - "neovim.nix"
+      - "package.nix"
+      - "modules/**"
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # needed for the GHCR push step
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image closure is large (full toolchain + cloud CLIs); reclaim the
+      # space the default runner wastes on Android/.NET/etc. first.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Nix build cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Flake metadata (sanity)
+        run: nix flake show --no-update-lock-file
+
+      - name: Build agentbox image
+        run: |
+          nix build .#packages.x86_64-linux.agentboxImage \
+            --print-build-logs --no-update-lock-file
+          ls -lL result
+
+      - name: Load into Docker
+        run: |
+          docker load < result
+          docker image ls agentbox
+
+      # Publish only on default-branch pushes and tags — never on PRs.
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          IMAGE="ghcr.io/${OWNER,,}/agentbox"
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag agentbox:latest "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:${{ github.sha }}"
+          # Tag pushes also get a clean semver tag; main pushes get :latest.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            docker tag agentbox:latest "$IMAGE:${{ github.ref_name }}"
+            docker push "$IMAGE:${{ github.ref_name }}"
+          else
+            docker tag agentbox:latest "$IMAGE:latest"
+            docker push "$IMAGE:latest"
+          fi
