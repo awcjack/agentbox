@@ -567,6 +567,23 @@ in
                         #     renaming. claude-working.sh (UserPromptSubmit) re-enables tracking.
                         cat > "${cfg.dataDir}/hooks/notify.sh" <<'NOTIFY_EOF'
         #!/bin/bash
+        # The Stop hook fires whenever the main agent finishes a turn, including when
+        # it only paused to wait for backgrounded work to wake it back up. Claude Code's
+        # Stop payload lists that work in .background_tasks (running/pending backgrounded
+        # shells, subagents and workflows; empty when nothing is in flight), so a
+        # non-empty array means the turn ended waiting on background work, not finished.
+        # Skip the bell, the window rename, and the desktop notification in that case so
+        # we do not false-signal "done". (A long-lived detached task that never exits
+        # keeps this suppressed; the tick fires on the next Stop once the work drains.)
+        hook_input="$(cat)"
+        _bg=0
+        if command -v jq >/dev/null 2>&1; then
+            _bg=$(printf '%s' "$hook_input" | jq '(.background_tasks // []) | length' 2>/dev/null)
+        fi
+        [ -n "$_bg" ] || _bg=0
+        case "$_bg" in *[!0-9]*) _bg=0 ;; esac
+        [ "$_bg" -gt 0 ] && exit 0
+
         printf '\a'
 
         tmux_bin="$(command -v tmux 2>/dev/null || true)"
