@@ -603,7 +603,7 @@ in
             # Set flag so PostToolUse (claude-working.sh) does not re-enable auto-rename
             # if it fires after this Stop hook. Cleared by claude-prompt-start.sh on the
             # next UserPromptSubmit.
-            touch "/tmp/claude-done-${TMUX_PANE}"
+            touch "/tmp/claude-done-''${TMUX_PANE}"
         fi
         NOTIFY_EOF
                         chmod +x "${cfg.dataDir}/hooks/notify.sh"
@@ -658,7 +658,7 @@ in
         # fired this turn — the done flag ensures "✅ done" is not wiped by a stray
         # PostToolUse that fires after Stop. The flag is cleared by claude-prompt-start.sh
         # on the next UserPromptSubmit.
-        [ -n "$TMUX_PANE" ] && [ -f "/tmp/claude-done-${TMUX_PANE}" ] && exit 0
+        [ -n "$TMUX_PANE" ] && [ -f "/tmp/claude-done-''${TMUX_PANE}" ] && exit 0
 
         tmux_bin="$(command -v tmux 2>/dev/null || true)"
         if [ -z "$tmux_bin" ]; then
@@ -680,7 +680,7 @@ in
                         # live title tracking while Claude works on the new prompt.
                         cat > "${cfg.dataDir}/hooks/claude-prompt-start.sh" <<'PROMPT_EOF'
         #!/bin/bash
-        [ -n "$TMUX_PANE" ] && rm -f "/tmp/claude-done-${TMUX_PANE}"
+        [ -n "$TMUX_PANE" ] && rm -f "/tmp/claude-done-''${TMUX_PANE}"
 
         tmux_bin="$(command -v tmux 2>/dev/null || true)"
         if [ -z "$tmux_bin" ]; then
