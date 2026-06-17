@@ -327,10 +327,26 @@ in
               "Bash(swift *)"
               "Bash(swiftc *)"
               # Re-allow harmless template / public files that the deny
-              # patterns below would otherwise capture.
+              # patterns below would otherwise capture. Each tool that has a
+              # broad deny (Grep, Bash cat/head/tail) needs its own specific
+              # allow entry here — the deny is more specific than the blanket
+              # Bash(cat *) / Bash(grep *) allows, so those blanket entries
+              # cannot rescue .env.example on their own.
               "Read(**/.env.example)"
               "Read(**/.env.sample)"
               "Read(**/.env.template)"
+              "Grep(**/.env.example)"
+              "Grep(**/.env.sample)"
+              "Grep(**/.env.template)"
+              "Bash(cat **/.env.example)"
+              "Bash(cat **/.env.sample)"
+              "Bash(cat **/.env.template)"
+              "Bash(head **/.env.example)"
+              "Bash(head **/.env.sample)"
+              "Bash(head **/.env.template)"
+              "Bash(tail **/.env.example)"
+              "Bash(tail **/.env.sample)"
+              "Bash(tail **/.env.template)"
               "Read(**/*.pub)"
             ];
             deny = [
