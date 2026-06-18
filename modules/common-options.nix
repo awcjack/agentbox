@@ -347,6 +347,18 @@ in
               "Bash(tail **/.env.example)"
               "Bash(tail **/.env.sample)"
               "Bash(tail **/.env.template)"
+              # Allow writing / editing template files — the Edit deny above
+              # covers .env.* broadly, so Write and Edit need explicit rescues
+              # just like Read/Grep/Bash do.
+              "Write(**/.env.example)"
+              "Write(**/.env.sample)"
+              "Write(**/.env.template)"
+              "Edit(**/.env.example)"
+              "Edit(**/.env.sample)"
+              "Edit(**/.env.template)"
+              "Bash(tee **/.env.example)"
+              "Bash(tee **/.env.sample)"
+              "Bash(tee **/.env.template)"
               "Read(**/*.pub)"
             ];
             deny = [
