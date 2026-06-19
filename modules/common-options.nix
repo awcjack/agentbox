@@ -330,8 +330,8 @@ in
               # deny ALWAYS beats allow (regardless of specificity), an allow
               # entry can never rescue a path that a deny also matches. So the
               # secret denylist below is deliberately enumerated to concrete
-              # env variants (.env, .env.local, .env*dev*, .env*prod*, ...)
-              # and never uses a blanket .env.* — that is what leaves
+              # env/values variants (.env, .env.local, .env*dev*, values*prod*,
+              # ...) and never uses a blanket .env.* — that is what leaves
               # .env.example / .sample / .template un-denied. These allow
               # entries then make the templates readable/writable per tool
               # (the blanket Bash(cat *) / Bash(grep *) allows above cannot
@@ -382,6 +382,12 @@ in
               "Read(**/.env**prod**)"
               "Read(**/.env**stag**)"
               "Read(**/.env**test**)"
+              "Read(**/values**dev**)"
+              "Read(**/values**prod**)"
+              "Read(**/values**stag**)"
+              "Read(**/values**test**)"
+              "Read(**/*secret*.yaml)"
+              "Read(**/*secret*.yml)"
               "Read(**/*.pem)"
               "Read(**/*.key)"
               "Read(**/id_rsa)"
@@ -406,6 +412,12 @@ in
               "Edit(**/.env**prod**)"
               "Edit(**/.env**stag**)"
               "Edit(**/.env**test**)"
+              "Edit(**/values**dev**)"
+              "Edit(**/values**prod**)"
+              "Edit(**/values**stag**)"
+              "Edit(**/values**test**)"
+              "Edit(**/*secret*.yaml)"
+              "Edit(**/*secret*.yml)"
               "Edit(**/*.pem)"
               "Edit(**/*.key)"
               "Edit(**/id_rsa*)"
@@ -422,6 +434,12 @@ in
               "Glob(**/.env**prod**)"
               "Glob(**/.env**stag**)"
               "Glob(**/.env**test**)"
+              "Glob(**/values**dev**)"
+              "Glob(**/values**prod**)"
+              "Glob(**/values**stag**)"
+              "Glob(**/values**test**)"
+              "Glob(**/*secret*.yaml)"
+              "Glob(**/*secret*.yml)"
               "Glob(**/*.pem)"
               "Glob(**/*.key)"
               "Glob(**/.ssh/**)"
@@ -433,6 +451,12 @@ in
               "Grep(**/.env**prod**)"
               "Grep(**/.env**stag**)"
               "Grep(**/.env**test**)"
+              "Grep(**/values**dev**)"
+              "Grep(**/values**prod**)"
+              "Grep(**/values**stag**)"
+              "Grep(**/values**test**)"
+              "Grep(**/*secret*.yaml)"
+              "Grep(**/*secret*.yml)"
               "Grep(**/*.pem)"
               "Grep(**/*.key)"
               "Grep(**/.ssh/**)"
@@ -444,6 +468,12 @@ in
               "Bash(cat **/.env**prod**)"
               "Bash(cat **/.env**stag**)"
               "Bash(cat **/.env**test**)"
+              "Bash(cat **/values**dev**)"
+              "Bash(cat **/values**prod**)"
+              "Bash(cat **/values**stag**)"
+              "Bash(cat **/values**test**)"
+              "Bash(cat **/*secret*.yaml)"
+              "Bash(cat **/*secret*.yml)"
               "Bash(cat *.pem)"
               "Bash(cat **/*.pem)"
               "Bash(cat *.key)"
@@ -462,6 +492,12 @@ in
               "Bash(head **/.env**prod**)"
               "Bash(head **/.env**stag**)"
               "Bash(head **/.env**test**)"
+              "Bash(head **/values**dev**)"
+              "Bash(head **/values**prod**)"
+              "Bash(head **/values**stag**)"
+              "Bash(head **/values**test**)"
+              "Bash(head **/*secret*.yaml)"
+              "Bash(head **/*secret*.yml)"
               "Bash(tail **/.env)"
               "Bash(tail **/.env.local)"
               "Bash(tail **/.env**local)"
@@ -469,6 +505,12 @@ in
               "Bash(tail **/.env**prod**)"
               "Bash(tail **/.env**stag**)"
               "Bash(tail **/.env**test**)"
+              "Bash(tail **/values**dev**)"
+              "Bash(tail **/values**prod**)"
+              "Bash(tail **/values**stag**)"
+              "Bash(tail **/values**test**)"
+              "Bash(tail **/*secret*.yaml)"
+              "Bash(tail **/*secret*.yml)"
               # Extra read-vector denials — block exfiltration of secret files by
               # encoding/dumping (base64/xxd/od/hexdump/strings) or copying them
               # out (cp), plus git-credentials.
@@ -482,6 +524,12 @@ in
               "Bash(base64 **/.env**prod**)"
               "Bash(base64 **/.env**stag**)"
               "Bash(base64 **/.env**test**)"
+              "Bash(base64 **/values**dev**)"
+              "Bash(base64 **/values**prod**)"
+              "Bash(base64 **/values**stag**)"
+              "Bash(base64 **/values**test**)"
+              "Bash(base64 **/*secret*.yaml)"
+              "Bash(base64 **/*secret*.yml)"
               "Bash(base64 **/.aws/**)"
               "Bash(base64 **/.config/gcloud/**)"
               "Bash(base64 **/.kube/**)"
@@ -559,6 +607,14 @@ in
               "*/.env.example" = "allow";
               "*/.env.sample" = "allow";
               "*/.env.template" = "allow";
+              # Environment-specific Helm/k8s values files (values-dev.yaml,
+              # values.prod.yaml, ...). Base values.yaml stays readable.
+              "*/values*dev*" = "deny";
+              "*/values*prod*" = "deny";
+              "*/values*stag*" = "deny";
+              "*/values*test*" = "deny";
+              "*/*secret*.yaml" = "deny";
+              "*/*secret*.yml" = "deny";
               "*/*.pem" = "deny";
               "*/*.pub" = "allow";
               "*/*.key" = "deny";
@@ -590,6 +646,12 @@ in
               "*/.env.example" = "allow";
               "*/.env.sample" = "allow";
               "*/.env.template" = "allow";
+              "*/values*dev*" = "deny";
+              "*/values*prod*" = "deny";
+              "*/values*stag*" = "deny";
+              "*/values*test*" = "deny";
+              "*/*secret*.yaml" = "deny";
+              "*/*secret*.yml" = "deny";
               "*/*.pem" = "deny";
               "*/*.key" = "deny";
               "*/id_rsa*" = "deny";
