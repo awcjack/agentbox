@@ -555,6 +555,30 @@ in
           description = "Permission configuration for Claude Code.";
           # NB: deny extras above are unconditional (applied on both platforms).
         };
+
+        extraAllow = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          example = [ "Read(**/internal-notes/**)" ];
+          description = ''
+            Per-host allow rules appended to permissions.allow in both
+            settings.json and managed-settings.json. Lets a consumer extend the
+            curated default without restating the whole list — the plain
+            `default` attrset does not deep-merge, so a partial override of
+            `permissions` would drop the rest of it.
+          '';
+        };
+
+        extraDeny = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          example = [ "Read(**/private/**)" ];
+          description = ''
+            Per-host deny rules appended to permissions.deny in both
+            settings.json and managed-settings.json. Since Claude Code evaluates
+            deny before allow, an entry here is authoritative.
+          '';
+        };
       };
 
       # OpenCode configuration
@@ -664,6 +688,22 @@ in
             };
           };
           description = "Permission configuration for OpenCode.";
+        };
+
+        extraPermission = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = { };
+          example = {
+            read = {
+              "*/private/*" = "deny";
+            };
+          };
+          description = ''
+            Per-host OpenCode permission rules deep-merged (lib.recursiveUpdate)
+            over opencodeConfig.permission. Use the same category/pattern shape
+            ({ read = { "*/x" = "deny"; }; }); later definitions win, matching
+            OpenCode's own last-match-wins semantics.
+          '';
         };
 
         agents = lib.mkOption {

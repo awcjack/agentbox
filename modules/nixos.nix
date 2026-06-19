@@ -29,6 +29,19 @@
 let
   cfg = config.services.agentbox;
 
+  # Effective permission sets: curated defaults + per-host extras. Kept here so
+  # settings.json and managed-settings.json stay in lock-step.
+  effectiveClaudePermissions =
+    let
+      p = cfg.settings.claudeConfig.permissions;
+    in
+    p
+    // {
+      allow = (p.allow or [ ]) ++ cfg.settings.claudeConfig.extraAllow;
+      deny = (p.deny or [ ]) ++ cfg.settings.claudeConfig.extraDeny;
+    };
+  effectiveOpencodePermission = lib.recursiveUpdate cfg.settings.opencodeConfig.permission cfg.settings.opencodeConfig.extraPermission;
+
   # Claude Code configuration.
   # ~/.claude.json holds mcpServers (and Claude's own runtime state). Hooks and
   # permissions are NOT read from this file — Claude Code reads those from
@@ -46,7 +59,7 @@ let
     builtins.toJSON {
       "$schema" = "https://json.schemastore.org/claude-code-settings.json";
       hooks = cfg.settings.claudeConfig.hooks;
-      permissions = cfg.settings.claudeConfig.permissions;
+      permissions = effectiveClaudePermissions;
     }
   );
 
@@ -64,7 +77,7 @@ let
   managedSettingsJson = pkgs.writeText "managed-settings.json" (
     builtins.toJSON {
       "$schema" = "https://json.schemastore.org/claude-code-settings.json";
-      permissions = cfg.settings.claudeConfig.permissions;
+      permissions = effectiveClaudePermissions;
       hooks = cfg.settings.claudeConfig.hooks;
       allowManagedHooksOnly = true;
     }
@@ -77,7 +90,7 @@ let
         "$schema" = "https://opencode.ai/config.json";
         default_agent = cfg.settings.opencodeConfig.defaultAgent;
         plugin = cfg.settings.opencodeConfig.plugins;
-        permission = cfg.settings.opencodeConfig.permission;
+        permission = effectiveOpencodePermission;
         agent = cfg.settings.opencodeConfig.agents;
         small_model = cfg.settings.opencodeConfig.smallModel;
       }
