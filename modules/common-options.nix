@@ -326,12 +326,16 @@ in
               "Bash(rustc *)"
               "Bash(swift *)"
               "Bash(swiftc *)"
-              # Re-allow harmless template / public files that the deny
-              # patterns below would otherwise capture. Each tool that has a
-              # broad deny (Grep, Bash cat/head/tail) needs its own specific
-              # allow entry here — the deny is more specific than the blanket
-              # Bash(cat *) / Bash(grep *) allows, so those blanket entries
-              # cannot rescue .env.example on their own.
+              # Explicitly permit harmless template / public files. Because
+              # deny ALWAYS beats allow (regardless of specificity), an allow
+              # entry can never rescue a path that a deny also matches. So the
+              # secret denylist below is deliberately enumerated to concrete
+              # env variants (.env, .env.local, .env*dev*, .env*prod*, ...)
+              # and never uses a blanket .env.* — that is what leaves
+              # .env.example / .sample / .template un-denied. These allow
+              # entries then make the templates readable/writable per tool
+              # (the blanket Bash(cat *) / Bash(grep *) allows above cannot
+              # distinguish a template from a secret on their own).
               "Read(**/.env.example)"
               "Read(**/.env.sample)"
               "Read(**/.env.template)"
@@ -347,9 +351,10 @@ in
               "Bash(tail **/.env.example)"
               "Bash(tail **/.env.sample)"
               "Bash(tail **/.env.template)"
-              # Allow writing / editing template files — the Edit deny above
-              # covers .env.* broadly, so Write and Edit need explicit rescues
-              # just like Read/Grep/Bash do.
+              # Allow writing / editing template files. The Edit deny above is
+              # enumerated to concrete secret variants (never a blanket .env.*),
+              # so templates fall through; these explicit Write/Edit allows make
+              # that intent clear per tool, just like Read/Grep/Bash above.
               "Write(**/.env.example)"
               "Write(**/.env.sample)"
               "Write(**/.env.template)"
@@ -371,7 +376,12 @@ in
               # Each tool is denied separately — Claude Code does not propagate
               # a Read deny to Grep / Glob / Bash-via-cat.
               "Read(**/.env)"
-              "Read(**/.env.*)"
+              "Read(**/.env.local)"
+              "Read(**/.env**local)"
+              "Read(**/.env**dev**)"
+              "Read(**/.env**prod**)"
+              "Read(**/.env**stag**)"
+              "Read(**/.env**test**)"
               "Read(**/*.pem)"
               "Read(**/*.key)"
               "Read(**/id_rsa)"
@@ -390,7 +400,12 @@ in
               "Read(**/credentials.json)"
               "Read(**/service-account*.json)"
               "Edit(**/.env)"
-              "Edit(**/.env.*)"
+              "Edit(**/.env.local)"
+              "Edit(**/.env**local)"
+              "Edit(**/.env**dev**)"
+              "Edit(**/.env**prod**)"
+              "Edit(**/.env**stag**)"
+              "Edit(**/.env**test**)"
               "Edit(**/*.pem)"
               "Edit(**/*.key)"
               "Edit(**/id_rsa*)"
@@ -401,19 +416,34 @@ in
               "Edit(**/.kube/config)"
               "Edit(**/secrets/**)"
               "Glob(**/.env)"
-              "Glob(**/.env.*)"
+              "Glob(**/.env.local)"
+              "Glob(**/.env**local)"
+              "Glob(**/.env**dev**)"
+              "Glob(**/.env**prod**)"
+              "Glob(**/.env**stag**)"
+              "Glob(**/.env**test**)"
               "Glob(**/*.pem)"
               "Glob(**/*.key)"
               "Glob(**/.ssh/**)"
               "Glob(**/secrets/**)"
               "Grep(**/.env)"
-              "Grep(**/.env.*)"
+              "Grep(**/.env.local)"
+              "Grep(**/.env**local)"
+              "Grep(**/.env**dev**)"
+              "Grep(**/.env**prod**)"
+              "Grep(**/.env**stag**)"
+              "Grep(**/.env**test**)"
               "Grep(**/*.pem)"
               "Grep(**/*.key)"
               "Grep(**/.ssh/**)"
               "Grep(**/secrets/**)"
-              "Bash(cat *.env*)"
-              "Bash(cat **/.env*)"
+              "Bash(cat **/.env)"
+              "Bash(cat **/.env.local)"
+              "Bash(cat **/.env**local)"
+              "Bash(cat **/.env**dev**)"
+              "Bash(cat **/.env**prod**)"
+              "Bash(cat **/.env**stag**)"
+              "Bash(cat **/.env**test**)"
               "Bash(cat *.pem)"
               "Bash(cat **/*.pem)"
               "Bash(cat *.key)"
@@ -425,15 +455,33 @@ in
               "Bash(cat **/.config/gcloud/**)"
               "Bash(cat **/.kube/config)"
               "Bash(cat **/.netrc)"
-              "Bash(head **/.env*)"
-              "Bash(tail **/.env*)"
+              "Bash(head **/.env)"
+              "Bash(head **/.env.local)"
+              "Bash(head **/.env**local)"
+              "Bash(head **/.env**dev**)"
+              "Bash(head **/.env**prod**)"
+              "Bash(head **/.env**stag**)"
+              "Bash(head **/.env**test**)"
+              "Bash(tail **/.env)"
+              "Bash(tail **/.env.local)"
+              "Bash(tail **/.env**local)"
+              "Bash(tail **/.env**dev**)"
+              "Bash(tail **/.env**prod**)"
+              "Bash(tail **/.env**stag**)"
+              "Bash(tail **/.env**test**)"
               # Extra read-vector denials — block exfiltration of secret files by
               # encoding/dumping (base64/xxd/od/hexdump/strings) or copying them
               # out (cp), plus git-credentials.
               "Bash(base64 **/.ssh/**)"
               "Bash(base64 **/*.pem)"
               "Bash(base64 **/*.key)"
-              "Bash(base64 **/.env*)"
+              "Bash(base64 **/.env)"
+              "Bash(base64 **/.env.local)"
+              "Bash(base64 **/.env**local)"
+              "Bash(base64 **/.env**dev**)"
+              "Bash(base64 **/.env**prod**)"
+              "Bash(base64 **/.env**stag**)"
+              "Bash(base64 **/.env**test**)"
               "Bash(base64 **/.aws/**)"
               "Bash(base64 **/.config/gcloud/**)"
               "Bash(base64 **/.kube/**)"
