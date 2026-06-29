@@ -1104,18 +1104,123 @@ let
     '';
   };
 
-  # Claude Code settings: default to auto mode so agents don't get permission prompts
+  # Claude Code settings: auto mode + pre-enabled LSP plugins.
+  # enabledPlugins activates the official gopls-lsp and typescript-lsp marketplace
+  # plugins (registered in installed_plugins.json below) and the local agentbox-lsp
+  # plugin that covers Nix/JSON/HTML/CSS (not in the official marketplace).
+  # lspRecommendationDisabled suppresses the "install an LSP plugin?" nag since we
+  # pre-seed everything.
   claudeSettingsFile = writeTextFile {
     name = "claude-settings.json";
     text = ''
       {
         "permissions": {
           "defaultMode": "auto"
+        },
+        "enabledPlugins": {
+          "gopls-lsp@claude-plugins-official": true,
+          "typescript-lsp@claude-plugins-official": true,
+          "agentbox-lsp@local": true
+        },
+        "lspRecommendationDisabled": true
+      }
+    '';
+  };
+
+  # .lsp.json for the local agentbox-lsp plugin (nil, JSON, HTML, CSS).
+  # gopls and typescript-language-server are covered by the official marketplace
+  # plugins above; this file adds the servers that have no marketplace entry.
+  # Format: record of server-name → { command, args?, extensionToLanguage, diagnostics? }
+  claudeAgentboxLspJson = writeTextFile {
+    name = "agentbox-lsp.json";
+    text = ''
+      {
+        "nil": {
+          "command": "nil",
+          "extensionToLanguage": { ".nix": "nix" },
+          "diagnostics": true
+        },
+        "json": {
+          "command": "vscode-json-language-server",
+          "args": ["--stdio"],
+          "extensionToLanguage": { ".json": "json", ".jsonc": "jsonc" },
+          "initializationOptions": { "provideFormatter": true },
+          "diagnostics": true
+        },
+        "html": {
+          "command": "vscode-html-language-server",
+          "args": ["--stdio"],
+          "extensionToLanguage": { ".html": "html", ".htm": "html" },
+          "diagnostics": false
+        },
+        "css": {
+          "command": "vscode-css-language-server",
+          "args": ["--stdio"],
+          "extensionToLanguage": { ".css": "css", ".scss": "scss", ".less": "less" },
+          "diagnostics": false
         }
       }
     '';
   };
 
+  # Minimal plugin.json for the local agentbox-lsp plugin.
+  # Claude Code reads this from the installPath alongside .lsp.json.
+  claudeAgentboxLspPluginJson = writeTextFile {
+    name = "agentbox-lsp-plugin.json";
+    text = ''
+      {
+        "name": "agentbox-lsp",
+        "description": "Agentbox bundled LSP servers: Nix (nil), JSON, HTML, CSS",
+        "version": "1.0.0",
+        "author": { "name": "agentbox" },
+        "category": "development"
+      }
+    '';
+  };
+
+  # installed_plugins.json: pre-registers the official marketplace plugins
+  # (gopls-lsp, typescript-lsp) and the local agentbox-lsp plugin.
+  # The official plugins are served by the claude-plugins-official marketplace
+  # (fetched from GitHub on first run); their lspServers config lives in the
+  # remote marketplace.json so only the installPath placeholder dirs are needed.
+  # The local agentbox-lsp plugin is read directly from its installPath.
+  claudeInstalledPluginsJson = writeTextFile {
+    name = "claude-installed-plugins.json";
+    text = ''
+      {
+        "version": 2,
+        "plugins": {
+          "gopls-lsp@claude-plugins-official": [
+            {
+              "scope": "user",
+              "installPath": "/home/agent/.claude/plugins/cache/claude-plugins-official/gopls-lsp/1.0.0",
+              "version": "1.0.0",
+              "installedAt": "2026-01-01T00:00:00.000Z",
+              "lastUpdated": "2026-01-01T00:00:00.000Z"
+            }
+          ],
+          "typescript-lsp@claude-plugins-official": [
+            {
+              "scope": "user",
+              "installPath": "/home/agent/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0",
+              "version": "1.0.0",
+              "installedAt": "2026-01-01T00:00:00.000Z",
+              "lastUpdated": "2026-01-01T00:00:00.000Z"
+            }
+          ],
+          "agentbox-lsp@local": [
+            {
+              "scope": "user",
+              "installPath": "/home/agent/.claude/plugins/agentbox-lsp",
+              "version": "1.0.0",
+              "installedAt": "2026-01-01T00:00:00.000Z",
+              "lastUpdated": "2026-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    '';
+  };
 
   # Default tmux config for the container skeleton.
   # Enables clipboard and terminal-protocol passthrough so that:
@@ -1192,9 +1297,15 @@ let
   skelDir = runCommand "skel-agent" { } ''
     mkdir -p $out/.config/opencode/plugins $out/.config/opencode/command $out/.local/bin $out/.ssh $out/.agentbox-logs $out/.cache
     mkdir -p $out/.claude/hooks $out/.claude/commands
+    mkdir -p $out/.claude/plugins/agentbox-lsp
+    mkdir -p $out/.claude/plugins/cache/claude-plugins-official/gopls-lsp/1.0.0
+    mkdir -p $out/.claude/plugins/cache/claude-plugins-official/typescript-lsp/1.0.0
     cp ${bashrcFile} $out/.bashrc
     cp ${tmuxConfFile} $out/.tmux.conf
     cp ${claudeSettingsFile} $out/.claude/settings.json
+    cp ${claudeInstalledPluginsJson} $out/.claude/plugins/installed_plugins.json
+    cp ${claudeAgentboxLspJson} $out/.claude/plugins/agentbox-lsp/.lsp.json
+    cp ${claudeAgentboxLspPluginJson} $out/.claude/plugins/agentbox-lsp/plugin.json
     chmod 700 $out/.ssh
 
     # Working OpenCode plugins (tool.execute.before / tool.execute.after).
