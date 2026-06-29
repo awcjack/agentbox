@@ -99,6 +99,18 @@ in
         description = "Enable Docker daemon inside the container (Docker-in-Docker). On NixOS this runs the container --privileged; on macOS it is wired the same way against the host Docker runtime.";
       };
 
+      enableCloudTools = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Include cloud CLIs in the image: awscli2, kubectl, kubernetes-helm,
+          google-cloud-sdk (with gke-gcloud-auth-plugin), and docker-client.
+          Disabled by default to keep the base image lean. When true, the NixOS
+          module builds the image with `.override { withCloudTools = true; }`.
+          On Darwin, rebuild the image on a Linux host with the same flag.
+        '';
+      };
+
       enableNotification = lib.mkOption {
         type = lib.types.bool;
         default = true;
@@ -226,13 +238,6 @@ in
                     type = "command";
                     command = "/home/agent/.hooks/build-validator.sh";
                   }
-                  # Baked into the agentbox image skel-dir; runs language-aware
-                  # tests after every file edit and surfaces real failures back
-                  # to Claude (infrastructure-only failures are filtered).
-                  {
-                    type = "command";
-                    command = "/home/agent/.claude/hooks/test-runner.sh";
-                  }
                 ];
               }
               # Matcher-less (every tool): once any tool runs, Claude has resumed
@@ -265,6 +270,14 @@ in
                   {
                     type = "command";
                     command = "/home/agent/.hooks/notify.sh";
+                  }
+                  # Run tests for files changed since the last commit. Fires once
+                  # per agent turn rather than after every individual file edit,
+                  # reducing noise. Background-tasks guard prevents false runs when
+                  # the turn merely paused waiting on background work.
+                  {
+                    type = "command";
+                    command = "/home/agent/.claude/hooks/stop-test-runner.sh";
                   }
                 ];
               }
@@ -600,17 +613,15 @@ in
           type = lib.types.listOf lib.types.str;
           default = [
             "opencode-gemini-auth"
-            # Use absolute paths for file:// plugins
-            "file:///home/agent/.config/opencode/plugins/static-check.ts"
-            "file:///home/agent/.config/opencode/plugins/pre-commit-lint.ts"
-            "file:///home/agent/.config/opencode/plugins/secret-scanner.ts"
-            "file:///home/agent/.config/opencode/plugins/dangerous-command-blocker.ts"
-            "file:///home/agent/.config/opencode/plugins/build-validator.ts"
+            # Post-edit test runner: uses tool.execute.after (the correct hook).
+            # Delegates to shared-test-runner.ts and surfaces real failures back
+            # to the agent while filtering infrastructure-only errors.
+            "file:///home/agent/.config/opencode/plugins/test-runner.ts"
             # Gitleaks pre-commit guard — aborts `git commit` bash calls when
             # staged content matches a secret pattern (uses tool.execute.before).
             "file:///home/agent/.config/opencode/plugins/gitleaks-precommit.ts"
           ];
-          description = "List of OpenCode plugins.";
+          description = "List of OpenCode plugins. Only plugins using the current OpenCode hook API (tool.execute.before / tool.execute.after) are included by default.";
         };
 
         permission = lib.mkOption {

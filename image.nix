@@ -105,802 +105,23 @@
   extraPackages ? [ ],
   # Slash-command source copied into the image when provided.
   claude-skills-src ? null,
+  # When true, bake cloud CLIs (awscli2, kubectl, kubernetes-helm, gcloud +
+  # gke-gcloud-auth-plugin, docker-client) into the image. Off by default so
+  # the base image stays lean. Enable via the NixOS module option
+  # `services.agentbox.settings.enableCloudTools = true` (which builds the image
+  # with `.override { withCloudTools = true; }`) or directly with
+  # `agentboxImage.override { withCloudTools = true; }`.
+  withCloudTools ? false,
 }:
 
 let
   # ---------------------------------------------------------------------------
-  # OpenCode Plugins (embedded directly - no external fetch needed)
-  # These plugins provide safety checks and validation for AI coding agents
+  # OpenCode Plugins — only plugins using the current API are included.
+  # Correct hooks: tool.execute.before / tool.execute.after (not tool.complete).
+  # Dead plugins that used the non-existent tool.complete event have been
+  # removed: build-validator, dangerous-command-blocker, pre-commit-lint,
+  # secret-scanner, static-check. Remaining: test-runner and gitleaks-precommit.
   # ---------------------------------------------------------------------------
-
-  # Build validator - ensures builds succeed after code changes
-  buildValidatorPlugin = writeTextFile {
-    name = "build-validator.ts";
-    text = ''
-      /**
-       * Build validator plugin for OpenCode
-       * Ensures builds succeed after code changes
-       */
-      import { execSync } from "child_process"
-      import { existsSync } from "fs"
-      import { join } from "path"
-
-      interface BuildResult {
-        language: string
-        success: boolean
-        output?: string
-      }
-
-      function runCommand(cmd: string, cwd: string): { success: boolean; output: string } {
-        try {
-          const output = execSync(cmd, { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] })
-          return { success: true, output }
-        } catch (err: any) {
-          return { success: false, output: err.stderr || err.stdout || err.message }
-        }
-      }
-
-      function hasCommand(cmd: string): boolean {
-        try {
-          execSync(`command -v ''${cmd}`, { stdio: ["pipe", "pipe", "pipe"] })
-          return true
-        } catch {
-          return false
-        }
-      }
-
-      function runBuildCheck(cwd: string): BuildResult[] {
-        const results: BuildResult[] = []
-
-        // Go
-        if (existsSync(join(cwd, "go.mod")) && hasCommand("go")) {
-          console.log("  → Go: building...")
-          const { success, output } = runCommand("go build ./...", cwd)
-          results.push({ language: "Go", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Go build succeeded" : "    ❌ Go build failed")
-        }
-
-        // Rust
-        if (existsSync(join(cwd, "Cargo.toml")) && hasCommand("cargo")) {
-          console.log("  → Rust: building...")
-          const { success, output } = runCommand("cargo build 2>&1", cwd)
-          results.push({ language: "Rust", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Rust build succeeded" : "    ❌ Rust build failed")
-        }
-
-        // TypeScript
-        if (existsSync(join(cwd, "tsconfig.json"))) {
-          const hasTsc = existsSync(join(cwd, "node_modules/.bin/tsc")) || hasCommand("tsc")
-          if (hasTsc) {
-            console.log("  → TypeScript: compiling...")
-            const cmd = existsSync(join(cwd, "node_modules/.bin/tsc")) ? "npx tsc --noEmit" : "tsc --noEmit"
-            const { success, output } = runCommand(cmd, cwd)
-            results.push({ language: "TypeScript", success, output: success ? undefined : output })
-            console.log(success ? "    ✅ TypeScript compilation succeeded" : "    ❌ TypeScript compilation failed")
-          }
-        }
-
-        // Python
-        if ((existsSync(join(cwd, "pyproject.toml")) || existsSync(join(cwd, "setup.py"))) && hasCommand("python3")) {
-          console.log("  → Python: checking syntax...")
-          const { success, output } = runCommand("python3 -m py_compile $(find . -name '*.py' -not -path './venv/*' -not -path './.venv/*' | head -50) 2>&1", cwd)
-          results.push({ language: "Python", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Python syntax check passed" : "    ❌ Python syntax check failed")
-        }
-
-        // Maven
-        if (existsSync(join(cwd, "pom.xml")) && hasCommand("mvn")) {
-          console.log("  → Maven: compiling...")
-          const { success, output } = runCommand("mvn compile -q 2>&1", cwd)
-          results.push({ language: "Java (Maven)", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Maven compilation succeeded" : "    ❌ Maven compilation failed")
-        }
-
-        // Gradle
-        if ((existsSync(join(cwd, "build.gradle")) || existsSync(join(cwd, "build.gradle.kts"))) && hasCommand("gradle")) {
-          console.log("  → Gradle: compiling...")
-          const { success, output } = runCommand("gradle compileJava -q 2>&1", cwd)
-          results.push({ language: "Java/Kotlin (Gradle)", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Gradle compilation succeeded" : "    ❌ Gradle compilation failed")
-        }
-
-        // Zig
-        if (existsSync(join(cwd, "build.zig")) && hasCommand("zig")) {
-          console.log("  → Zig: building...")
-          const { success, output } = runCommand("zig build 2>&1", cwd)
-          results.push({ language: "Zig", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Zig build succeeded" : "    ❌ Zig build failed")
-        }
-
-        // Elixir
-        if (existsSync(join(cwd, "mix.exs")) && hasCommand("mix")) {
-          console.log("  → Elixir: compiling...")
-          const { success, output } = runCommand("mix compile 2>&1", cwd)
-          results.push({ language: "Elixir", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Elixir compilation succeeded" : "    ❌ Elixir compilation failed")
-        }
-
-        // Swift
-        if (existsSync(join(cwd, "Package.swift")) && hasCommand("swift")) {
-          console.log("  → Swift: building...")
-          const { success, output } = runCommand("swift build 2>&1", cwd)
-          results.push({ language: "Swift", success, output: success ? undefined : output })
-          console.log(success ? "    ✅ Swift build succeeded" : "    ❌ Swift build failed")
-        }
-
-        return results
-      }
-
-      const FILE_MODIFYING_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "edit_file", "write_file"])
-
-      export const BuildValidatorPlugin = async (_input: any) => {
-        return {
-          "tool.complete": async (incoming: any, output: any) => {
-            if (!FILE_MODIFYING_TOOLS.has(incoming.tool.name)) return
-
-            const workspace = incoming.workspace || process.cwd()
-            console.log("🔨 Validating build...")
-
-            const results = runBuildCheck(workspace)
-            if (results.length === 0) {
-              console.log("ℹ️  No recognized build system found")
-              return
-            }
-
-            const failures = results.filter(r => !r.success)
-            if (failures.length > 0) {
-              console.log("❌ Build validation failed")
-              const errorDetails = failures.map(f => `''${f.language}:\n''${f.output || "Unknown error"}`).join("\n\n")
-              console.warn(`Build errors:\n''${errorDetails}`)
-              // Optionally block: output.blocked = true
-              output.message = `Build validation failed:\n\n''${errorDetails}`
-            } else {
-              console.log("✅ Build validation passed")
-            }
-          }
-        }
-      }
-
-      export default BuildValidatorPlugin
-    '';
-  };
-
-  # Dangerous command blocker - prevents destructive operations
-  dangerousCommandBlockerPlugin = writeTextFile {
-    name = "dangerous-command-blocker.ts";
-    text = ''
-      /**
-       * Dangerous command blocker plugin for OpenCode
-       * Prevents destructive operations
-       */
-
-      // Dangerous patterns that should be blocked
-      const DANGEROUS_PATTERNS: Array<{ pattern: RegExp | string; reason: string }> = [
-        // Destructive file operations
-        { pattern: "rm -rf /", reason: "Attempting to delete root filesystem" },
-        { pattern: "rm -rf /*", reason: "Attempting to delete root filesystem" },
-        { pattern: "rm -rf ~", reason: "Attempting to delete home directory" },
-        { pattern: "rm -rf $HOME", reason: "Attempting to delete home directory" },
-        { pattern: "rm -rf .", reason: "Attempting to delete current directory" },
-        { pattern: "> /dev/sda", reason: "Attempting to overwrite disk" },
-        { pattern: /dd if=\/dev\/zero of=\/dev/, reason: "Attempting to wipe disk" },
-        { pattern: "mkfs", reason: "Attempting to format filesystem" },
-
-        // Git dangerous operations
-        { pattern: "git push --force origin main", reason: "Force pushing to main branch" },
-        { pattern: "git push --force origin master", reason: "Force pushing to master branch" },
-        { pattern: "git push -f origin main", reason: "Force pushing to main branch" },
-        { pattern: "git push -f origin master", reason: "Force pushing to master branch" },
-        { pattern: "git reset --hard origin", reason: "Hard reset can lose uncommitted changes" },
-        { pattern: "git clean -fdx", reason: "Cleaning all untracked files including ignored" },
-
-        // System destruction
-        { pattern: "chmod -R 777 /", reason: "Setting dangerous permissions on root" },
-        { pattern: ":(){:|:&};:", reason: "Fork bomb detected" },
-        { pattern: "mv /* /dev/null", reason: "Moving everything to null" },
-
-        // Network dangers - curl/wget piped to shell
-        { pattern: /(curl|wget)\s+[^\|]+\|\s*(bash|sh|zsh)/, reason: "Piping download directly to shell" },
-
-        // Eval with variables
-        { pattern: /eval\s+\$/, reason: "Eval with variable expansion is dangerous" },
-
-        // Environment destruction
-        { pattern: "unset PATH", reason: "Unsetting PATH" },
-        { pattern: /export PATH=["']?["']?$/, reason: "Clearing PATH" },
-
-        // Container escapes
-        { pattern: "--privileged", reason: "Privileged container flag" },
-        { pattern: "--cap-add=ALL", reason: "Adding all capabilities" },
-        { pattern: "-v /:/", reason: "Mounting root filesystem" },
-      ]
-
-      // Warning patterns (logged but not blocked)
-      const WARNING_PATTERNS: Array<{ pattern: RegExp | string; reason: string }> = [
-        { pattern: "rm -rf", reason: "Recursive force delete - verify target path" },
-        { pattern: "git push --force", reason: "Force push - verify branch name" },
-        { pattern: "git rebase", reason: "Rebasing can rewrite history" },
-        { pattern: "chmod -R", reason: "Recursive permission change" },
-        { pattern: "sudo", reason: "Elevated privileges" },
-        { pattern: "docker run", reason: "Running container - verify image source" },
-      ]
-
-      function matchesPattern(command: string, pattern: RegExp | string): boolean {
-        if (typeof pattern === "string") {
-          return command.includes(pattern)
-        }
-        return pattern.test(command)
-      }
-
-      export const DangerousCommandBlockerPlugin = async (_input: any) => {
-        return {
-          "tool.execute.before": async (incoming: any, output: any) => {
-            // Only intercept Bash commands
-            if (incoming.tool.name !== "Bash") return
-
-            const command = incoming.tool.input?.command || ""
-            if (!command) return
-
-            console.log("🛡️ Checking command safety...")
-
-            // Check for dangerous patterns
-            for (const { pattern, reason } of DANGEROUS_PATTERNS) {
-              if (matchesPattern(command, pattern)) {
-                console.log(`❌ BLOCKED: ''${reason}`)
-                console.log(`   Command: ''${command}`)
-
-                output.blocked = true
-                output.message = `🛑 COMMAND BLOCKED FOR SAFETY\n\nReason: ''${reason}\nCommand: ''${command}\n\nThis command could cause irreversible damage.`
-                return
-              }
-            }
-
-            // Check for warning patterns (log but don't block)
-            for (const { pattern, reason } of WARNING_PATTERNS) {
-              if (matchesPattern(command, pattern)) {
-                console.log(`⚠️  WARNING: ''${reason}`)
-              }
-            }
-
-            console.log("✅ Command safety check passed")
-          }
-        }
-      }
-
-      export default DangerousCommandBlockerPlugin
-    '';
-  };
-
-  # Pre-commit lint - runs formatters and linters before git commits
-  preCommitLintPlugin = writeTextFile {
-    name = "pre-commit-lint.ts";
-    text = ''
-      /**
-       * Pre-commit lint plugin for OpenCode
-       * Runs formatters and linters before git commits
-       */
-      import { execSync } from "child_process"
-      import { existsSync } from "fs"
-      import { join } from "path"
-
-      function runCommand(cmd: string, cwd: string): { success: boolean; output: string } {
-        try {
-          const output = execSync(cmd, { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] })
-          return { success: true, output }
-        } catch (err: any) {
-          return { success: false, output: err.stderr || err.stdout || err.message }
-        }
-      }
-
-      function hasCommand(cmd: string): boolean {
-        try {
-          execSync(`command -v ''${cmd}`, { stdio: ["pipe", "pipe", "pipe"] })
-          return true
-        } catch {
-          return false
-        }
-      }
-
-      export const PreCommitLintPlugin = async (_input: any) => {
-        return {
-          "tool.execute.before": async (incoming: any, output: any) => {
-            // Only intercept Bash commands
-            if (incoming.tool.name !== "Bash") return
-
-            const command = incoming.tool.input?.command || ""
-
-            // Only run on git commit commands
-            if (!command.includes("git commit")) return
-
-            const cwd = incoming.workspace || process.cwd()
-            console.log("🔍 Running pre-commit lint checks...")
-
-            const results: string[] = []
-            let hasErrors = false
-
-            // Go
-            if (existsSync(join(cwd, "go.mod"))) {
-              console.log("  → Go: gofmt check")
-              if (hasCommand("gofmt")) {
-                const { output: unformatted } = runCommand("gofmt -l .", cwd)
-                if (unformatted.trim()) {
-                  results.push(`Go: unformatted files:\n''${unformatted}`)
-                  hasErrors = true
-                }
-              }
-              if (hasCommand("golangci-lint")) {
-                const { success, output: lintOutput } = runCommand("golangci-lint run --fast ./...", cwd)
-                if (!success) {
-                  results.push(`Go lint errors:\n''${lintOutput}`)
-                  hasErrors = true
-                }
-              }
-            }
-
-            // Rust
-            if (existsSync(join(cwd, "Cargo.toml")) && hasCommand("cargo")) {
-              console.log("  → Rust: cargo fmt & clippy")
-              const { success: fmtOk } = runCommand("cargo fmt --check", cwd)
-              if (!fmtOk) {
-                results.push("Rust: code not formatted (run cargo fmt)")
-                hasErrors = true
-              }
-              const { success: clippyOk, output: clippyOutput } = runCommand("cargo clippy --quiet 2>&1", cwd)
-              if (!clippyOk) {
-                results.push(`Rust clippy warnings:\n''${clippyOutput}`)
-                hasErrors = true
-              }
-            }
-
-            // TypeScript/JavaScript
-            if (existsSync(join(cwd, "package.json"))) {
-              console.log("  → JS/TS: eslint & prettier")
-              const eslintPath = existsSync(join(cwd, "node_modules/.bin/eslint")) ? "npx eslint" : hasCommand("eslint") ? "eslint" : null
-              const prettierPath = existsSync(join(cwd, "node_modules/.bin/prettier")) ? "npx prettier" : hasCommand("prettier") ? "prettier" : null
-
-              if (eslintPath) {
-                const { success, output: eslintOutput } = runCommand(`''${eslintPath} . --max-warnings=0`, cwd)
-                if (!success) {
-                  results.push(`ESLint errors:\n''${eslintOutput}`)
-                  hasErrors = true
-                }
-              }
-
-              if (prettierPath) {
-                const { success } = runCommand(`''${prettierPath} --check .`, cwd)
-                if (!success) {
-                  results.push("Prettier: code not formatted")
-                  hasErrors = true
-                }
-              }
-            }
-
-            // Python
-            if ((existsSync(join(cwd, "pyproject.toml")) || existsSync(join(cwd, "setup.py"))) && hasCommand("ruff")) {
-              console.log("  → Python: ruff")
-              const { success: checkOk, output: checkOutput } = runCommand("ruff check .", cwd)
-              const { success: fmtOk } = runCommand("ruff format --check .", cwd)
-              if (!checkOk || !fmtOk) {
-                results.push(`Ruff errors:\n''${checkOutput}`)
-                hasErrors = true
-              }
-            }
-
-            if (hasErrors) {
-              console.log("❌ Lint checks failed")
-              results.forEach(r => console.log(r))
-              output.blocked = true
-              output.message = `Pre-commit lint failed:\n''${results.join("\n\n")}`
-            } else {
-              console.log("✅ Lint checks passed")
-            }
-          }
-        }
-      }
-
-      export default PreCommitLintPlugin
-    '';
-  };
-
-  # Secret scanner - blocks commits containing secrets/credentials
-  secretScannerPlugin = writeTextFile {
-    name = "secret-scanner.ts";
-    text = ''
-      /**
-       * Secret scanner plugin for OpenCode
-       * Blocks commits containing secrets/credentials
-       */
-      import { execSync } from "child_process"
-      import { readFileSync, existsSync } from "fs"
-      import { join } from "path"
-
-      // Secret patterns to detect
-      const SECRET_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
-        // AWS
-        { name: "AWS Access Key", pattern: /AKIA[0-9A-Z]{16}/ },
-        { name: "AWS Secret Key", pattern: /aws_secret_access_key\s*=\s*[A-Za-z0-9/+=]{40}/ },
-
-        // GitHub
-        { name: "GitHub PAT", pattern: /ghp_[a-zA-Z0-9]{36}/ },
-        { name: "GitHub OAuth", pattern: /gho_[a-zA-Z0-9]{36}/ },
-        { name: "GitHub App Token", pattern: /ghu_[a-zA-Z0-9]{36}/ },
-        { name: "GitHub Server Token", pattern: /ghs_[a-zA-Z0-9]{36}/ },
-        { name: "GitHub Refresh Token", pattern: /ghr_[a-zA-Z0-9]{36}/ },
-        { name: "GitHub Fine-grained PAT", pattern: /github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}/ },
-
-        // GitLab
-        { name: "GitLab PAT", pattern: /glpat-[a-zA-Z0-9\-]{20}/ },
-
-        // Google
-        { name: "Google API Key", pattern: /AIza[0-9A-Za-z\-_]{35}/ },
-
-        // Slack
-        { name: "Slack Token", pattern: /xox[baprs]-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*/ },
-
-        // Stripe
-        { name: "Stripe Live Key", pattern: /sk_live_[0-9a-zA-Z]{24}/ },
-        { name: "Stripe Test Key", pattern: /sk_test_[0-9a-zA-Z]{24}/ },
-
-        // Private keys
-        { name: "Private Key", pattern: /-----BEGIN (RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----/ },
-
-        // AI APIs
-        { name: "Anthropic API Key", pattern: /sk-ant-[a-zA-Z0-9\-]{40,}/ },
-        { name: "OpenAI API Key", pattern: /sk-[a-zA-Z0-9]{48}/ },
-
-        // Generic
-        { name: "Generic API Key", pattern: /api[_-]?key\s*[=:]\s*["'][a-zA-Z0-9]{20,}["']/ },
-        { name: "Generic Secret", pattern: /secret\s*[=:]\s*["'][a-zA-Z0-9]{20,}["']/ },
-        { name: "Generic Token", pattern: /token\s*[=:]\s*["'][a-zA-Z0-9]{20,}["']/ },
-
-        // Database URLs
-        { name: "Database URL with password", pattern: /(mysql|postgres|postgresql|mongodb|redis):\/\/[^:]+:[^@]+@/ },
-
-        // JWT
-        { name: "JWT Token", pattern: /eyJ[a-zA-Z0-9]{10,}\.eyJ[a-zA-Z0-9]{10,}\.[a-zA-Z0-9_-]{10,}/ },
-
-        // SendGrid
-        { name: "SendGrid API Key", pattern: /SG\.[a-zA-Z0-9]{22}\.[a-zA-Z0-9]{43}/ },
-
-        // Twilio
-        { name: "Twilio API Key", pattern: /SK[a-f0-9]{32}/ },
-      ]
-
-      // Files to ignore
-      const IGNORE_PATTERNS = [
-        /\.lock$/,
-        /package-lock\.json$/,
-        /yarn\.lock$/,
-        /go\.sum$/,
-        /\.min\.js$/,
-        /\.min\.css$/,
-        /node_modules\//,
-        /vendor\//,
-        /\.git\//,
-      ]
-
-      function shouldIgnoreFile(filepath: string): boolean {
-        return IGNORE_PATTERNS.some(pattern => pattern.test(filepath))
-      }
-
-      function getStagedFiles(cwd: string): string[] {
-        try {
-          const output = execSync("git diff --cached --name-only --diff-filter=ACM", {
-            cwd,
-            encoding: "utf-8"
-          })
-          return output.trim().split("\n").filter(f => f.length > 0)
-        } catch {
-          return []
-        }
-      }
-
-      export const SecretScannerPlugin = async (_input: any) => {
-        return {
-          "tool.execute.before": async (incoming: any, output: any) => {
-            // Only intercept Bash commands
-            if (incoming.tool.name !== "Bash") return
-
-            const command = incoming.tool.input?.command || ""
-
-            // Only run on git commands that could commit/push
-            if (!command.includes("git commit") && !command.includes("git push") && !command.includes("git add")) {
-              return
-            }
-
-            const cwd = incoming.workspace || process.cwd()
-            console.log("🔐 Scanning for secrets...")
-
-            const stagedFiles = getStagedFiles(cwd)
-            const findings: Array<{ file: string; secret: string; line: number }> = []
-
-            for (const file of stagedFiles) {
-              if (shouldIgnoreFile(file)) continue
-
-              const filepath = join(cwd, file)
-              if (!existsSync(filepath)) continue
-
-              try {
-                const content = readFileSync(filepath, "utf-8")
-                const lines = content.split("\n")
-
-                for (let i = 0; i < lines.length; i++) {
-                  const line = lines[i]
-                  for (const { name, pattern } of SECRET_PATTERNS) {
-                    if (pattern.test(line)) {
-                      findings.push({ file, secret: name, line: i + 1 })
-                    }
-                  }
-                }
-              } catch {
-                // Ignore read errors
-              }
-            }
-
-            if (findings.length > 0) {
-              console.log("❌ SECRET SCAN FAILED")
-              const message = findings.map(f => `  • ''${f.file}:''${f.line} - ''${f.secret}`).join("\n")
-              console.log(message)
-
-              output.blocked = true
-              output.message = `Secrets detected in staged files:\n''${message}\n\nPlease remove secrets before committing.`
-            } else {
-              console.log(`✅ Secret scan passed (''${stagedFiles.length} files checked)`)
-            }
-          }
-        }
-      }
-
-      export default SecretScannerPlugin
-    '';
-  };
-
-  # Static check - runs language-specific static checks after file edits
-  staticCheckPlugin = writeTextFile {
-    name = "static-check.ts";
-    text = ''
-      /**
-       * OpenCode plugin: Static analysis / compile check
-       * Runs language-specific static checks after file edits.
-       *
-       * Installation:
-       *   Add to opencode.json:
-       *     { "plugin": ["file://.config/opencode/plugins/static-check.ts"] }
-       */
-
-      import { execSync } from "child_process"
-      import { existsSync } from "fs"
-      import { join } from "path"
-
-      // Inline types for OpenCode plugin system
-      type ToolCompleteHook = (
-        incoming: {
-          sessionID: string
-          tool: { name: string; input: Record<string, any>; output?: string }
-          workspace: string
-        },
-        output: { blocked?: boolean; message?: string }
-      ) => Promise<void>
-
-      type PluginHooks = {
-        "tool.complete"?: ToolCompleteHook
-      }
-
-      type PluginFn = (input: any) => Promise<PluginHooks>
-
-      interface CheckResult {
-        ran: boolean
-        passed: boolean
-        output: string
-      }
-
-      const COLORS = {
-        red: "\x1b[31m",
-        green: "\x1b[32m",
-        yellow: "\x1b[33m",
-        reset: "\x1b[0m",
-      }
-
-      function log(level: "info" | "warn" | "error", msg: string): void {
-        const color = level === "info" ? COLORS.green : level === "warn" ? COLORS.yellow : COLORS.red
-        console.log(`''${color}[static-check]''${COLORS.reset} ''${msg}`)
-      }
-
-      function runCommand(cmd: string, cwd: string): { success: boolean; output: string } {
-        try {
-          const output = execSync(cmd, { cwd, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] })
-          return { success: true, output }
-        } catch (err: any) {
-          return { success: false, output: err.stderr || err.stdout || err.message }
-        }
-      }
-
-      function hasCommand(cmd: string): boolean {
-        try {
-          execSync(`command -v ''${cmd}`, { stdio: ["pipe", "pipe", "pipe"] })
-          return true
-        } catch {
-          return false
-        }
-      }
-
-      function runStaticChecks(workspace: string): CheckResult {
-        const results: string[] = []
-        let checkRan = false
-        let allPassed = true
-
-        // Go
-        if (existsSync(join(workspace, "go.mod"))) {
-          if (hasCommand("go")) {
-            log("info", "Running Go static check...")
-            const { success, output } = runCommand("go vet ./...", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`go vet failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Rust
-        if (existsSync(join(workspace, "Cargo.toml"))) {
-          if (hasCommand("cargo")) {
-            log("info", "Running Rust compile check...")
-            const { success, output } = runCommand("cargo check 2>&1", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`cargo check failed:\n''${output}`)
-            }
-          }
-        }
-
-        // TypeScript
-        if (existsSync(join(workspace, "tsconfig.json"))) {
-          const hasTsc = existsSync(join(workspace, "node_modules/.bin/tsc")) || hasCommand("tsc")
-          if (hasTsc) {
-            log("info", "Running TypeScript compile check...")
-            const cmd = existsSync(join(workspace, "node_modules/.bin/tsc"))
-              ? "npx tsc --noEmit"
-              : "tsc --noEmit"
-            const { success, output } = runCommand(cmd, workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`tsc failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Python
-        if (
-          existsSync(join(workspace, "pyproject.toml")) ||
-          existsSync(join(workspace, "setup.py"))
-        ) {
-          if (hasCommand("ruff")) {
-            log("info", "Running Python ruff check...")
-            const { success, output } = runCommand("ruff check .", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`ruff check failed:\n''${output}`)
-            }
-          } else if (hasCommand("mypy")) {
-            log("info", "Running Python mypy check...")
-            const { success, output } = runCommand("mypy .", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`mypy failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Java - Maven
-        if (existsSync(join(workspace, "pom.xml"))) {
-          if (hasCommand("mvn")) {
-            log("info", "Running Maven compile check...")
-            const { success, output } = runCommand("mvn compile -q", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`mvn compile failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Java/Kotlin - Gradle
-        if (existsSync(join(workspace, "build.gradle")) || existsSync(join(workspace, "build.gradle.kts"))) {
-          if (hasCommand("gradle")) {
-            log("info", "Running Gradle compile check...")
-            const { success, output } = runCommand("gradle compileJava compileKotlin -q 2>/dev/null || gradle compileJava -q", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`gradle compile failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Zig
-        if (existsSync(join(workspace, "build.zig"))) {
-          if (hasCommand("zig")) {
-            log("info", "Running Zig check...")
-            const { success, output } = runCommand("zig build --summary none", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`zig build failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Elixir
-        if (existsSync(join(workspace, "mix.exs"))) {
-          if (hasCommand("mix")) {
-            log("info", "Running Elixir compile check...")
-            const { success, output } = runCommand("mix compile --warnings-as-errors", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`mix compile failed:\n''${output}`)
-            }
-          }
-        }
-
-        // Swift
-        if (existsSync(join(workspace, "Package.swift"))) {
-          if (hasCommand("swift")) {
-            log("info", "Running Swift build check...")
-            const { success, output } = runCommand("swift build", workspace)
-            checkRan = true
-            if (!success) {
-              allPassed = false
-              results.push(`swift build failed:\n''${output}`)
-            }
-          }
-        }
-
-        if (checkRan && allPassed) {
-          log("info", "Static checks passed ✓")
-        } else if (!checkRan) {
-          log("warn", "No supported language detected or tools not available")
-        }
-
-        return {
-          ran: checkRan,
-          passed: allPassed,
-          output: results.join("\n\n"),
-        }
-      }
-
-      // Tools that modify files and should trigger static checks
-      const FILE_MODIFYING_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "edit_file", "write_file"])
-
-      export const StaticCheckPlugin: PluginFn = async (_input) => {
-        return {
-          "tool.complete": async (incoming, output) => {
-            // Only run after file-modifying tools
-            if (!FILE_MODIFYING_TOOLS.has(incoming.tool.name)) {
-              return
-            }
-
-            const workspace = incoming.workspace || process.cwd()
-            const result = runStaticChecks(workspace)
-
-            if (result.ran && !result.passed) {
-              log("error", "Static checks failed!")
-              // Optionally block or just warn
-              // output.blocked = true
-              output.message = `Static check errors:\n''${result.output}`
-            }
-          },
-        }
-      }
-
-      export default StaticCheckPlugin
-    '';
-  };
 
   # Shared test-runner script invoked by both the OpenCode plugin and the
   # Claude Code PostToolUse hook. Detects the language of the changed file,
@@ -1176,62 +397,51 @@ let
     '';
   };
 
-  # OpenCode plugin: same behavior as the Claude Code hook, but wired into
-  # the OpenCode plugin runtime via `tool.execute.after`. Note: existing
-  # plugins in this file use the legacy `tool.complete` event, which does
-  # not exist in the current OpenCode plugin API
-  # (see /workspace/personal/opencode/packages/opencode/src/session/prompt.ts:430)
-  # — those plugins load but never fire. This plugin uses the correct hook.
-  testRunnerPlugin = writeTextFile {
-    name = "test-runner.ts";
+  # Claude Code Stop hook: run tests for source files changed since the last commit.
+  # Fires at the end of each full agent turn (background_tasks guard prevents
+  # false runs when the turn merely paused waiting on background work).
+  claudeCodeStopTestRunnerHook = writeTextFile {
+    name = "stop-test-runner.sh";
+    executable = true;
     text = ''
-      /**
-       * OpenCode plugin: post-edit test runner.
-       * Delegates to /home/agent/.local/bin/shared-test-runner.ts so the same
-       * detection / infra-filter logic is shared with the Claude Code hook.
-       */
-      import { execSync } from "child_process"
+      #!/usr/bin/env bash
+      # Stop hook: run tests for source files changed since the last commit.
+      set -u
+      hook_input="$(cat)"
 
-      const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
+      # Skip when the agent is still waiting on background work.
+      _bg=0
+      if command -v jq >/dev/null 2>&1; then
+          _bg=$(printf '%s' "$hook_input" | jq '(.background_tasks // []) | length' 2>/dev/null)
+      fi
+      [ -n "$_bg" ] || _bg=0
+      case "$_bg" in *[!0-9]*) _bg=0 ;; esac
+      [ "$_bg" -gt 0 ] && exit 0
 
-      function pickFile(args: any): string | undefined {
-        if (!args) return undefined
-        if (typeof args.file_path === "string") return args.file_path
-        if (typeof args.filePath === "string") return args.filePath
-        if (typeof args.notebook_path === "string") return args.notebook_path
-        if (Array.isArray(args.edits) && args.edits[0]?.file_path) return args.edits[0].file_path
-        return undefined
-      }
+      # Locate bun (hook env may not have the full PATH from .bashrc).
+      BUN_BIN=""
+      for _bp in "$HOME/.bun/bin/bun" "/home/agent/.bun/bin/bun"; do
+          [ -x "$_bp" ] && BUN_BIN="$_bp" && break
+      done
+      [ -z "$BUN_BIN" ] && command -v bun >/dev/null 2>&1 && BUN_BIN="$(command -v bun)"
+      [ -z "$BUN_BIN" ] && exit 0
 
-      export const TestRunnerPlugin = async (_input: any) => {
-        return {
-          "tool.execute.after": async (
-            input: { tool: string; sessionID: string; callID: string; args: any },
-            output: { title: string; output: string; metadata: any },
-          ) => {
-            if (!FILE_TOOLS.has(input.tool)) return
-            const file = pickFile(input.args)
-            if (!file) return
+      # Find the git repo root from the hook payload cwd or fall back to PWD.
+      cwd="$(printf '%s' "$hook_input" | jq -r '.cwd // empty' 2>/dev/null)"
+      [ -z "$cwd" ] && cwd="$PWD"
+      cd "$cwd" 2>/dev/null || exit 0
+      git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+      repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 
-            try {
-              execSync(`bun /home/agent/.local/bin/shared-test-runner.ts ''${JSON.stringify(file)}`, {
-                encoding: "utf-8",
-                stdio: ["pipe", "pipe", "pipe"],
-              })
-              // Exit 0: pass / infra-only / no test runner — say nothing.
-            } catch (e: any) {
-              // Exit 2 from runner means a real failure; stderr holds the
-              // <test_failure> block. Append it so Claude sees it next turn.
-              const stderr = e.stderr?.toString() ?? ""
-              if (e.status === 2 && stderr.trim()) {
-                output.output = `''${output.output}\n\n''${stderr.trim()}`
-              }
-            }
-          },
-        }
-      }
+      # Collect unique changed files (staged + unstaged) relative to HEAD.
+      changed="$(git diff --name-only HEAD 2>/dev/null)"
+      [ -z "$changed" ] && exit 0
 
-      export default TestRunnerPlugin
+      while IFS= read -r rel; do
+          [ -z "$rel" ] && continue
+          "$BUN_BIN" /home/agent/.local/bin/shared-test-runner.ts "''${repo_root}/''${rel}" 2>&1 || true
+      done < <(printf '%s\n' "$changed" | sort -u)
+      exit 0
     '';
   };
 
@@ -1377,6 +587,62 @@ let
     '';
   };
 
+  # OpenCode plugin: post-edit test runner. Uses `tool.execute.after` to
+  # delegate to the shared test-runner script so the same detection /
+  # infra-filter logic is shared with the Claude Code PostToolUse hook.
+  testRunnerPlugin = writeTextFile {
+    name = "test-runner.ts";
+    text = ''
+      /**
+       * OpenCode plugin: post-edit test runner.
+       * Delegates to /home/agent/.local/bin/shared-test-runner.ts so the same
+       * detection / infra-filter logic is shared with the Claude Code hook.
+       */
+      import { execSync } from "child_process"
+
+      const FILE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"])
+
+      function pickFile(args: any): string | undefined {
+        if (!args) return undefined
+        if (typeof args.file_path === "string") return args.file_path
+        if (typeof args.filePath === "string") return args.filePath
+        if (typeof args.notebook_path === "string") return args.notebook_path
+        if (Array.isArray(args.edits) && args.edits[0]?.file_path) return args.edits[0].file_path
+        return undefined
+      }
+
+      export const TestRunnerPlugin = async (_input: any) => {
+        return {
+          "tool.execute.after": async (
+            input: { tool: string; sessionID: string; callID: string; args: any },
+            output: { title: string; output: string; metadata: any },
+          ) => {
+            if (!FILE_TOOLS.has(input.tool)) return
+            const file = pickFile(input.args)
+            if (!file) return
+
+            try {
+              execSync(`bun /home/agent/.local/bin/shared-test-runner.ts ''${JSON.stringify(file)}`, {
+                encoding: "utf-8",
+                stdio: ["pipe", "pipe", "pipe"],
+              })
+              // Exit 0: pass / infra-only / no test runner — say nothing.
+            } catch (e: any) {
+              // Exit 2 from runner means a real failure; stderr holds the
+              // <test_failure> block. Append it so Claude sees it next turn.
+              const stderr = e.stderr?.toString() ?? ""
+              if (e.status === 2 && stderr.trim()) {
+                output.output = `''${output.output}\n\n''${stderr.trim()}`
+              }
+            }
+          },
+        }
+      }
+
+      export default TestRunnerPlugin
+    '';
+  };
+
   # All packages to include in the image (minimal set for AI coding agents).
   #
   # The list is split into three tiers so the closure can be reasoned about:
@@ -1454,9 +720,8 @@ let
     gh
     # Secret scanning (used by the pre-commit hook + OpenCode plugin)
     gitleaks
-    # Cloud CLIs. Credentials are NOT baked into the image — they are
-    # bind-mounted read-only at runtime from sops-decrypted files (see the
-    # aws/gcp/kube credential options in modules/{services,darwin}/agentbox.nix).
+  ]
+  ++ lib.optionals withCloudTools [
     awscli2
     kubectl
     kubernetes-helm
@@ -1851,6 +1116,7 @@ let
     '';
   };
 
+
   # Default tmux config for the container skeleton.
   # Enables clipboard and terminal-protocol passthrough so that:
   #   - OSC 52 clipboard sequences reach the outer macOS terminal (set-clipboard on)
@@ -1931,13 +1197,9 @@ let
     cp ${claudeSettingsFile} $out/.claude/settings.json
     chmod 700 $out/.ssh
 
-    # Copy embedded single-file plugins
-    cp ${buildValidatorPlugin} $out/.config/opencode/plugins/build-validator.ts
-    cp ${dangerousCommandBlockerPlugin} $out/.config/opencode/plugins/dangerous-command-blocker.ts
-    cp ${preCommitLintPlugin} $out/.config/opencode/plugins/pre-commit-lint.ts
-    cp ${secretScannerPlugin} $out/.config/opencode/plugins/secret-scanner.ts
-    cp ${staticCheckPlugin} $out/.config/opencode/plugins/static-check.ts
+    # Working OpenCode plugins (tool.execute.before / tool.execute.after).
     cp ${testRunnerPlugin} $out/.config/opencode/plugins/test-runner.ts
+    cp ${gitleaksPrecommitPlugin} $out/.config/opencode/plugins/gitleaks-precommit.ts
 
     # Shared test-runner script (always invoked via `bun ...`, so no exec bit).
     cp ${sharedTestRunnerScript} $out/.local/bin/shared-test-runner.ts
@@ -1946,13 +1208,16 @@ let
     cp ${claudeCodeTestRunnerHook} $out/.claude/hooks/test-runner.sh
     chmod +x $out/.claude/hooks/test-runner.sh
 
+    # Claude Code Stop hook: run tests for files changed since the last commit.
+    cp ${claudeCodeStopTestRunnerHook} $out/.claude/hooks/stop-test-runner.sh
+    chmod +x $out/.claude/hooks/stop-test-runner.sh
+
     # Gitleaks pre-commit guard: shared bash script + Claude Code hook +
     # OpenCode plugin all delegate to the same dd-gitleaks-precommit.sh.
     cp ${ddGitleaksScript} $out/.local/bin/dd-gitleaks-precommit.sh
     chmod +x $out/.local/bin/dd-gitleaks-precommit.sh
     cp ${claudeCodeGitleaksHook} $out/.claude/hooks/gitleaks-precommit.sh
     chmod +x $out/.claude/hooks/gitleaks-precommit.sh
-    cp ${gitleaksPrecommitPlugin} $out/.config/opencode/plugins/gitleaks-precommit.ts
 
     # Skill commands from the external claude-skills repo (Claude Code + OpenCode)
     ${lib.optionalString (claude-skills-src != null) ''

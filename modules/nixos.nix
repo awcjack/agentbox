@@ -175,9 +175,12 @@ in
 
     image = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.agentboxImage;
-      defaultText = lib.literalExpression "pkgs.agentboxImage";
-      description = "The Nix-built agentbox Docker image.";
+      defaultText = lib.literalExpression ''
+        pkgs.agentboxImage
+        # or pkgs.agentboxImage.override { withCloudTools = true; }
+        # when settings.enableCloudTools = true
+      '';
+      description = "The Nix-built agentbox Docker image. Defaults to the base image, or the cloud-tools variant when settings.enableCloudTools = true. Override to supply a fully custom image.";
     };
 
     user = lib.mkOption {
@@ -234,6 +237,16 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Default image: base image, or the cloud-tools variant when enableCloudTools
+    # is set. lib.mkDefault lets an explicit `services.agentbox.image = …`
+    # assignment override this without conflict.
+    services.agentbox.image = lib.mkDefault (
+      if cfg.settings.enableCloudTools then
+        pkgs.agentboxImage.override { withCloudTools = true; }
+      else
+        pkgs.agentboxImage
+    );
+
     # Enable container backend
     virtualisation.docker = lib.mkIf (cfg.backend == "docker") {
       enable = lib.mkDefault true;
