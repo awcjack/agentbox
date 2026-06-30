@@ -767,6 +767,16 @@ let
     HOME_DIR="/home/agent"
     SKEL_DIR="/etc/skel.agent"
 
+    # Claude Code execs ~/.claude/hooks/*.sh directly (from managed-settings.json
+    # and ~/.claude/settings.json), so they must stay executable. The skeleton
+    # copy below uses --no-preserve=mode to keep home files agent-writable, which
+    # strips the +x bit baked into the skel scripts. Re-assert it on every start
+    # — placed before the fast-path so homes initialized prior to this fix are
+    # repaired too. Cheap idempotent glob; safe to run unconditionally.
+    if [ -d "$HOME_DIR/.claude/hooks" ]; then
+      chmod +x "$HOME_DIR"/.claude/hooks/*.sh 2>/dev/null || true
+    fi
+
     # Fast-path: check if already initialized with same UID:GID
     MARKER_FILE="$HOME_DIR/.container_initialized"
     if [ -f "$MARKER_FILE" ]; then
@@ -780,6 +790,9 @@ let
     if [ ! -f "$HOME_DIR/.bashrc" ] && [ -d "$SKEL_DIR" ]; then
       echo "Initializing home directory from skeleton..."
       cp -rT --no-preserve=mode "$SKEL_DIR" "$HOME_DIR"
+      # Restore +x on hook scripts stripped by --no-preserve=mode (see above), so
+      # the very first session after init can run them.
+      chmod +x "$HOME_DIR"/.claude/hooks/*.sh 2>/dev/null || true
     fi
 
     # Adjust UID/GID if different from container defaults
