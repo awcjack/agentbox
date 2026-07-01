@@ -449,37 +449,37 @@ in
                         # Without this, it copies skeleton over mounted .claude directory, wiping credentials
                         if [ ! -f "${cfg.dataDir}/home/.bashrc" ]; then
                           cat > "${cfg.dataDir}/home/.bashrc" <<'BASHRC'
-                case $- in *i*) ;; *) return;; esac
-                HISTCONTROL=ignoreboth
-                shopt -s histappend
-                HISTSIZE=1000
-                HISTFILESIZE=2000
-                shopt -s checkwinsize
-                [ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
-                PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
-                if [ -x /usr/bin/dircolors ]; then
-                    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
-                    alias ls='ls --color=auto'
-                    alias grep='grep --color=auto'
-                fi
-                alias ll='ls -alF'
-                alias la='ls -A'
-                alias l='ls -CF'
-                # Homebrew (go, node, rust, typescript, etc.)
-                [ -d /home/linuxbrew/.linuxbrew ] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
-                # Go workspace
-                [ -d "$HOME/go/bin" ] && export PATH="$HOME/go/bin:$PATH"
-                # Rust/Cargo
-                [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
-                # UV/Python
-                [ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
-                [ -f "$HOME/.local/bin/env" ] && source "$HOME/.local/bin/env"
-                # Bun
-                [ -d "$HOME/.bun" ] && export BUN_INSTALL="$HOME/.bun" && export PATH="$BUN_INSTALL/bin:$PATH"
-                if [ -d "$HOME/.ssh" ] && [ -z "$SSH_AUTH_SOCK" ]; then
-                    eval "$(ssh-agent -s)" >/dev/null
-                fi
-                BASHRC
+        case $- in *i*) ;; *) return;; esac
+        HISTCONTROL=ignoreboth
+        shopt -s histappend
+        HISTSIZE=1000
+        HISTFILESIZE=2000
+        shopt -s checkwinsize
+        [ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+        PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+        if [ -x /usr/bin/dircolors ]; then
+            test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+            alias ls='ls --color=auto'
+            alias grep='grep --color=auto'
+        fi
+        alias ll='ls -alF'
+        alias la='ls -A'
+        alias l='ls -CF'
+        # Homebrew (go, node, rust, typescript, etc.)
+        [ -d /home/linuxbrew/.linuxbrew ] && eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+        # Go workspace
+        [ -d "$HOME/go/bin" ] && export PATH="$HOME/go/bin:$PATH"
+        # Rust/Cargo
+        [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+        # UV/Python
+        [ -d "$HOME/.local/bin" ] && export PATH="$HOME/.local/bin:$PATH"
+        [ -f "$HOME/.local/bin/env" ] && source "$HOME/.local/bin/env"
+        # Bun
+        [ -d "$HOME/.bun" ] && export BUN_INSTALL="$HOME/.bun" && export PATH="$BUN_INSTALL/bin:$PATH"
+        if [ -d "$HOME/.ssh" ] && [ -z "$SSH_AUTH_SOCK" ]; then
+            eval "$(ssh-agent -s)" >/dev/null
+        fi
+        BASHRC
                           chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/home/.bashrc"
                           chmod 644 "${cfg.dataDir}/home/.bashrc"
                         fi
