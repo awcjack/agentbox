@@ -823,6 +823,14 @@ let
     if [ -d "$CONFIG_DIR" ]; then
       for item in .pi .vibe .gemini .copilot .opencode .vimrc .tmux.conf; do
         if [ -e "$CONFIG_DIR/$item" ] && [ ! -L "$HOME_DIR/$item" ]; then
+          # Skip when both paths already resolve to the same file. The NixOS
+          # module bind-mounts the whole home at /config AND some dotfiles
+          # (e.g. .tmux.conf) individually into $HOME_DIR, so the two paths
+          # share one inode; `ln` would then fail with "are the same file"
+          # and abort the entrypoint under `set -e`.
+          if [ "$CONFIG_DIR/$item" -ef "$HOME_DIR/$item" ]; then
+            continue
+          fi
           rm -rf "$HOME_DIR/$item" 2>/dev/null || true
           ln -sf "$CONFIG_DIR/$item" "$HOME_DIR/$item"
         fi
