@@ -933,5 +933,16 @@ in
         RestartSec = "10s";
       };
     };
+
+    # Tie the socket proxy's lifecycle to the main container. The proxy exists
+    # solely to serve agentbox, so an explicit stop/restart of docker-agentbox
+    # should tear it down too rather than leaving it listening on
+    # 127.0.0.1:2375 with no consumer. `PartOf` propagates stop/restart only;
+    # the main unit's `wants`+`after` still start-orders the proxy first, and a
+    # crash-loop auto-restart of agentbox won't needlessly bounce the proxy.
+    systemd.services."${cfg.backend}-agentbox-docker-proxy" =
+      lib.mkIf cfg.settings.dockerProxy.enable {
+        partOf = [ "${cfg.backend}-agentbox.service" ];
+      };
   };
 }
