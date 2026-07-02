@@ -301,7 +301,67 @@ in
 
         permissions = lib.mkOption {
           type = lib.types.attrsOf lib.types.anything;
-          default = {
+          default =
+            let
+              # Files whose contents are secrets (or secret-bearing). Enumerated
+              # once so the read-vector deny matrix below cannot drift out of sync
+              # with the hand-written cat/head/tail/base64 entries. NB: uses
+              # concrete variants (never a blanket .env.*) so templates like
+              # .env.example stay readable.
+              secretFileGlobs = [
+                "**/.env"
+                "**/.env.local"
+                "**/.env**local"
+                "**/.env**dev**"
+                "**/.env**prod**"
+                "**/.env**stag**"
+                "**/.env**test**"
+                "**/values**dev**"
+                "**/values**prod**"
+                "**/values**stag**"
+                "**/values**test**"
+                "**/*secret*.yaml"
+                "**/*secret*.yml"
+                "**/*.pem"
+                "**/*.key"
+                "**/id_rsa*"
+                "**/id_ed25519*"
+                "**/.ssh/**"
+                "**/.aws/**"
+                "**/.config/gcloud/**"
+                "**/.kube/**"
+                "**/.netrc"
+                "**/.npmrc"
+                "**/.git-credentials"
+                "**/credentials.json"
+                "**/service-account*.json"
+                "**/secrets/**"
+              ];
+              # Commands that reveal or relocate a file's contents. The old deny
+              # list only enumerated cat/head/tail/base64, so sed/awk/grep (and
+              # editors/pagers/copy) bypassed it — e.g. `sed -E '...' .env` read a
+              # secret straight through. Generating cmd x glob keeps it exhaustive
+              # and self-maintaining. Deny beats allow, so these are authoritative
+              # even against the blanket Bash(cat *)/Bash(grep *) allows.
+              secretExfilCmds = [
+                # content readers / filters
+                "sed" "awk" "grep" "egrep" "fgrep" "rg" "ag"
+                "nl" "tac" "rev" "cut" "tr" "fold" "expand" "paste" "column" "col"
+                # pagers
+                "less" "more" "most" "pg"
+                # binary / encoded dumps
+                "xxd" "od" "hexdump" "strings" "base32" "uuencode"
+                # editors (open == read)
+                "vi" "vim" "nvim" "nano" "ex" "view" "emacs"
+                # raw copy / relocate vectors (exfil by making a readable copy)
+                "dd" "cp" "mv" "install" "rsync" "ln"
+              ];
+              secretExfilDeny =
+                lib.concatMap
+                  (cmd: map (glob: "Bash(${cmd} ${glob})") secretFileGlobs)
+                  secretExfilCmds;
+            in
+            {
             defaultMode = "auto";
             allow = [
               "Bash(npm *)"
@@ -563,7 +623,8 @@ in
               "Bash(cp **/.kube/**)"
               "Bash(cat **/.git-credentials)"
               "Read(**/.git-credentials)"
-            ];
+            ]
+            ++ secretExfilDeny;
           };
           description = "Permission configuration for Claude Code.";
           # NB: deny extras above are unconditional (applied on both platforms).
