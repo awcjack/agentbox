@@ -233,6 +233,19 @@ in
       default = "docker";
       description = "Container backend to use.";
     };
+
+    autoStart = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Whether the container starts automatically at boot and on
+        `nixos-rebuild switch`. When false, the container (and its docker-proxy
+        sidecar) is not pulled into any systemd target — start it on demand with
+        `systemctl start docker-agentbox` (or podman-agentbox). The service is
+        still defined and its dependencies (proxy, secrets) are honoured on
+        manual start.
+      '';
+    };
     # All sandbox settings live in ./common-options.nix (shared with darwin).
   };
 
@@ -325,7 +338,7 @@ in
       lib.mkIf cfg.settings.dockerProxy.enable
         {
           image = cfg.settings.dockerProxy.image;
-          autoStart = true;
+          autoStart = cfg.autoStart;
           extraOptions = [
             "--network=host"
             "--read-only"
@@ -351,7 +364,7 @@ in
     virtualisation.oci-containers.containers.agentbox = {
       # Use Nix-built image (loaded via activation script)
       image = "agentbox:latest";
-      autoStart = true;
+      autoStart = cfg.autoStart;
 
       # Network mode: host for simplicity (exposes ports directly)
       extraOptions = [
