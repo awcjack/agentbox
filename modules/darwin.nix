@@ -411,6 +411,7 @@ let
         ${securityOptArgs}
         --cpus=${toString cfg.settings.cpuLimits}
         --memory=${cfg.settings.memoryLimits}
+        --pids-limit=${toString cfg.settings.pidsLimit}
         ${containerEnvArgs}
         ${volumeArgs}
         --health-cmd 'curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health || exit 1'

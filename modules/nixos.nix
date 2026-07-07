@@ -378,6 +378,7 @@ in
         # Resource limits
         "--cpus=${toString cfg.settings.cpuLimits}"
         "--memory=${cfg.settings.memoryLimits}"
+        "--pids-limit=${toString cfg.settings.pidsLimit}"
       ]
       # Container hardening (shared options). "default" => omit the flag so
       # Docker applies its built-in default seccomp profile.

@@ -75,6 +75,16 @@ in
         description = "Memory limit for the container.";
       };
 
+      pidsLimit = lib.mkOption {
+        type = lib.types.int;
+        default = 2048;
+        description = ''
+          PID limit for the container (docker --pids-limit). Caps runaway
+          process spawning (e.g. a daemon fork loop) so it can't exhaust the
+          host/VM's PIDs and freeze everything outside the container.
+        '';
+      };
+
       enableOpencode = lib.mkOption {
         type = lib.types.bool;
         default = true;
