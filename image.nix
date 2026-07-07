@@ -990,7 +990,11 @@ let
       # `nix profile` keeps its profile under the agent's HOME.
       mkdir -p /nix/var/nix/profiles/per-user/agent /nix/var/nix/gcroots/per-user/agent
       chown agent:agent /nix/var/nix/profiles/per-user/agent /nix/var/nix/gcroots/per-user/agent 2>/dev/null || true
-      nix-daemon > "$AGENT_LOGS/nix-daemon.log" 2>&1 &
+      # NIX_REMOTE=daemon (set image-wide for clients) must NOT reach the daemon
+      # itself: nix-daemon honors it when opening its store, so each connection
+      # handler would proxy back to its own socket — an infinite fork loop that
+      # freezes the container on the first `nix` command.
+      env -u NIX_REMOTE nix-daemon > "$AGENT_LOGS/nix-daemon.log" 2>&1 &
     fi
 
     # Start OpenCode server if enabled
