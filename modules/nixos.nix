@@ -132,6 +132,10 @@ let
     ENABLE_CODEX = lib.boolToString cfg.settings.enableCodex;
     # Docker-in-Docker
     ENABLE_DOCKER = lib.boolToString cfg.settings.enableDocker;
+    # In-container sudo (setuid wrapper staged at boot)
+    ENABLE_SUDO = lib.boolToString cfg.settings.hardening.enableSudo;
+    # In-container nix daemon (throwaway `nix profile install`)
+    ENABLE_NIX = lib.boolToString cfg.settings.enableNix;
     # OpenCode server settings (for an external bridge to connect to OpenCode)
     OPENCODE_SERVER_URL = "http://127.0.0.1:4096";
     # Session settings
@@ -250,14 +254,15 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    # Default image: base image, or the cloud-tools variant when enableCloudTools
-    # is set. lib.mkDefault lets an explicit `services.agentbox.image = …`
-    # assignment override this without conflict.
+    # Default image: base image, with build-time variants toggled by settings —
+    # the cloud-tools bundle (enableCloudTools) and the nix CLI (enableNix, on by
+    # default; only overridden off here). lib.mkDefault lets an explicit
+    # `services.agentbox.image = …` assignment override this without conflict.
     services.agentbox.image = lib.mkDefault (
-      if cfg.settings.enableCloudTools then
-        pkgs.agentboxImage.override { withCloudTools = true; }
-      else
-        pkgs.agentboxImage
+      pkgs.agentboxImage.override (
+        (lib.optionalAttrs cfg.settings.enableCloudTools { withCloudTools = true; })
+        // (lib.optionalAttrs (!cfg.settings.enableNix) { withNix = false; })
+      )
     );
 
     # Enable container backend

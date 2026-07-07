@@ -111,6 +111,22 @@ in
         '';
       };
 
+      enableNix = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Bake the `nix` CLI into the image and start a `nix-daemon` at boot so
+          the agent can install throwaway packages in-container with
+          `nix profile install nixpkgs#<pkg>` or `nix shell nixpkgs#<pkg>`.
+          There is no apt/dpkg in this image, so nix is the package manager.
+          Installed packages live in the container's writable layer and are lost
+          when it is recreated. On by default; when false the NixOS module builds
+          the image with `.override { withNix = false; }` to keep it lean (and
+          ENABLE_NIX is set false so the daemon does not start). On Darwin,
+          rebuild the image on a Linux host with the matching flag.
+        '';
+      };
+
       enableNotification = lib.mkOption {
         type = lib.types.bool;
         default = true;
@@ -151,6 +167,22 @@ in
             also disables in-container `sudo`, which this sandbox intentionally
             allows. Turn it on for a stronger escape boundary when the box does
             not need sudo.
+          '';
+        };
+
+        enableSudo = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            Set up a working setuid `sudo` for the agent user at container
+            start (passwordless). Because Nix store paths can't carry setuid
+            bits and there is no `security.wrappers` activation inside the
+            container, the entrypoint stages a setuid-root copy of sudo under
+            /run/wrappers/bin — this option gates that step (maps to
+            ENABLE_SUDO). On by default, matching this sandbox's intent to keep
+            the in-container dev workflow (sudo, installs) intact; the real
+            trust boundary is the container itself. Note `noNewPrivileges = true`
+            disables sudo at the kernel level regardless of this flag.
           '';
         };
       };

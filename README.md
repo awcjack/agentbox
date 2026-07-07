@@ -43,7 +43,7 @@ services.agentbox = {
 
 | Group | Packages |
 |---|---|
-| Dev tools | git, neovim (pre-configured), tmux, htop, tree, ripgrep, fd, fzf, jq, yq-go, curl, wget, unzip, gnumake, pkg-config, gcc |
+| Dev tools | git, neovim (pre-configured), tmux, htop, tree, ripgrep, fd, fzf, jq, yq-go, curl, wget, unzip, gnumake, pkg-config, gcc, nix |
 | Languages | go, nodejs 22, bun, python 3.12, uv |
 | **AI CLIs** | **codex**, **opencode** (Claude Code is runtime-installed) |
 | Language servers | gopls, nil, typescript-language-server, vscode-langservers-extracted |
@@ -53,6 +53,30 @@ services.agentbox = {
 
 Base core/system utilities are tagged REQUIRED vs CONVENIENCE inline in
 `image.nix` — `readline` and `expect` were dropped from the base as unneeded.
+
+## In-container sudo & package installs
+
+The image has no apt/dpkg (it isn't Debian). Two knobs cover the usual "let me
+just install a thing" workflow, both **on by default**:
+
+- **`settings.hardening.enableSudo`** — the entrypoint stages a setuid-root
+  `sudo` under `/run/wrappers/bin` at boot (Nix store paths can't carry setuid
+  bits, and there's no `security.wrappers` inside the container, so plain
+  `/bin/sudo` can't elevate). `agent` gets passwordless sudo. Turning on
+  `hardening.noNewPrivileges` disables it at the kernel level regardless.
+- **`settings.enableNix`** — bakes the `nix` CLI in, registers the store DB
+  (`buildLayeredImageWithNixDb`), and starts a root `nix-daemon` at boot so the
+  unprivileged agent can install throwaway packages:
+
+  ```bash
+  nix profile install nixpkgs#ripgrep   # persists for the container's life
+  nix shell nixpkgs#hello -c hello       # ephemeral, one command
+  ```
+
+  These land in the container's writable layer and are **lost on recreate** —
+  bake anything permanent into the image instead (`extraPackages`, or the
+  package lists in `image.nix`). Language-level installs (`bun add -g`,
+  `go install`, `uv tool install`, `cargo install`) work without either knob.
 
 ## Build
 

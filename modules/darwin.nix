@@ -134,6 +134,11 @@ let
         # Claude Code services
         ENABLE_CLAUDE_CODE = lib.boolToString cfg.settings.enableClaudeCode;
         ENABLE_CODEX = lib.boolToString cfg.settings.enableCodex;
+        # In-container sudo (setuid wrapper staged at boot) + nix daemon.
+        # The image itself must be built on a Linux host with the matching
+        # `withNix` flag; these only gate the runtime behaviour.
+        ENABLE_SUDO = lib.boolToString cfg.settings.hardening.enableSudo;
+        ENABLE_NIX = lib.boolToString cfg.settings.enableNix;
         # OpenCode server settings
         OPENCODE_BIND_ADDRESS = "0.0.0.0";
         OPENCODE_SERVER_URL = "http://127.0.0.1:4096";

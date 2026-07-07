@@ -37,6 +37,8 @@
   tzdata,
   glibcLocales,
   sudo,
+  linux-pam,
+  nix,
   # Development tools
   git,
   tmux,
@@ -112,6 +114,16 @@
   # with `.override { withCloudTools = true; }`) or directly with
   # `agentboxImage.override { withCloudTools = true; }`.
   withCloudTools ? false,
+  # When true (default), bake the `nix` CLI into the image and register the
+  # store DB (via dockerTools.buildLayeredImageWithNixDb) so nix actually works
+  # inside the container. Paired with a `nix-daemon` started at boot (gated by
+  # ENABLE_NIX), this lets the agent install throwaway packages with
+  # `nix profile install nixpkgs#<pkg>` / `nix shell nixpkgs#<pkg>` — they live
+  # in the container's writable layer and vanish when it is recreated. There is
+  # no apt/dpkg in this image, so nix is the in-container package manager.
+  # Disable via `services.agentbox.settings.enableNix = false` (NixOS builds the
+  # image with `.override { withNix = false; }`) to keep the image lean.
+  withNix ? true,
 }:
 
 let
@@ -721,6 +733,12 @@ let
     # Secret scanning (used by the pre-commit hook + OpenCode plugin)
     gitleaks
   ]
+  # The nix CLI, so the agent can install throwaway packages in-container.
+  # The store DB is registered by buildLayeredImageWithNixDb (see the builder
+  # selection at the bottom of this file) and a nix-daemon is started at boot.
+  ++ lib.optionals withNix [
+    nix
+  ]
   ++ lib.optionals withCloudTools [
     awscli2
     kubectl
@@ -859,6 +877,31 @@ let
       echo "agent:$AGENT_PASSWORD" | chpasswd 2>/dev/null || true
     fi
 
+    # Enable in-container `sudo` for the agent user.
+    #
+    # The Nix store can't hold setuid bits and there's no NixOS
+    # `security.wrappers` activation inside the container, so the store-backed
+    # `/bin/sudo` can never elevate ("must be owned by uid 0 and have the setuid
+    # bit set"). This entrypoint runs as root, so copy the real sudo binary to a
+    # writable location and set it setuid-root — the same pattern NixOS uses for
+    # /run/wrappers. Its RUNPATH still points at the store, so the sudoers.so
+    # plugin, libpam and the PAM modules all resolve from the image. This needs
+    # hardening.noNewPrivileges left OFF (the default), which is exactly why this
+    # sandbox documents sudo as intentionally allowed. Gated by ENABLE_SUDO
+    # (settings.hardening.enableSudo, default true); noNewPrivileges still
+    # overrides at the kernel level regardless.
+    SUDO_REAL="$(readlink -f /bin/sudo 2>/dev/null || true)"
+    if [ "''${ENABLE_SUDO:-true}" != "false" ] && [ -n "$SUDO_REAL" ] && [ -x "$SUDO_REAL" ]; then
+      mkdir -p /run/wrappers/bin
+      if install -m 4755 -o root -g root "$SUDO_REAL" /run/wrappers/bin/sudo 2>/dev/null; then
+        # Repoint the store symlink at the wrapper so `sudo` elevates regardless
+        # of PATH ordering (login shells also get /run/wrappers/bin first).
+        ln -sf /run/wrappers/bin/sudo /bin/sudo 2>/dev/null || true
+      else
+        echo "WARNING: could not create setuid sudo wrapper (is the rootfs read-only or noNewPrivileges set?)"
+      fi
+    fi
+
     # Install AI coding tools if not present (bun global packages)
     # These are installed at runtime because they're not in nixpkgs
     export BUN_INSTALL="/home/agent/.bun"
@@ -932,6 +975,23 @@ let
     AGENT_LOGS="$AGENT_HOME/.agentbox-logs"
     mkdir -p "$AGENT_LOGS"
     chown agent:agent "$AGENT_LOGS"
+
+    # Start the nix-daemon so the (unprivileged) agent can install throwaway
+    # packages with `nix profile install nixpkgs#<pkg>`. The daemon runs as root
+    # and owns the store; the agent reaches it over the socket (NIX_REMOTE=daemon
+    # in the profile). The store DB was registered at build time
+    # (buildLayeredImageWithNixDb). Gated by ENABLE_NIX (settings.enableNix,
+    # default true); no-ops on a `withNix = false` image where nix-daemon is
+    # absent. Packages live in the container's writable layer and are lost on
+    # recreate — exactly the "temporary package" behaviour.
+    if [ "''${ENABLE_NIX:-true}" != "false" ] && command -v nix-daemon >/dev/null 2>&1; then
+      echo "Starting nix-daemon..."
+      # Per-user profile/gcroot dirs (used by nix-env style installs); new-style
+      # `nix profile` keeps its profile under the agent's HOME.
+      mkdir -p /nix/var/nix/profiles/per-user/agent /nix/var/nix/gcroots/per-user/agent
+      chown agent:agent /nix/var/nix/profiles/per-user/agent /nix/var/nix/gcroots/per-user/agent 2>/dev/null || true
+      nix-daemon > "$AGENT_LOGS/nix-daemon.log" 2>&1 &
+    fi
 
     # Start OpenCode server if enabled
     # Uses 'opencode serve' to start HTTP API server on port 4096
@@ -1061,6 +1121,54 @@ let
     '';
   };
 
+  # sudoers: let the agent user run sudo without a password. This box is a
+  # single-user dev sandbox — the real trust boundary is the container itself
+  # (see the `hardening` options), not in-container privilege separation, so the
+  # image ships sudo intending it to work. `secure_path` gives root the wrapper
+  # dir + system paths; env_keep preserves locale so tools don't warn.
+  sudoersFile = writeTextFile {
+    name = "sudoers";
+    text = ''
+      Defaults secure_path="/run/wrappers/bin:/bin:/usr/bin:/usr/local/bin"
+      Defaults env_keep += "LANG LC_ALL LOCALE_ARCHIVE TERM"
+      root  ALL=(ALL:ALL) ALL
+      agent ALL=(ALL:ALL) NOPASSWD:ALL
+    '';
+  };
+
+  # PAM policy for sudo. The nixpkgs sudo's `sudoers.so` plugin is linked against
+  # libpam and calls pam_acct_mgmt / pam_open_session / pam_setcred even under
+  # NOPASSWD, so a valid /etc/pam.d/sudo is required or sudo aborts. Nix has no
+  # /lib/security, so modules are referenced by absolute store path. pam_permit
+  # unconditionally succeeds — auth is already bypassed by NOPASSWD.
+  sudoPamFile = writeTextFile {
+    name = "pam-sudo";
+    text = ''
+      auth       sufficient ${linux-pam}/lib/security/pam_permit.so
+      account    sufficient ${linux-pam}/lib/security/pam_permit.so
+      password   sufficient ${linux-pam}/lib/security/pam_permit.so
+      session    required   ${linux-pam}/lib/security/pam_permit.so
+    '';
+  };
+
+  # nix.conf for the in-container nix. Multi-user mode: the root nix-daemon owns
+  # the store and does the privileged writes, so the unprivileged agent can
+  # install packages over the daemon socket. `build-users-group =` (empty) skips
+  # the nixbld build accounts (none exist in this image) — the daemon builds as
+  # root. Sandboxing is off because the build sandbox needs user namespaces that
+  # aren't reliably available inside the container. flakes + nix-command enable
+  # `nix profile install nixpkgs#<pkg>`.
+  nixConfFile = writeTextFile {
+    name = "nix.conf";
+    text = ''
+      experimental-features = nix-command flakes
+      trusted-users = root agent
+      build-users-group =
+      sandbox = false
+      max-jobs = auto
+    '';
+  };
+
   # Nsswitch.conf for name service switch
   nsswitchFile = writeTextFile {
     name = "nsswitch.conf";
@@ -1095,7 +1203,7 @@ let
   profileFile = writeTextFile {
     name = "profile";
     text = ''
-      export PATH="/bin:/usr/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin"
+      export PATH="/run/wrappers/bin:/bin:/usr/bin:/usr/local/bin:$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin"
       export LANG="en_US.UTF-8"
       export LC_ALL="en_US.UTF-8"
       export TERM="xterm-256color"
@@ -1115,6 +1223,11 @@ let
 
       # Python/UV
       export UV_TOOL_BIN_DIR="$HOME/.local/bin"
+
+      # Nix: talk to the root nix-daemon and put installed packages on PATH.
+      # `nix profile install nixpkgs#<pkg>` links tools into ~/.nix-profile/bin.
+      export NIX_REMOTE="daemon"
+      export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
 
       # Native library paths for Python C-extensions (numpy, manifold3d, etc.)
       # gcc.cc.lib provides libstdc++.so.6; zlib provides libz.so.1
@@ -1365,7 +1478,11 @@ let
   caCertPath = cacert;
 
 in
-dockerTools.buildLayeredImage {
+# buildLayeredImageWithNixDb registers the Nix store database for every path in
+# the image, which is what makes the in-container `nix` treat those paths as
+# valid and able to build/substitute on top of them. Fall back to the plain
+# builder (no DB, smaller) when nix isn't baked in.
+(if withNix then dockerTools.buildLayeredImageWithNixDb else dockerTools.buildLayeredImage) {
   name = "agentbox";
   tag = "latest";
 
@@ -1394,6 +1511,18 @@ dockerTools.buildLayeredImage {
     cp ${profileFile} etc/profile
     mkdir -p etc/ssh
     cp ${sshdConfig} etc/ssh/sshd_config
+
+    # sudo: sudoers policy + PAM config. The setuid wrapper itself can't live in
+    # the store (no setuid bits) — the entrypoint stages it under /run/wrappers
+    # at container start.
+    mkdir -p etc/pam.d
+    cp ${sudoersFile} etc/sudoers
+    cp ${sudoPamFile} etc/pam.d/sudo
+    ${lib.optionalString withNix ''
+      # nix: daemon config (the nix-daemon itself is started by the entrypoint).
+      mkdir -p etc/nix
+      cp ${nixConfFile} etc/nix/nix.conf
+    ''}
 
     # Copy skeleton (use cp -rT to copy contents, not the directory itself)
     cp -rT ${skelDir} etc/skel.agent/
@@ -1436,6 +1565,7 @@ dockerTools.buildLayeredImage {
     chmod 1777 tmp var/tmp || true
     chmod 644 etc/passwd etc/group || true
     chmod 640 etc/shadow || true
+    chmod 440 etc/sudoers || true
   '';
 
   config = {
@@ -1447,7 +1577,9 @@ dockerTools.buildLayeredImage {
       "4096/tcp" = { }; # OpenCode server
     };
     Env = [
-      "PATH=/bin:/usr/bin:/usr/local/bin"
+      # nix profile dirs are on PATH so packages installed via `nix profile
+      # install` are found by non-login `agentbox exec` too (harmless when empty).
+      "PATH=/run/wrappers/bin:/home/agent/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/bin:/usr/bin:/usr/local/bin"
       "LANG=en_US.UTF-8"
       "LC_ALL=en_US.UTF-8"
       "TERM=xterm-256color"
@@ -1456,6 +1588,10 @@ dockerTools.buildLayeredImage {
       "SSL_CERT_FILE=${caCertPath}/etc/ssl/certs/ca-bundle.crt"
       "NIX_SSL_CERT_FILE=${caCertPath}/etc/ssl/certs/ca-bundle.crt"
       "LOCALE_ARCHIVE=${glibcLocales}/lib/locale/locale-archive"
+    ]
+    ++ lib.optionals withNix [
+      # Route the agent's nix at the root daemon started by the entrypoint.
+      "NIX_REMOTE=daemon"
     ];
     User = "root"; # Entrypoint runs as root, then switches to agent
     Volumes = {
