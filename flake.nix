@@ -44,7 +44,7 @@
       # top-level options + config. `.default` is the conventional attr;
       # `.agentbox` is a friendlier alias.
       #
-      # This is the clean standalone sandbox: Claude Code + Codex, no private
+      # This is the clean standalone sandbox: Claude Code + Codex + OpenCode, no private
       # agents bundled. Advanced users can still bake extra agents into the
       # image via .override and wire them through the generic extension surface
       # (services.agentbox.extraEnvironment / extraVolumes / extraActivation).

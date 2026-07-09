@@ -795,6 +795,19 @@ let
       chmod +x "$HOME_DIR"/.claude/hooks/*.sh 2>/dev/null || true
     fi
 
+    # Keep baked agent skills available even when ~/.claude, ~/.codex, and
+    # ~/.config/opencode are bind-mounted persistent host directories. Host
+    # activation creates ~/.bashrc before first start, so the one-shot skeleton
+    # copy below may never populate these mounted config dirs.
+    if [ -d "$SKEL_DIR" ]; then
+      mkdir -p "$HOME_DIR/.claude/commands" "$HOME_DIR/.config/opencode/command" "$HOME_DIR/.codex/skills"
+      cp -f "$SKEL_DIR"/.claude/commands/*.md "$HOME_DIR/.claude/commands/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.config/opencode/command/*.md "$HOME_DIR/.config/opencode/command/" 2>/dev/null || true
+      if [ -d "$SKEL_DIR/.codex/skills" ]; then
+        cp -rT "$SKEL_DIR/.codex/skills" "$HOME_DIR/.codex/skills" 2>/dev/null || true
+      fi
+    fi
+
     # Fast-path: check if already initialized with same UID:GID
     MARKER_FILE="$HOME_DIR/.container_initialized"
     if [ -f "$MARKER_FILE" ]; then
@@ -1434,6 +1447,7 @@ let
   # Skeleton directory for new users (includes OpenCode plugins)
   skelDir = runCommand "skel-agent" { } ''
     mkdir -p $out/.config/opencode/plugins $out/.config/opencode/command $out/.local/bin $out/.ssh $out/.agentbox-logs $out/.cache
+    mkdir -p $out/.codex/skills
     mkdir -p $out/.claude/hooks $out/.claude/commands
     mkdir -p $out/.claude/plugins/agentbox-lsp
     mkdir -p $out/.claude/plugins/cache/claude-plugins-official/gopls-lsp/1.0.0
@@ -1468,10 +1482,41 @@ let
     cp ${claudeCodeGitleaksHook} $out/.claude/hooks/gitleaks-precommit.sh
     chmod +x $out/.claude/hooks/gitleaks-precommit.sh
 
-    # Skill commands from the external claude-skills repo (Claude Code + OpenCode)
+    # Skill commands from the external claude-skills repo. Claude Code and
+    # OpenCode use slash-command markdown files. Codex uses directory-based
+    # SKILL.md files, generated from the Claude command source so all three
+    # agents share the same skill names and instructions.
     ${lib.optionalString (claude-skills-src != null) ''
       cp ${claude-skills-src}/claude/*.md $out/.claude/commands/
       cp ${claude-skills-src}/opencode/*.md $out/.config/opencode/command/
+
+      for src in ${claude-skills-src}/claude/*.md; do
+        name="$(basename "$src" .md)"
+        dest="$out/.codex/skills/$name"
+        mkdir -p "$dest"
+        description="$(awk '
+          BEGIN { in_fm = 0 }
+          NR == 1 && $0 == "---" { in_fm = 1; next }
+          in_fm && $0 == "---" { exit }
+          in_fm && /^description:[[:space:]]*/ {
+            sub(/^description:[[:space:]]*/, "")
+            print
+            exit
+          }
+        ' "$src")"
+        [ -n "$description" ] || description="$name"
+        {
+          printf '%s\n' '---'
+          printf 'name: %s\n' "$name"
+          printf 'description: %s\n' "$description"
+          printf '%s\n\n' '---'
+          awk '
+            NR == 1 && $0 == "---" { in_fm = 1; next }
+            in_fm && $0 == "---" { in_fm = 0; next }
+            !in_fm { print }
+          ' "$src"
+        } > "$dest/SKILL.md"
+      done
     ''}
 
     # Writable context directory placeholder — actual writes happen at runtime

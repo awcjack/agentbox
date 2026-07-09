@@ -299,6 +299,8 @@ in
       "d ${cfg.dataDir}/home/.config/gcloud 0700 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.kube 0700 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.claude 0755 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/home/.codex 0755 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/home/.codex/skills 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.cache 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.bun 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.cargo 0755 ${cfg.user} ${cfg.group} -"
@@ -415,6 +417,7 @@ in
         # safety hooks above the agent-writable settings.json (see managedSettingsJson).
         "${cfg.dataDir}/managed/managed-settings.json:/etc/claude-code/managed-settings.json:ro"
         "${cfg.dataDir}/home/.claude:/home/agent/.claude"
+        "${cfg.dataDir}/home/.codex:/home/agent/.codex"
         "${cfg.dataDir}/home/.config/opencode:/home/agent/.config/opencode"
         "${cfg.dataDir}/workspaces/opencode:/workspace"
         "${cfg.dataDir}/hooks:/home/agent/.hooks:ro"
@@ -959,9 +962,8 @@ in
     # 127.0.0.1:2375 with no consumer. `PartOf` propagates stop/restart only;
     # the main unit's `wants`+`after` still start-orders the proxy first, and a
     # crash-loop auto-restart of agentbox won't needlessly bounce the proxy.
-    systemd.services."${cfg.backend}-agentbox-docker-proxy" =
-      lib.mkIf cfg.settings.dockerProxy.enable {
-        partOf = [ "${cfg.backend}-agentbox.service" ];
-      };
+    systemd.services."${cfg.backend}-agentbox-docker-proxy" = lib.mkIf cfg.settings.dockerProxy.enable {
+      partOf = [ "${cfg.backend}-agentbox.service" ];
+    };
   };
 }

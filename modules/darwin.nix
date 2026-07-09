@@ -176,6 +176,7 @@ let
       "-v ${cfg.dataDir}/home/.ssh:/home/agent/.ssh"
       "-v ${cfg.dataDir}/home/.claude.json:/home/agent/.claude.json"
       "-v ${cfg.dataDir}/home/.claude:/home/agent/.claude"
+      "-v ${cfg.dataDir}/home/.codex:/home/agent/.codex"
       # Enterprise policy file, READ-ONLY: pins the permission deny list and the
       # safety hooks above the agent-writable settings.json (see managedSettingsJson).
       # Written root-owned 0644 on activation so Claude Code honors it as policy.
@@ -507,6 +508,7 @@ let
     # Create directories
       mkdir -p "$DATA_DIR/home/.ssh"
       mkdir -p "$DATA_DIR/home/.claude"
+      mkdir -p "$DATA_DIR/home/.codex/skills"
       mkdir -p "$DATA_DIR/home/.config/opencode/plugins"
       mkdir -p "$DATA_DIR/home/.local/share/opencode"
       mkdir -p "$DATA_DIR/workspaces/opencode"
@@ -667,6 +669,7 @@ in
             # Create directories
             mkdir -p "${cfg.dataDir}/home/.ssh"
             mkdir -p "${cfg.dataDir}/home/.claude"
+            mkdir -p "${cfg.dataDir}/home/.codex/skills"
             mkdir -p "${cfg.dataDir}/home/.config/opencode/plugins"
             mkdir -p "${cfg.dataDir}/home/.local/share/opencode"
             mkdir -p "${cfg.dataDir}/workspaces/opencode"
