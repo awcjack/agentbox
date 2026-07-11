@@ -655,6 +655,278 @@ let
     '';
   };
 
+  # ── Cross-agent notification / tmux-title bridge ────────────────────────────
+  # agent-signal.sh is the ONE producer behind the "✅ done" / "🔔 needs you"
+  # tmux window rename + desktop-notification signal file. Claude Code drives it
+  # through its lifecycle hooks (notify.sh etc., written by the host modules);
+  # the OpenCode plugin and the Codex `notify` program below drive the exact same
+  # script so all three agents share the identical tmux + signal-file contract.
+  # The host watcher (osascript LaunchAgent on macOS / systemd path unit on
+  # Linux) is reused UNCHANGED — it only ever reads ~/.signals/claude-notify.
+  #
+  #   agent-signal.sh done     turn finished           -> ✅  + "done" notify
+  #   agent-signal.sh waiting  blocked on the human     -> 🔔  + "needs you" notify
+  #   agent-signal.sh working  resumed after a prompt   -> clear bell, live title
+  #   agent-signal.sh start    new user prompt          -> clear flags, live title
+  #
+  # AGENT_NAME (env, default "Agent") labels the notification, e.g.
+  # "OpenCode done: fix parser". Invoked via `bash agent-signal.sh …`, so it does
+  # not depend on the exec bit surviving the skeleton copy.
+  agentSignalScript = writeTextFile {
+    name = "agent-signal.sh";
+    text = ''
+      #!/bin/bash
+      set -u
+      state="''${1:-}"
+      AGENT_NAME="''${AGENT_NAME:-Agent}"
+
+      # Resolve tmux (hooks/plugins run non-interactively, so brew/nix PATH
+      # additions from .bashrc are absent).
+      tmux_bin="$(command -v tmux 2>/dev/null || true)"
+      if [ -z "$tmux_bin" ]; then
+          for _tp in /home/linuxbrew/.linuxbrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
+              [ -x "$_tp" ] && tmux_bin="$_tp" && break
+          done
+      fi
+
+      # Agents strip TMUX/TMUX_PANE from spawned subprocesses; walk the process
+      # ancestry and copy them from the nearest ancestor that still carries them.
+      if [ -z "''${TMUX:-}" ] || [ -z "''${TMUX_PANE:-}" ]; then
+          _pid=$PPID
+          _hops=0
+          while [ -n "$_pid" ] && [ "$_pid" -gt 1 ] && [ "$_hops" -lt 10 ]; do
+              if [ -r "/proc/$_pid/environ" ]; then
+                  _pane=$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null | sed -n 's/^TMUX_PANE=//p' | head -n1)
+                  if [ -n "$_pane" ]; then
+                      TMUX_PANE="$_pane"
+                      TMUX=$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null | sed -n 's/^TMUX=//p' | head -n1)
+                      export TMUX TMUX_PANE
+                      break
+                  fi
+              fi
+              _pid=$(sed 's/.*) //' "/proc/$_pid/stat" 2>/dev/null | cut -d' ' -f2)
+              _hops=$((_hops + 1))
+          done
+      fi
+      # Persist / restore for double-forked callers, keyed per agent so Claude,
+      # OpenCode and Codex do not stomp each other's cached pane.
+      _paneinfo="/tmp/agent-tmux-pane-info-''${AGENT_NAME}"
+      if [ -n "''${TMUX_PANE:-}" ]; then
+          printf '%s\n%s\n' "''${TMUX:-}" "$TMUX_PANE" > "$_paneinfo" 2>/dev/null || true
+      elif [ -f "$_paneinfo" ]; then
+          TMUX=$(sed -n '1p' "$_paneinfo" 2>/dev/null)
+          TMUX_PANE=$(sed -n '2p' "$_paneinfo" 2>/dev/null)
+          export TMUX TMUX_PANE
+      fi
+      TMUX="''${TMUX:-}"
+      TMUX_PANE="''${TMUX_PANE:-}"
+
+      have_tmux() { [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; }
+
+      # Clean the pane title: strip a leading non-ASCII status symbol (spinner or
+      # a prior ✅ / 🔔) + its space, then truncate to 15 chars with an … suffix
+      # (mirrors the tmux automatic-rename-format).
+      clean_title() {
+          local t="$1" fb
+          fb=$(printf '%s' "$t" | od -An -tu1 -N1 | tr -d ' \n')
+          if [ -n "$fb" ] && [ "$fb" -gt 127 ] 2>/dev/null; then
+              t="''${t#* }"
+          fi
+          [ "''${#t}" -gt 15 ] && t="''${t:0:14}…"
+          printf '%s' "$t"
+      }
+
+      # Freeze the window (so the agent's OSC title cannot revert our name) and
+      # rename it "<prefix> <title>". Echoes the cleaned title on stdout.
+      freeze_and_rename() {
+          local prefix="$1" fallback="$2" title=""
+          if have_tmux; then
+              title=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null || true)
+              title=$(clean_title "$title")
+              [ -z "$title" ] && title="$fallback"
+              "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename off
+              "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename off
+              "$tmux_bin" rename-window -t "$TMUX_PANE" "$prefix $title"
+          fi
+          printf '%s' "$title"
+      }
+
+      unfreeze() {
+          if have_tmux; then
+              "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename on
+              "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename on
+          fi
+      }
+
+      # Drop the host signal file: "<message>\t<session:window>". Strip control
+      # chars from the message (incl. the TAB delimiter and newlines) and restrict
+      # the jump target to the charset the host validators accept. Written to the
+      # SAME path the existing Claude watcher already polls, so no host change.
+      emit_signal() {
+          local msg="$1" target=""
+          have_tmux && target=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}' 2>/dev/null || true)
+          msg=$(printf '%s' "$msg" | tr -d '\000-\037')
+          target=$(printf '%s' "$target" | tr -cd 'A-Za-z0-9_:.-')
+          printf '%s\t%s' "$msg" "$target" > /home/agent/.signals/claude-notify 2>/dev/null || true
+      }
+
+      done_flag="/tmp/agent-done-''${TMUX_PANE}"
+      waiting_flag="/tmp/agent-waiting-''${TMUX_PANE}"
+
+      case "$state" in
+          done)
+              printf '\a'
+              _t=$(freeze_and_rename "✅" "done")
+              [ -n "$TMUX_PANE" ] && touch "$done_flag"
+              _msg="$AGENT_NAME task done"
+              [ -n "$_t" ] && [ "$_t" != "done" ] && _msg="$AGENT_NAME done: $_t"
+              emit_signal "$_msg"
+              ;;
+          waiting)
+              printf '\a'
+              _t=$(freeze_and_rename "🔔" "needs you")
+              [ -n "$TMUX_PANE" ] && touch "$waiting_flag"
+              _msg="$AGENT_NAME needs your attention"
+              [ -n "$_t" ] && [ "$_t" != "needs you" ] && _msg="$AGENT_NAME needs you: $_t"
+              emit_signal "$_msg"
+              ;;
+          working)
+              # Skip if the turn already ended (done flag) — a stray resume event
+              # must not wipe the "✅" name. Cleared by `start` on the next prompt.
+              [ -n "$TMUX_PANE" ] && [ -f "$done_flag" ] && exit 0
+              [ -n "$TMUX_PANE" ] && rm -f "$waiting_flag"
+              unfreeze
+              ;;
+          start)
+              [ -n "$TMUX_PANE" ] && rm -f "$done_flag" "$waiting_flag"
+              unfreeze
+              ;;
+          *)
+              echo "usage: agent-signal.sh {done|waiting|working|start}" >&2
+              exit 2
+              ;;
+      esac
+      exit 0
+    '';
+  };
+
+  # OpenCode plugin: desktop-notification + tmux-title bridge. Subscribes to the
+  # OpenCode event bus and maps lifecycle events onto agent-signal.sh — the same
+  # producer the Claude Code hooks use. Event → state:
+  #   session.idle          -> done     (turn finished)
+  #   permission.asked/​updated -> waiting (blocked on approval)
+  #   permission.replied    -> working  (approval answered)
+  #   message.updated(user) -> start    (new prompt)
+  opencodeNotifyPlugin = writeTextFile {
+    name = "notify.ts";
+    text = ''
+      /**
+       * OpenCode plugin: desktop-notification + tmux-title bridge.
+       *
+       * Delegates every lifecycle transition to the shared producer
+       * /home/agent/.local/bin/agent-signal.sh so OpenCode gets the identical
+       * "✅ done" / "🔔 needs you" tmux window rename and desktop notification as
+       * Claude Code. The host watcher is reused unchanged (reads
+       * ~/.signals/claude-notify).
+       */
+      import { execFile } from "child_process"
+
+      const SIGNAL = "/home/agent/.local/bin/agent-signal.sh"
+
+      // Fire-and-forget: never block the OpenCode event loop on tmux/IO.
+      function signal(state: string) {
+        try {
+          execFile(
+            "bash",
+            [SIGNAL, state],
+            { env: { ...process.env, AGENT_NAME: "OpenCode" } },
+            () => {},
+          )
+        } catch {
+          /* best-effort: a notification failure must never break the session */
+        }
+      }
+
+      export const NotifyPlugin = async (_input: any) => {
+        // Debounce "start" to genuinely new user messages (message.updated also
+        // fires as the assistant streams tokens).
+        let lastUserMsg = ""
+        return {
+          event: async ({ event }: { event: { type: string; properties?: any } }) => {
+            switch (event.type) {
+              case "session.idle":
+                signal("done")
+                break
+              // Permission-prompt event names vary slightly across OpenCode
+              // builds; match the common ones — any of them means a prompt is
+              // now waiting on the human.
+              case "permission.asked":
+              case "permission.updated":
+                signal("waiting")
+                break
+              case "permission.replied":
+                signal("working")
+                break
+              case "message.updated": {
+                const info = event.properties?.info
+                if (info?.role === "user" && info?.id && info.id !== lastUserMsg) {
+                  lastUserMsg = info.id
+                  signal("start")
+                }
+                break
+              }
+            }
+          },
+        }
+      }
+
+      export default NotifyPlugin
+    '';
+  };
+
+  # Codex `notify` program. Codex appends one JSON arg describing the event; the
+  # only type it currently emits is "agent-turn-complete" (turn finished /
+  # waiting for you), so map it to the shared producer's `done` state. Codex has
+  # no permission-prompt or prompt-submit events, so the 🔔 "needs you" and
+  # freeze/unfreeze states have no Codex trigger — the window returns to live
+  # title tracking on Codex's next OSC title update.
+  codexNotifyScript = writeTextFile {
+    name = "codex-notify.sh";
+    text = ''
+      #!/bin/bash
+      set -u
+      payload="''${1:-}"
+
+      _type=""
+      if command -v jq >/dev/null 2>&1 && [ -n "$payload" ]; then
+          _type=$(printf '%s' "$payload" | jq -r '.type // empty' 2>/dev/null)
+      fi
+      # Fail open: an unparseable payload is treated as a completed turn rather
+      # than silently swallowed. Any other known type is ignored.
+      case "$_type" in
+          agent-turn-complete|"") ;;
+          *) exit 0 ;;
+      esac
+
+      AGENT_NAME="Codex" exec bash /home/agent/.local/bin/agent-signal.sh done
+    '';
+  };
+
+  # Codex user config. `notify` MUST be a root key (before any [table]); Codex
+  # ignores it in project-local .codex/config.toml and only honours the
+  # user-level ~/.codex/config.toml. Installed copy-if-missing by the entrypoint
+  # so user edits are preserved.
+  codexConfigToml = writeTextFile {
+    name = "config.toml";
+    text = ''
+      # Managed default written by agentbox. `notify` must stay a root key,
+      # before any [table]. Delegates to the shared agent-signal.sh producer so
+      # Codex raises the same ✅ tmux title + desktop notification as Claude Code
+      # and OpenCode on each completed turn.
+      notify = ["bash", "/home/agent/.local/bin/codex-notify.sh"]
+    '';
+  };
+
   # All packages to include in the image (minimal set for AI coding agents).
   #
   # The list is split into three tiers so the closure can be reasoned about:
@@ -805,6 +1077,22 @@ let
       cp -f "$SKEL_DIR"/.config/opencode/command/*.md "$HOME_DIR/.config/opencode/command/" 2>/dev/null || true
       if [ -d "$SKEL_DIR/.codex/skills" ]; then
         cp -rT "$SKEL_DIR/.codex/skills" "$HOME_DIR/.codex/skills" 2>/dev/null || true
+      fi
+
+      # Cross-agent notification bridge (agent-signal.sh + the OpenCode plugin +
+      # the Codex notify program). These land on persistent bind-mounts that the
+      # one-shot skeleton copy may bypass, so refresh them on every start — same
+      # reasoning as the skills/commands above. Managed defaults, safe to
+      # overwrite.
+      mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/opencode/plugins" "$HOME_DIR/.codex"
+      cp -f "$SKEL_DIR"/.local/bin/agent-signal.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.local/bin/codex-notify.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.config/opencode/plugins/notify.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
+      chmod +x "$HOME_DIR"/.local/bin/agent-signal.sh "$HOME_DIR"/.local/bin/codex-notify.sh 2>/dev/null || true
+      # Codex honours `notify` only in the user-level config; install the managed
+      # default copy-if-missing so hand edits to ~/.codex/config.toml are kept.
+      if [ ! -f "$HOME_DIR/.codex/config.toml" ] && [ -f "$SKEL_DIR/.codex/config.toml" ]; then
+        cp -f "$SKEL_DIR/.codex/config.toml" "$HOME_DIR/.codex/config.toml" 2>/dev/null || true
       fi
     fi
 
@@ -1466,6 +1754,17 @@ let
 
     # Shared test-runner script (always invoked via `bun ...`, so no exec bit).
     cp ${sharedTestRunnerScript} $out/.local/bin/shared-test-runner.ts
+
+    # Cross-agent notification / tmux-title bridge. agent-signal.sh is the shared
+    # producer; the OpenCode plugin and the Codex notify program both delegate to
+    # it. All are invoked via `bash …` so the exec bit is not required (the skel
+    # copy strips it via --no-preserve=mode anyway), but set it for direct use.
+    cp ${agentSignalScript} $out/.local/bin/agent-signal.sh
+    chmod +x $out/.local/bin/agent-signal.sh
+    cp ${opencodeNotifyPlugin} $out/.config/opencode/plugins/notify.ts
+    cp ${codexNotifyScript} $out/.local/bin/codex-notify.sh
+    chmod +x $out/.local/bin/codex-notify.sh
+    cp ${codexConfigToml} $out/.codex/config.toml
 
     # Claude Code PostToolUse wiring
     cp ${claudeCodeTestRunnerHook} $out/.claude/hooks/test-runner.sh

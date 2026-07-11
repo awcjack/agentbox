@@ -615,14 +615,9 @@ in
                         #     renaming. claude-working.sh (UserPromptSubmit) re-enables tracking.
                         cat > "${cfg.dataDir}/hooks/notify.sh" <<'NOTIFY_EOF'
         #!/bin/bash
-        # The Stop hook fires whenever the main agent finishes a turn, including when
-        # it only paused to wait for backgrounded work to wake it back up. Claude Code's
-        # Stop payload lists that work in .background_tasks (running/pending backgrounded
-        # shells, subagents and workflows; empty when nothing is in flight), so a
-        # non-empty array means the turn ended waiting on background work, not finished.
-        # Skip the bell, the window rename, and the desktop notification in that case so
-        # we do not false-signal "done". (A long-lived detached task that never exits
-        # keeps this suppressed; the tick fires on the next Stop once the work drains.)
+        # Stop hook — delegate to the shared agent-signal.sh producer. The turn may have
+        # only paused on backgrounded work (.background_tasks non-empty in the payload),
+        # which is not "done"; skip the signal in that case.
         hook_input="$(cat)"
         _bg=0
         if command -v jq >/dev/null 2>&1; then
@@ -631,28 +626,8 @@ in
         [ -n "$_bg" ] || _bg=0
         case "$_bg" in *[!0-9]*) _bg=0 ;; esac
         [ "$_bg" -gt 0 ] && exit 0
-
-        printf '\a'
-
-        tmux_bin="$(command -v tmux 2>/dev/null || true)"
-        if [ -z "$tmux_bin" ]; then
-            for p in /home/linuxbrew/.linuxbrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
-                [ -x "$p" ] && tmux_bin="$p" && break
-            done
-        fi
-
-        if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-            current_title="$("$tmux_bin" display-message -p -t "$TMUX_PANE" "#{pane_title}" 2>/dev/null)"
-            current_title="''${current_title#✅ }"
-            current_title="''${current_title#🔔 }"
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename off
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename off
-            "$tmux_bin" rename-window -t "$TMUX_PANE" "✅ $current_title"
-            # Set flag so PostToolUse (claude-working.sh) does not re-enable auto-rename
-            # if it fires after this Stop hook. Cleared by claude-prompt-start.sh on the
-            # next UserPromptSubmit.
-            touch "/tmp/claude-done-''${TMUX_PANE}"
-        fi
+        export AGENT_NAME="Claude"
+        exec bash /home/agent/.local/bin/agent-signal.sh done
         NOTIFY_EOF
                         chmod +x "${cfg.dataDir}/hooks/notify.sh"
                         chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/hooks/notify.sh"
@@ -666,29 +641,15 @@ in
                         # (auth_success, etc.) leave the window name alone.
                         cat > "${cfg.dataDir}/hooks/claude-waiting.sh" <<'WAITING_EOF'
         #!/bin/bash
+        # Notification hook — only events that genuinely need the human flip the window;
+        # idle_prompt / auth_success / elicitation lifecycle noise is ignored.
         input="$(cat)"
         case "$input" in
-            *permission_prompt*) ;;   # blocked mid-task; needs human approval
-            *) exit 0 ;;              # idle_prompt (session ready), auth_success, etc. — ignore
+            *permission_prompt*|*elicitation_dialog*) ;;
+            *) exit 0 ;;
         esac
-
-        printf '\a'
-
-        tmux_bin="$(command -v tmux 2>/dev/null || true)"
-        if [ -z "$tmux_bin" ]; then
-            for p in /home/linuxbrew/.linuxbrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
-                [ -x "$p" ] && tmux_bin="$p" && break
-            done
-        fi
-
-        if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-            current_title="$("$tmux_bin" display-message -p -t "$TMUX_PANE" "#{pane_title}" 2>/dev/null)"
-            current_title="''${current_title#✅ }"
-            current_title="''${current_title#🔔 }"
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename off
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename off
-            "$tmux_bin" rename-window -t "$TMUX_PANE" "🔔 $current_title"
-        fi
+        export AGENT_NAME="Claude"
+        exec bash /home/agent/.local/bin/agent-signal.sh waiting
         WAITING_EOF
                         chmod +x "${cfg.dataDir}/hooks/claude-waiting.sh"
                         chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/hooks/claude-waiting.sh"
@@ -701,24 +662,10 @@ in
                         # UserPromptSubmit and clears the done flag.
                         cat > "${cfg.dataDir}/hooks/claude-working.sh" <<'WORKING_EOF'
         #!/bin/bash
-        # PostToolUse hook: re-enable live window-name tracking after Claude resumes work
-        # (e.g. after a permission prompt is approved). Skip if the Stop hook has already
-        # fired this turn — the done flag ensures "✅ done" is not wiped by a stray
-        # PostToolUse that fires after Stop. The flag is cleared by claude-prompt-start.sh
-        # on the next UserPromptSubmit.
-        [ -n "$TMUX_PANE" ] && [ -f "/tmp/claude-done-''${TMUX_PANE}" ] && exit 0
-
-        tmux_bin="$(command -v tmux 2>/dev/null || true)"
-        if [ -z "$tmux_bin" ]; then
-            for p in /home/linuxbrew/.linuxbrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
-                [ -x "$p" ] && tmux_bin="$p" && break
-            done
-        fi
-
-        if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename on
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename on
-        fi
+        # PostToolUse hook — re-enable live title tracking after Claude resumes (e.g. an
+        # approved permission prompt). agent-signal.sh no-ops if Stop already marked the
+        # turn done, so a stray PostToolUse cannot wipe the "done" name.
+        exec bash /home/agent/.local/bin/agent-signal.sh working
         WORKING_EOF
                         chmod +x "${cfg.dataDir}/hooks/claude-working.sh"
                         chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/hooks/claude-working.sh"
@@ -728,19 +675,9 @@ in
                         # live title tracking while Claude works on the new prompt.
                         cat > "${cfg.dataDir}/hooks/claude-prompt-start.sh" <<'PROMPT_EOF'
         #!/bin/bash
-        [ -n "$TMUX_PANE" ] && rm -f "/tmp/claude-done-''${TMUX_PANE}"
-
-        tmux_bin="$(command -v tmux 2>/dev/null || true)"
-        if [ -z "$tmux_bin" ]; then
-            for p in /home/linuxbrew/.linuxbrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
-                [ -x "$p" ] && tmux_bin="$p" && break
-            done
-        fi
-
-        if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename on
-            "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename on
-        fi
+        # UserPromptSubmit hook — clear the done/waiting flags and resume live title
+        # tracking for the new turn.
+        exec bash /home/agent/.local/bin/agent-signal.sh start
         PROMPT_EOF
                         chmod +x "${cfg.dataDir}/hooks/claude-prompt-start.sh"
                         chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/hooks/claude-prompt-start.sh"

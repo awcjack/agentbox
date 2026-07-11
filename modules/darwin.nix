@@ -780,79 +780,16 @@ in
             }
             chmod +x "${cfg.dataDir}/hooks/"*.sh 2>/dev/null || true
 
-            # Write tmux-env.sh — shared helper sourced by the four tmux hooks below.
-            # It sets `tmux_bin` and recovers TMUX / TMUX_PANE when Claude Code has
-            # stripped them from the hook environment.
-            #
-            # Claude Code deletes a fixed list of terminal/session env vars (TMUX,
-            # TMUX_PANE, STY, ZELLIJ, SSH_*, ...) from every subprocess it spawns,
-            # hooks included — so `$TMUX`/`$TMUX_PANE` are empty in a hook even when
-            # claude itself runs inside tmux, and a naive `[ -n "$TMUX_PANE" ]` guard
-            # never passes. The claude process keeps those vars in its own
-            # /proc/<pid>/environ, so we walk up the hook's ancestry and copy them from
-            # the nearest ancestor that still carries TMUX_PANE.
-            cat > "${cfg.dataDir}/hooks/tmux-env.sh" <<'TMUXENV_EOF'
-      #!/bin/bash
-      # Resolve the tmux binary (hooks run non-interactively, so brew/nix PATH
-      # additions from .bashrc are absent).
-      tmux_bin="$(command -v tmux 2>/dev/null || true)"
-      if [ -z "$tmux_bin" ]; then
-          for _tp in /home/linuxbrew/.linuxbrew/bin/tmux /usr/local/bin/tmux /usr/bin/tmux; do
-              [ -x "$_tp" ] && tmux_bin="$_tp" && break
-          done
-      fi
-
-      # Recover TMUX / TMUX_PANE from an ancestor if Claude Code stripped them.
-      if [ -z "$TMUX" ] || [ -z "$TMUX_PANE" ]; then
-          _pid=$PPID
-          _hops=0
-          while [ -n "$_pid" ] && [ "$_pid" -gt 1 ] && [ "$_hops" -lt 10 ]; do
-              if [ -r "/proc/$_pid/environ" ]; then
-                  _pane=$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null | sed -n 's/^TMUX_PANE=//p' | head -n1)
-                  if [ -n "$_pane" ]; then
-                      TMUX_PANE="$_pane"
-                      TMUX=$(tr '\0' '\n' < "/proc/$_pid/environ" 2>/dev/null | sed -n 's/^TMUX=//p' | head -n1)
-                      export TMUX TMUX_PANE
-                      break
-                  fi
-              fi
-              # ppid = second field after the comm field in /proc/<pid>/stat; strip
-              # everything up to the last ") " first so a process name containing
-              # spaces or parens cannot shift the field positions.
-              _pid=$(sed 's/.*) //' "/proc/$_pid/stat" 2>/dev/null | cut -d' ' -f2)
-              _hops=$((_hops + 1))
-          done
-      fi
-      # Persist TMUX_PANE whenever the walker (or direct env) found it, so
-      # double-forked hooks (e.g. Notification) can use it as a fallback.
-      if [ -n "$TMUX_PANE" ]; then
-          printf '%s\n%s\n' "$TMUX" "$TMUX_PANE" > /tmp/claude-tmux-pane-info 2>/dev/null || true
-      elif [ -f /tmp/claude-tmux-pane-info ]; then
-          TMUX=$(sed -n '1p' /tmp/claude-tmux-pane-info 2>/dev/null)
-          TMUX_PANE=$(sed -n '2p' /tmp/claude-tmux-pane-info 2>/dev/null)
-          export TMUX TMUX_PANE
-      fi
-      TMUXENV_EOF
-            chmod +x "${cfg.dataDir}/hooks/tmux-env.sh"
-
-            # Write notify.sh — Stop hook: rings a terminal bell and renames the tmux
-            # window to mark task completion. The bell passes through the container's
-            # tmux (allow-passthrough on) to the macOS terminal.
-            #
-            # The tmux config mirrors the window name from #{pane_title}, which Claude
-            # Code keeps re-setting via OSC. To stop it reverting our name, freeze the
-            # window (automatic-rename/allow-rename off) before renaming.
-            # claude-working.sh (UserPromptSubmit) re-enables live tracking.
+            # Write notify.sh — Stop hook. A thin wrapper: it keeps the
+            # background-tasks guard (a turn that only paused on backgrounded work
+            # is not "done") and then delegates to the shared agent-signal.sh
+            # producer, which does the tmux freeze/rename + desktop-notification
+            # signal shared with OpenCode and Codex.
             cat > "${cfg.dataDir}/hooks/notify.sh" <<'NOTIFY_EOF'
       #!/bin/bash
-      # The Stop hook fires whenever the main agent finishes a turn, including when
-      # it only paused to wait for backgrounded work to wake it back up. Claude Code's
-      # Stop payload lists that work in .background_tasks (running/pending backgrounded
-      # shells, subagents and workflows; empty when nothing is in flight), so a
-      # non-empty array means the turn ended waiting on background work, not finished.
-      # Skip the bell, the window rename, and the desktop notification in that case so
-      # we do not false-signal "done". (A long-lived detached task that never exits
-      # keeps this suppressed; the tick fires on the next Stop once the work drains.)
+      # Stop hook — delegate to the shared agent-signal.sh producer. The turn may have
+      # only paused on backgrounded work (.background_tasks non-empty in the payload),
+      # which is not "done"; skip the signal in that case.
       hook_input="$(cat)"
       _bg=0
       if command -v jq >/dev/null 2>&1; then
@@ -861,44 +798,8 @@ in
       [ -n "$_bg" ] || _bg=0
       case "$_bg" in *[!0-9]*) _bg=0 ;; esac
       [ "$_bg" -gt 0 ] && exit 0
-
-      printf '\a'
-
-      source /home/agent/.hooks/tmux-env.sh
-
-      orig_title=""
-      if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-          orig_title=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null || true)
-          # Strip Claude Code leading status symbol + space (⠂, ✳, braille spinners, etc.)
-          # Non-ASCII chars have first byte > 127; strip them and the trailing space.
-          _fb=$(printf '%s' "$orig_title" | od -An -tu1 -N1 | tr -d ' \n')
-          [ -n "$_fb" ] && [ "$_fb" -gt 127 ] 2>/dev/null && orig_title="''${orig_title#* }"
-          # Truncate to 15 chars with … suffix (mirrors automatic-rename-format)
-          [ "''${#orig_title}" -gt 15 ] && orig_title="''${orig_title:0:14}…"
-          [ -z "$orig_title" ] && orig_title="done"
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename off
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename off
-          "$tmux_bin" rename-window -t "$TMUX_PANE" "✅ $orig_title"
-          # Set flag so PostToolUse (claude-working.sh) does not re-enable auto-rename
-          # if it fires after this Stop hook. Cleared by claude-prompt-start.sh on the
-          # next UserPromptSubmit.
-          touch "/tmp/claude-done-''${TMUX_PANE}"
-      fi
-
-      # Signal the macOS host LaunchAgent to show a notification center alert.
-      # Fails silently when the signals volume is not mounted. The tab-separated
-      # second field is the tmux target (session:window) the host uses to jump here
-      # when you click the notification.
-      _notify_msg="Claude task done"
-      [ -n "$orig_title" ] && [ "$orig_title" != "done" ] && _notify_msg="Claude done: $orig_title"
-      _target=""
-      [ -n "$tmux_bin" ] && [ -n "$TMUX_PANE" ] && _target=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}' 2>/dev/null || true)
-      # Keep the signal well-formed and host-safe: strip control chars (incl. the TAB
-      # field delimiter and newlines) from the message, and restrict the jump target
-      # to the tmux "session:window" charset the host validator accepts.
-      _notify_msg=$(printf '%s' "$_notify_msg" | tr -d '\000-\037')
-      _target=$(printf '%s' "$_target" | tr -cd 'A-Za-z0-9_:.-')
-      printf '%s\t%s' "$_notify_msg" "$_target" > /home/agent/.signals/claude-notify 2>/dev/null || true
+      export AGENT_NAME="Claude"
+      exec bash /home/agent/.local/bin/agent-signal.sh done
       NOTIFY_EOF
             chmod +x "${cfg.dataDir}/hooks/notify.sh"
 
@@ -911,58 +812,15 @@ in
             # name alone.
             cat > "${cfg.dataDir}/hooks/claude-waiting.sh" <<'WAITING_EOF'
       #!/bin/bash
+      # Notification hook — only events that genuinely need the human flip the window;
+      # idle_prompt / auth_success / elicitation lifecycle noise is ignored.
       input="$(cat)"
-      # Claude Code puts notification_type in the Notification hook payload. Flag the
-      # events that genuinely need you:
-      #   permission_prompt / worker_permission_prompt — blocked on tool approval
-      #   elicitation_dialog                           — Claude is asking you a
-      #                                                   question (AskUserQuestion)
-      # *permission_prompt* also matches worker_permission_prompt. idle_prompt is
-      # intentionally NOT matched: it fires ~60s after Stop and on new sessions, which
-      # would double-notify and stomp the "✅ done" window name. auth_success and
-      # elicitation_{complete,response} are lifecycle noise.
       case "$input" in
-          *permission_prompt*|*elicitation_dialog*) ;;   # needs approval or an answer
+          *permission_prompt*|*elicitation_dialog*) ;;
           *) exit 0 ;;
       esac
-
-      printf '\a'
-
-      source /home/agent/.hooks/tmux-env.sh
-
-      _pane_title=""
-      if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-          _pane_title=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null || true)
-          # Strip Claude Code leading status symbol + space (and any prior ✅/🔔 prefix);
-          # non-ASCII chars have first byte > 127. Mirrors notify.sh so the bell shows
-          # the origin (conversation) title instead of a generic "needs you".
-          _fb=$(printf '%s' "$_pane_title" | od -An -tu1 -N1 | tr -d ' \n')
-          [ -n "$_fb" ] && [ "$_fb" -gt 127 ] 2>/dev/null && _pane_title="''${_pane_title#* }"
-          # Truncate to 15 chars with … suffix (mirrors automatic-rename-format)
-          [ "''${#_pane_title}" -gt 15 ] && _pane_title="''${_pane_title:0:14}…"
-          [ -z "$_pane_title" ] && _pane_title="needs you"
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename off
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename off
-          "$tmux_bin" rename-window -t "$TMUX_PANE" "🔔 $_pane_title"
-          # Flag the waiting state so claude-working.sh (PostToolUse) knows to clear the
-          # bell once Claude resumes after the answer. Also cleared by
-          # claude-prompt-start.sh on the next UserPromptSubmit.
-          touch "/tmp/claude-waiting-''${TMUX_PANE}"
-      fi
-
-      # Signal the macOS host LaunchAgent to show a notification center alert. The
-      # tab-separated second field is the tmux target (session:window) the host uses
-      # to jump here when you click the notification.
-      _notify_msg="Claude needs your attention"
-      [ -n "$_pane_title" ] && _notify_msg="Claude needs you: $_pane_title"
-      _target=""
-      [ -n "$tmux_bin" ] && [ -n "$TMUX_PANE" ] && _target=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}' 2>/dev/null || true)
-      # Keep the signal well-formed and host-safe: strip control chars (incl. the TAB
-      # field delimiter and newlines) from the message, and restrict the jump target
-      # to the tmux "session:window" charset the host validator accepts.
-      _notify_msg=$(printf '%s' "$_notify_msg" | tr -d '\000-\037')
-      _target=$(printf '%s' "$_target" | tr -cd 'A-Za-z0-9_:.-')
-      printf '%s\t%s' "$_notify_msg" "$_target" > /home/agent/.signals/claude-notify 2>/dev/null || true
+      export AGENT_NAME="Claude"
+      exec bash /home/agent/.local/bin/agent-signal.sh waiting
       WAITING_EOF
             chmod +x "${cfg.dataDir}/hooks/claude-waiting.sh"
 
@@ -972,23 +830,10 @@ in
             # so that a stray PostToolUse cannot wipe the "✅ done" window name.
             cat > "${cfg.dataDir}/hooks/claude-working.sh" <<'WORKING_EOF'
       #!/bin/bash
-      # PostToolUse hook: re-enable live window-name tracking after Claude resumes work
-      # (e.g. after a permission prompt is approved). Skip if the Stop hook has already
-      # fired this turn — the done flag ensures "✅ done" is not wiped by a stray
-      # PostToolUse that fires after Stop. The flag is cleared by claude-prompt-start.sh
-      # on the next UserPromptSubmit.
-      source /home/agent/.hooks/tmux-env.sh
-
-      [ -n "$TMUX_PANE" ] && [ -f "/tmp/claude-done-''${TMUX_PANE}" ] && exit 0
-      # If we were blocked on a human reply (flag set by claude-waiting.sh), this
-      # PostToolUse means Claude has resumed after the answer — clear the bell by
-      # dropping the flag and falling through to re-enable live title tracking below.
-      [ -n "$TMUX_PANE" ] && rm -f "/tmp/claude-waiting-''${TMUX_PANE}"
-
-      if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename on
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename on
-      fi
+      # PostToolUse hook — re-enable live title tracking after Claude resumes (e.g. an
+      # approved permission prompt). agent-signal.sh no-ops if Stop already marked the
+      # turn done, so a stray PostToolUse cannot wipe the "done" name.
+      exec bash /home/agent/.local/bin/agent-signal.sh working
       WORKING_EOF
             chmod +x "${cfg.dataDir}/hooks/claude-working.sh"
 
@@ -997,14 +842,9 @@ in
             # tracking while Claude works on the new prompt.
             cat > "${cfg.dataDir}/hooks/claude-prompt-start.sh" <<'PROMPT_EOF'
       #!/bin/bash
-      source /home/agent/.hooks/tmux-env.sh
-
-      [ -n "$TMUX_PANE" ] && rm -f "/tmp/claude-done-''${TMUX_PANE}" "/tmp/claude-waiting-''${TMUX_PANE}"
-
-      if [ -n "$tmux_bin" ] && [ -n "$TMUX" ] && [ -n "$TMUX_PANE" ]; then
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename on
-          "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename on
-      fi
+      # UserPromptSubmit hook — clear the done/waiting flags and resume live title
+      # tracking for the new turn.
+      exec bash /home/agent/.local/bin/agent-signal.sh start
       PROMPT_EOF
             chmod +x "${cfg.dataDir}/hooks/claude-prompt-start.sh"
 
