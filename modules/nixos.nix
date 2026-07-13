@@ -42,6 +42,17 @@ let
     };
   effectiveOpencodePermission = lib.recursiveUpdate cfg.settings.opencodeConfig.permission cfg.settings.opencodeConfig.extraPermission;
 
+  codexFormat = pkgs.formats.toml { };
+  codexConfigToml = codexFormat.generate "agentbox-codex-config.toml" (
+    lib.recursiveUpdate cfg.settings.codexConfig.settings {
+      notify = [
+        "bash"
+        "/home/agent/.local/bin/codex-notify.sh"
+      ];
+    }
+  );
+  codexRequirementsToml = codexFormat.generate "agentbox-codex-requirements.toml" cfg.settings.codexConfig.requirements;
+
   # Claude Code configuration.
   # ~/.claude.json holds mcpServers (and Claude's own runtime state). Hooks and
   # permissions are NOT read from this file — Claude Code reads those from
@@ -83,24 +94,33 @@ let
     }
   );
 
-  # OpenCode configuration
+  # OpenCode configuration. Generic settings are the base; typed module
+  # options remain authoritative where both define the same key.
   opencodeConfigJson = pkgs.writeText "opencode.json" (
     builtins.toJSON (
-      {
-        "$schema" = "https://opencode.ai/config.json";
-        default_agent = cfg.settings.opencodeConfig.defaultAgent;
-        plugin = cfg.settings.opencodeConfig.plugins;
-        permission = effectiveOpencodePermission;
-        agent = cfg.settings.opencodeConfig.agents;
-        small_model = cfg.settings.opencodeConfig.smallModel;
-      }
-      // lib.optionalAttrs (cfg.settings.opencodeConfig.defaultModel != null) {
-        model = cfg.settings.opencodeConfig.defaultModel;
-      }
-      // lib.optionalAttrs (cfg.settings.opencodeConfig.providers != { }) {
-        provider = cfg.settings.opencodeConfig.providers;
-      }
+      lib.recursiveUpdate cfg.settings.opencodeConfig.settings (
+        {
+          "$schema" = "https://opencode.ai/config.json";
+          default_agent = cfg.settings.opencodeConfig.defaultAgent;
+          plugin = cfg.settings.opencodeConfig.plugins;
+          permission = effectiveOpencodePermission;
+          agent = cfg.settings.opencodeConfig.agents;
+          small_model = cfg.settings.opencodeConfig.smallModel;
+        }
+        // lib.optionalAttrs (cfg.settings.opencodeConfig.defaultModel != null) {
+          model = cfg.settings.opencodeConfig.defaultModel;
+        }
+        // lib.optionalAttrs (cfg.settings.opencodeConfig.providers != { }) {
+          provider = cfg.settings.opencodeConfig.providers;
+        }
+      )
     )
+  );
+  opencodeManagedConfigJson = pkgs.writeText "managed-opencode.json" (
+    builtins.toJSON {
+      "$schema" = "https://opencode.ai/config.json";
+      permission = effectiveOpencodePermission;
+    }
   );
 
   gitConfigFile = pkgs.writeText ".gitconfig" cfg.settings.gitConfig;
@@ -416,6 +436,10 @@ in
         # Enterprise policy file, READ-ONLY: pins the permission deny list and the
         # safety hooks above the agent-writable settings.json (see managedSettingsJson).
         "${cfg.dataDir}/managed/managed-settings.json:/etc/claude-code/managed-settings.json:ro"
+        # Codex requirements are the equivalent managed layer: user config can
+        # add preferences but cannot disable the reviewer or secret-path denies.
+        "${cfg.dataDir}/managed/codex-requirements.toml:/etc/codex/requirements.toml:ro"
+        "${cfg.dataDir}/managed/opencode.json:/etc/opencode/opencode.json:ro"
         "${cfg.dataDir}/home/.claude:/home/agent/.claude"
         "${cfg.dataDir}/home/.codex:/home/agent/.codex"
         "${cfg.dataDir}/home/.config/opencode:/home/agent/.config/opencode"
@@ -571,10 +595,55 @@ in
                         chown root:root "${cfg.dataDir}/managed/managed-settings.json"
                         chmod 644 "${cfg.dataDir}/managed/managed-settings.json"
 
-                        # Copy OpenCode configuration
-                        cp -f ${opencodeConfigJson} "${cfg.dataDir}/home/.config/opencode/opencode.json"
-                        chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/home/.config/opencode/opencode.json"
-                        chmod 644 "${cfg.dataDir}/home/.config/opencode/opencode.json"
+                        # Codex's user config is shared with CLI-persisted state. Merge
+                        # Nix-owned settings over it while preserving unknown keys.
+                        _nix_codex=${codexConfigToml}
+                        _live_codex="${cfg.dataDir}/home/.codex/config.toml"
+                        _merged_codex=""
+                        if [ -f "$_live_codex" ]; then
+                          _merged_codex="$(${pkgs.yq-go}/bin/yq eval-all \
+                            --input-format=toml --output-format=toml \
+                            '. as $item ireduce ({}; . * $item)' \
+                            "$_live_codex" "$_nix_codex" 2>/dev/null)"
+                        fi
+                        [ -n "$_merged_codex" ] || _merged_codex="$(cat "$_nix_codex")"
+                        if [ ! -f "$_live_codex" ] || [ "$(cat "$_live_codex" 2>/dev/null)" != "$_merged_codex" ]; then
+                          _codex_tmp="$_live_codex.tmp"
+                          printf '%s\n' "$_merged_codex" > "$_codex_tmp"
+                          mv -f "$_codex_tmp" "$_live_codex"
+                          chown ${cfg.user}:${cfg.group} "$_live_codex"
+                          chmod 644 "$_live_codex"
+                        fi
+
+                        # Managed Codex requirements are root-owned and mounted
+                        # read-only, analogous to Claude Code managed settings.
+                        cp -f ${codexRequirementsToml} "${cfg.dataDir}/managed/codex-requirements.toml"
+                        chown root:root "${cfg.dataDir}/managed/codex-requirements.toml"
+                        chmod 644 "${cfg.dataDir}/managed/codex-requirements.toml"
+
+                        # OpenCode loads /etc/opencode after user and project config,
+                        # making these deny rules authoritative inside the container.
+                        cp -f ${opencodeManagedConfigJson} "${cfg.dataDir}/managed/opencode.json"
+                        chown root:root "${cfg.dataDir}/managed/opencode.json"
+                        chmod 644 "${cfg.dataDir}/managed/opencode.json"
+
+                        # Preserve OpenCode-owned/global keys while reasserting all
+                        # declarative settings and permission denies.
+                        _nix_opencode=${opencodeConfigJson}
+                        _live_opencode="${cfg.dataDir}/home/.config/opencode/opencode.json"
+                        _merged_opencode=""
+                        if [ -f "$_live_opencode" ]; then
+                          _merged_opencode="$(${pkgs.jq}/bin/jq -s '.[0] * .[1]' \
+                            "$_live_opencode" "$_nix_opencode" 2>/dev/null)"
+                        fi
+                        [ -n "$_merged_opencode" ] || _merged_opencode="$(cat "$_nix_opencode")"
+                        if [ ! -f "$_live_opencode" ] || [ "$(cat "$_live_opencode" 2>/dev/null)" != "$_merged_opencode" ]; then
+                          _opencode_tmp="$_live_opencode.tmp"
+                          printf '%s\n' "$_merged_opencode" > "$_opencode_tmp"
+                          mv -f "$_opencode_tmp" "$_live_opencode"
+                          chown ${cfg.user}:${cfg.group} "$_live_opencode"
+                          chmod 644 "$_live_opencode"
+                        fi
 
                         # Copy git config
                         cp -f ${gitConfigFile} "${cfg.dataDir}/home/.gitconfig"

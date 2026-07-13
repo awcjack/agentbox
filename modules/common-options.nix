@@ -11,6 +11,117 @@
 }:
 let
   cfg = config.services.agentbox;
+
+  # Shared secret-path vocabulary translated into each harness's matcher
+  # syntax below. Keep templates out so .env.example/.sample/.template remain
+  # usable.
+  secretPathPatterns = [
+    ".env"
+    ".env.local"
+    ".env*local*"
+    ".env*dev*"
+    ".env*prod*"
+    ".env*stag*"
+    ".env*test*"
+    "values*dev*"
+    "values*prod*"
+    "values*stag*"
+    "values*test*"
+    "*secret*.yaml"
+    "*secret*.yml"
+    "*.pem"
+    "*.key"
+    "id_rsa*"
+    "id_ed25519*"
+    "id_ecdsa*"
+    ".ssh/*"
+    ".aws/*"
+    ".config/gcloud/*"
+    ".kube/*"
+    ".netrc"
+    ".npmrc"
+    ".pypirc"
+    ".git-credentials"
+    "credentials.json"
+    "service-account*.json"
+    "gcp-key*.json"
+    "*.gpg"
+    "*.asc"
+    "secrets/*"
+  ];
+  opencodeSecretPatterns = map (pattern: "*${pattern}") secretPathPatterns;
+  opencodeSecretRules = lib.genAttrs opencodeSecretPatterns (_: "deny");
+  opencodeTemplateRules = {
+    "*.env.example" = "allow";
+    "*.env.sample" = "allow";
+    "*.env.template" = "allow";
+  };
+  opencodeReadRules = opencodeSecretRules // opencodeTemplateRules // { "*.pub" = "allow"; };
+  opencodeEditRules = opencodeSecretRules // opencodeTemplateRules;
+
+  # OpenCode shell permissions match command strings, so mirror Claude's
+  # reader/filter/editor/copy matrix in addition to native read/edit denies.
+  secretExfilCommands = [
+    "cat"
+    "head"
+    "tail"
+    "base64"
+    "sed"
+    "awk"
+    "grep"
+    "egrep"
+    "fgrep"
+    "rg"
+    "ag"
+    "nl"
+    "tac"
+    "rev"
+    "cut"
+    "tr"
+    "fold"
+    "expand"
+    "paste"
+    "column"
+    "col"
+    "less"
+    "more"
+    "most"
+    "pg"
+    "xxd"
+    "od"
+    "hexdump"
+    "strings"
+    "base32"
+    "uuencode"
+    "vi"
+    "vim"
+    "nvim"
+    "nano"
+    "ex"
+    "view"
+    "emacs"
+    "dd"
+    "cp"
+    "mv"
+    "install"
+    "rsync"
+    "ln"
+  ];
+  opencodeSecretBashRules = lib.listToAttrs (
+    lib.concatMap (
+      command: map (pattern: lib.nameValuePair "${command} ${pattern}" "deny") opencodeSecretPatterns
+    ) secretExfilCommands
+  );
+  codexDenyRead =
+    map (pattern: "/workspace/**/${pattern}") secretPathPatterns
+    ++ map (pattern: "/home/agent/**/${pattern}") secretPathPatterns;
+  codexRiskPolicy = ''
+    Never approve credential disclosure, attempts to read denied secret paths,
+    destructive operations outside the user's stated intent, or bypasses of
+    configured safety controls. Treat production deployments, migrations,
+    infrastructure mutations, force pushes, and uploads of private workspace
+    data as high risk unless the user explicitly authorized the exact action.
+  '';
 in
 {
   options.services.agentbox = {
@@ -203,6 +314,88 @@ in
         example = "2.1.92";
         description = "Claude Code version to install via the official native installer (CLAUDE_CODE_VERSION). Use 'latest' or 'stable' for a release channel, or an exact version like '2.1.92'. After install, Claude Code's native self-updater keeps it current.";
       };
+
+      # Codex CLI configuration
+      codexConfig = {
+        settings = lib.mkOption {
+          type = (pkgs.formats.toml { }).type;
+          default = {
+            approval_policy = "on-request";
+            approvals_reviewer = "auto_review";
+            sandbox_mode = "workspace-write";
+            auto_review.policy = codexRiskPolicy;
+          };
+          example = {
+            model_reasoning_effort = "high";
+          };
+          description = ''
+            Declarative settings deep-merged into ~/.codex/config.toml on each
+            activation. Codex-owned keys not declared here are preserved.
+            Agentbox reserves the root notify key for its notification bridge.
+          '';
+        };
+
+        requirements = lib.mkOption {
+          type = (pkgs.formats.toml { }).type;
+          default = {
+            allowed_approval_policies = [ "on-request" ];
+            allowed_approvals_reviewers = [ "auto_review" ];
+            # Codex requires read-only to remain available when permission
+            # profiles are constrained; danger-full-access stays prohibited.
+            allowed_sandbox_modes = [
+              "read-only"
+              "workspace-write"
+            ];
+            guardian_policy_config = codexRiskPolicy;
+            permissions.filesystem.deny_read = codexDenyRead;
+            rules.prefix_rules = [
+              {
+                pattern = [ { token = "sudo"; } ];
+                decision = "forbidden";
+                justification = "Agentbox does not allow Codex to invoke sudo.";
+              }
+              {
+                pattern = [ { token = "su"; } ];
+                decision = "forbidden";
+                justification = "Agentbox does not allow Codex to switch users.";
+              }
+              {
+                pattern = [
+                  { token = "rm"; }
+                  {
+                    any_of = [
+                      "-rf"
+                      "-fr"
+                    ];
+                  }
+                  {
+                    any_of = [
+                      "/"
+                      "/*"
+                    ];
+                  }
+                ];
+                decision = "forbidden";
+                justification = "Deleting the filesystem root is prohibited.";
+              }
+              {
+                pattern = [
+                  { token = "chmod"; }
+                  { token = "777"; }
+                ];
+                decision = "forbidden";
+                justification = "World-writable permissions are prohibited.";
+              }
+            ];
+          };
+          description = ''
+            Managed Codex policy written root-owned to /etc/codex/requirements.toml.
+            It enforces the automatic reviewer, excludes danger-full-access, and
+            applies the Claude-equivalent credential deny list at sandbox level.
+          '';
+        };
+      };
+
       sessionWorkingDirectory = lib.mkOption {
         type = lib.types.str;
         default = "/workspace";
@@ -387,287 +580,320 @@ in
               # even against the blanket Bash(cat *)/Bash(grep *) allows.
               secretExfilCmds = [
                 # content readers / filters
-                "sed" "awk" "grep" "egrep" "fgrep" "rg" "ag"
-                "nl" "tac" "rev" "cut" "tr" "fold" "expand" "paste" "column" "col"
+                "sed"
+                "awk"
+                "grep"
+                "egrep"
+                "fgrep"
+                "rg"
+                "ag"
+                "nl"
+                "tac"
+                "rev"
+                "cut"
+                "tr"
+                "fold"
+                "expand"
+                "paste"
+                "column"
+                "col"
                 # pagers
-                "less" "more" "most" "pg"
+                "less"
+                "more"
+                "most"
+                "pg"
                 # binary / encoded dumps
-                "xxd" "od" "hexdump" "strings" "base32" "uuencode"
+                "xxd"
+                "od"
+                "hexdump"
+                "strings"
+                "base32"
+                "uuencode"
                 # editors (open == read)
-                "vi" "vim" "nvim" "nano" "ex" "view" "emacs"
+                "vi"
+                "vim"
+                "nvim"
+                "nano"
+                "ex"
+                "view"
+                "emacs"
                 # raw copy / relocate vectors (exfil by making a readable copy)
-                "dd" "cp" "mv" "install" "rsync" "ln"
+                "dd"
+                "cp"
+                "mv"
+                "install"
+                "rsync"
+                "ln"
               ];
-              secretExfilDeny =
-                lib.concatMap
-                  (cmd: map (glob: "Bash(${cmd} ${glob})") secretFileGlobs)
-                  secretExfilCmds;
+              secretExfilDeny = lib.concatMap (
+                cmd: map (glob: "Bash(${cmd} ${glob})") secretFileGlobs
+              ) secretExfilCmds;
             in
             {
-            defaultMode = "auto";
-            allow = [
-              "Bash(npm *)"
-              "Bash(npx *)"
-              "Bash(bun *)"
-              "Bash(go *)"
-              "Bash(make *)"
-              "Bash(git *)"
-              "Bash(gh *)"
-              "Bash(docker *)"
-              "Bash(docker-compose *)"
-              "Bash(ls *)"
-              "Bash(pwd)"
-              "Bash(mkdir *)"
-              "Bash(rm *)"
-              "Bash(cp *)"
-              "Bash(mv *)"
-              "Bash(chmod *)"
-              "Bash(cat *)"
-              "Bash(head *)"
-              "Bash(tail *)"
-              "Bash(grep *)"
-              "Bash(find *)"
-              "Bash(wc *)"
-              "Bash(sort *)"
-              "Bash(uniq *)"
-              "Bash(diff *)"
-              "Bash(curl *)"
-              "Bash(wget *)"
-              "Bash(python *)"
-              "Bash(python3 *)"
-              "Bash(pip *)"
-              "Bash(pip3 *)"
-              "Bash(cargo *)"
-              "Bash(rustc *)"
-              "Bash(swift *)"
-              "Bash(swiftc *)"
-              # Explicitly permit harmless template / public files. Because
-              # deny ALWAYS beats allow (regardless of specificity), an allow
-              # entry can never rescue a path that a deny also matches. So the
-              # secret denylist below is deliberately enumerated to concrete
-              # env/values variants (.env, .env.local, .env*dev*, values*prod*,
-              # ...) and never uses a blanket .env.* — that is what leaves
-              # .env.example / .sample / .template un-denied. These allow
-              # entries then make the templates readable/writable per tool
-              # (the blanket Bash(cat *) / Bash(grep *) allows above cannot
-              # distinguish a template from a secret on their own).
-              "Read(**/.env.example)"
-              "Read(**/.env.sample)"
-              "Read(**/.env.template)"
-              "Grep(**/.env.example)"
-              "Grep(**/.env.sample)"
-              "Grep(**/.env.template)"
-              "Bash(cat **/.env.example)"
-              "Bash(cat **/.env.sample)"
-              "Bash(cat **/.env.template)"
-              "Bash(head **/.env.example)"
-              "Bash(head **/.env.sample)"
-              "Bash(head **/.env.template)"
-              "Bash(tail **/.env.example)"
-              "Bash(tail **/.env.sample)"
-              "Bash(tail **/.env.template)"
-              # Allow writing / editing template files. The Edit deny above is
-              # enumerated to concrete secret variants (never a blanket .env.*),
-              # so templates fall through; these explicit Write/Edit allows make
-              # that intent clear per tool, just like Read/Grep/Bash above.
-              "Write(**/.env.example)"
-              "Write(**/.env.sample)"
-              "Write(**/.env.template)"
-              "Edit(**/.env.example)"
-              "Edit(**/.env.sample)"
-              "Edit(**/.env.template)"
-              "Bash(tee **/.env.example)"
-              "Bash(tee **/.env.sample)"
-              "Bash(tee **/.env.template)"
-              "Read(**/*.pub)"
-            ];
-            deny = [
-              "Bash(sudo *)"
-              "Bash(su *)"
-              "Bash(rm -rf /)"
-              "Bash(rm -rf /*)"
-              "Bash(chmod 777 *)"
-              # Secret-file denylist (defense-in-depth at the harness layer).
-              # Each tool is denied separately — Claude Code does not propagate
-              # a Read deny to Grep / Glob / Bash-via-cat.
-              "Read(**/.env)"
-              "Read(**/.env.local)"
-              "Read(**/.env**local)"
-              "Read(**/.env**dev**)"
-              "Read(**/.env**prod**)"
-              "Read(**/.env**stag**)"
-              "Read(**/.env**test**)"
-              "Read(**/values**dev**)"
-              "Read(**/values**prod**)"
-              "Read(**/values**stag**)"
-              "Read(**/values**test**)"
-              "Read(**/*secret*.yaml)"
-              "Read(**/*secret*.yml)"
-              "Read(**/*.pem)"
-              "Read(**/*.key)"
-              "Read(**/id_rsa)"
-              "Read(**/id_rsa.*)"
-              "Read(**/id_ed25519)"
-              "Read(**/id_ed25519.*)"
-              "Read(**/.ssh/**)"
-              "Read(**/.aws/credentials)"
-              "Read(**/.aws/**)"
-              "Read(**/.netrc)"
-              "Read(**/.npmrc)"
-              "Read(**/.kube/config)"
-              "Read(**/.kube/**)"
-              "Read(**/.config/gcloud/**)"
-              "Read(**/secrets/**)"
-              "Read(**/credentials.json)"
-              "Read(**/service-account*.json)"
-              "Edit(**/.env)"
-              "Edit(**/.env.local)"
-              "Edit(**/.env**local)"
-              "Edit(**/.env**dev**)"
-              "Edit(**/.env**prod**)"
-              "Edit(**/.env**stag**)"
-              "Edit(**/.env**test**)"
-              "Edit(**/values**dev**)"
-              "Edit(**/values**prod**)"
-              "Edit(**/values**stag**)"
-              "Edit(**/values**test**)"
-              "Edit(**/*secret*.yaml)"
-              "Edit(**/*secret*.yml)"
-              "Edit(**/*.pem)"
-              "Edit(**/*.key)"
-              "Edit(**/id_rsa*)"
-              "Edit(**/id_ed25519*)"
-              "Edit(**/.ssh/**)"
-              "Edit(**/.aws/credentials)"
-              "Edit(**/.config/gcloud/**)"
-              "Edit(**/.kube/config)"
-              "Edit(**/secrets/**)"
-              "Glob(**/.env)"
-              "Glob(**/.env.local)"
-              "Glob(**/.env**local)"
-              "Glob(**/.env**dev**)"
-              "Glob(**/.env**prod**)"
-              "Glob(**/.env**stag**)"
-              "Glob(**/.env**test**)"
-              "Glob(**/values**dev**)"
-              "Glob(**/values**prod**)"
-              "Glob(**/values**stag**)"
-              "Glob(**/values**test**)"
-              "Glob(**/*secret*.yaml)"
-              "Glob(**/*secret*.yml)"
-              "Glob(**/*.pem)"
-              "Glob(**/*.key)"
-              "Glob(**/.ssh/**)"
-              "Glob(**/secrets/**)"
-              "Grep(**/.env)"
-              "Grep(**/.env.local)"
-              "Grep(**/.env**local)"
-              "Grep(**/.env**dev**)"
-              "Grep(**/.env**prod**)"
-              "Grep(**/.env**stag**)"
-              "Grep(**/.env**test**)"
-              "Grep(**/values**dev**)"
-              "Grep(**/values**prod**)"
-              "Grep(**/values**stag**)"
-              "Grep(**/values**test**)"
-              "Grep(**/*secret*.yaml)"
-              "Grep(**/*secret*.yml)"
-              "Grep(**/*.pem)"
-              "Grep(**/*.key)"
-              "Grep(**/.ssh/**)"
-              "Grep(**/secrets/**)"
-              "Bash(cat **/.env)"
-              "Bash(cat **/.env.local)"
-              "Bash(cat **/.env**local)"
-              "Bash(cat **/.env**dev**)"
-              "Bash(cat **/.env**prod**)"
-              "Bash(cat **/.env**stag**)"
-              "Bash(cat **/.env**test**)"
-              "Bash(cat **/values**dev**)"
-              "Bash(cat **/values**prod**)"
-              "Bash(cat **/values**stag**)"
-              "Bash(cat **/values**test**)"
-              "Bash(cat **/*secret*.yaml)"
-              "Bash(cat **/*secret*.yml)"
-              "Bash(cat *.pem)"
-              "Bash(cat **/*.pem)"
-              "Bash(cat *.key)"
-              "Bash(cat **/*.key)"
-              "Bash(cat **/id_rsa*)"
-              "Bash(cat **/id_ed25519*)"
-              "Bash(cat **/.ssh/**)"
-              "Bash(cat **/.aws/credentials)"
-              "Bash(cat **/.config/gcloud/**)"
-              "Bash(cat **/.kube/config)"
-              "Bash(cat **/.netrc)"
-              "Bash(head **/.env)"
-              "Bash(head **/.env.local)"
-              "Bash(head **/.env**local)"
-              "Bash(head **/.env**dev**)"
-              "Bash(head **/.env**prod**)"
-              "Bash(head **/.env**stag**)"
-              "Bash(head **/.env**test**)"
-              "Bash(head **/values**dev**)"
-              "Bash(head **/values**prod**)"
-              "Bash(head **/values**stag**)"
-              "Bash(head **/values**test**)"
-              "Bash(head **/*secret*.yaml)"
-              "Bash(head **/*secret*.yml)"
-              "Bash(tail **/.env)"
-              "Bash(tail **/.env.local)"
-              "Bash(tail **/.env**local)"
-              "Bash(tail **/.env**dev**)"
-              "Bash(tail **/.env**prod**)"
-              "Bash(tail **/.env**stag**)"
-              "Bash(tail **/.env**test**)"
-              "Bash(tail **/values**dev**)"
-              "Bash(tail **/values**prod**)"
-              "Bash(tail **/values**stag**)"
-              "Bash(tail **/values**test**)"
-              "Bash(tail **/*secret*.yaml)"
-              "Bash(tail **/*secret*.yml)"
-              # Extra read-vector denials — block exfiltration of secret files by
-              # encoding/dumping (base64/xxd/od/hexdump/strings) or copying them
-              # out (cp), plus git-credentials.
-              "Bash(base64 **/.ssh/**)"
-              "Bash(base64 **/*.pem)"
-              "Bash(base64 **/*.key)"
-              "Bash(base64 **/.env)"
-              "Bash(base64 **/.env.local)"
-              "Bash(base64 **/.env**local)"
-              "Bash(base64 **/.env**dev**)"
-              "Bash(base64 **/.env**prod**)"
-              "Bash(base64 **/.env**stag**)"
-              "Bash(base64 **/.env**test**)"
-              "Bash(base64 **/values**dev**)"
-              "Bash(base64 **/values**prod**)"
-              "Bash(base64 **/values**stag**)"
-              "Bash(base64 **/values**test**)"
-              "Bash(base64 **/*secret*.yaml)"
-              "Bash(base64 **/*secret*.yml)"
-              "Bash(base64 **/.aws/**)"
-              "Bash(base64 **/.config/gcloud/**)"
-              "Bash(base64 **/.kube/**)"
-              "Bash(xxd **/.ssh/**)"
-              "Bash(xxd **/*.key)"
-              "Bash(xxd **/*.pem)"
-              "Bash(od **/.ssh/**)"
-              "Bash(hexdump **/.ssh/**)"
-              "Bash(strings **/.ssh/**)"
-              "Bash(strings **/*.key)"
-              "Bash(less **/.ssh/**)"
-              "Bash(more **/.ssh/**)"
-              "Bash(nl **/.ssh/**)"
-              "Bash(tac **/.ssh/**)"
-              "Bash(cp **/.ssh/**)"
-              "Bash(cp **/.aws/**)"
-              "Bash(cp **/.config/gcloud/**)"
-              "Bash(cp **/.kube/**)"
-              "Bash(cat **/.git-credentials)"
-              "Read(**/.git-credentials)"
-            ]
-            ++ secretExfilDeny;
-          };
+              defaultMode = "auto";
+              allow = [
+                "Bash(npm *)"
+                "Bash(npx *)"
+                "Bash(bun *)"
+                "Bash(go *)"
+                "Bash(make *)"
+                "Bash(git *)"
+                "Bash(gh *)"
+                "Bash(docker *)"
+                "Bash(docker-compose *)"
+                "Bash(ls *)"
+                "Bash(pwd)"
+                "Bash(mkdir *)"
+                "Bash(rm *)"
+                "Bash(cp *)"
+                "Bash(mv *)"
+                "Bash(chmod *)"
+                "Bash(cat *)"
+                "Bash(head *)"
+                "Bash(tail *)"
+                "Bash(grep *)"
+                "Bash(find *)"
+                "Bash(wc *)"
+                "Bash(sort *)"
+                "Bash(uniq *)"
+                "Bash(diff *)"
+                "Bash(curl *)"
+                "Bash(wget *)"
+                "Bash(python *)"
+                "Bash(python3 *)"
+                "Bash(pip *)"
+                "Bash(pip3 *)"
+                "Bash(cargo *)"
+                "Bash(rustc *)"
+                "Bash(swift *)"
+                "Bash(swiftc *)"
+                # Explicitly permit harmless template / public files. Because
+                # deny ALWAYS beats allow (regardless of specificity), an allow
+                # entry can never rescue a path that a deny also matches. So the
+                # secret denylist below is deliberately enumerated to concrete
+                # env/values variants (.env, .env.local, .env*dev*, values*prod*,
+                # ...) and never uses a blanket .env.* — that is what leaves
+                # .env.example / .sample / .template un-denied. These allow
+                # entries then make the templates readable/writable per tool
+                # (the blanket Bash(cat *) / Bash(grep *) allows above cannot
+                # distinguish a template from a secret on their own).
+                "Read(**/.env.example)"
+                "Read(**/.env.sample)"
+                "Read(**/.env.template)"
+                "Grep(**/.env.example)"
+                "Grep(**/.env.sample)"
+                "Grep(**/.env.template)"
+                "Bash(cat **/.env.example)"
+                "Bash(cat **/.env.sample)"
+                "Bash(cat **/.env.template)"
+                "Bash(head **/.env.example)"
+                "Bash(head **/.env.sample)"
+                "Bash(head **/.env.template)"
+                "Bash(tail **/.env.example)"
+                "Bash(tail **/.env.sample)"
+                "Bash(tail **/.env.template)"
+                # Allow writing / editing template files. The Edit deny above is
+                # enumerated to concrete secret variants (never a blanket .env.*),
+                # so templates fall through; these explicit Write/Edit allows make
+                # that intent clear per tool, just like Read/Grep/Bash above.
+                "Write(**/.env.example)"
+                "Write(**/.env.sample)"
+                "Write(**/.env.template)"
+                "Edit(**/.env.example)"
+                "Edit(**/.env.sample)"
+                "Edit(**/.env.template)"
+                "Bash(tee **/.env.example)"
+                "Bash(tee **/.env.sample)"
+                "Bash(tee **/.env.template)"
+                "Read(**/*.pub)"
+              ];
+              deny = [
+                "Bash(sudo *)"
+                "Bash(su *)"
+                "Bash(rm -rf /)"
+                "Bash(rm -rf /*)"
+                "Bash(chmod 777 *)"
+                # Secret-file denylist (defense-in-depth at the harness layer).
+                # Each tool is denied separately — Claude Code does not propagate
+                # a Read deny to Grep / Glob / Bash-via-cat.
+                "Read(**/.env)"
+                "Read(**/.env.local)"
+                "Read(**/.env**local)"
+                "Read(**/.env**dev**)"
+                "Read(**/.env**prod**)"
+                "Read(**/.env**stag**)"
+                "Read(**/.env**test**)"
+                "Read(**/values**dev**)"
+                "Read(**/values**prod**)"
+                "Read(**/values**stag**)"
+                "Read(**/values**test**)"
+                "Read(**/*secret*.yaml)"
+                "Read(**/*secret*.yml)"
+                "Read(**/*.pem)"
+                "Read(**/*.key)"
+                "Read(**/id_rsa)"
+                "Read(**/id_rsa.*)"
+                "Read(**/id_ed25519)"
+                "Read(**/id_ed25519.*)"
+                "Read(**/.ssh/**)"
+                "Read(**/.aws/credentials)"
+                "Read(**/.aws/**)"
+                "Read(**/.netrc)"
+                "Read(**/.npmrc)"
+                "Read(**/.kube/config)"
+                "Read(**/.kube/**)"
+                "Read(**/.config/gcloud/**)"
+                "Read(**/secrets/**)"
+                "Read(**/credentials.json)"
+                "Read(**/service-account*.json)"
+                "Edit(**/.env)"
+                "Edit(**/.env.local)"
+                "Edit(**/.env**local)"
+                "Edit(**/.env**dev**)"
+                "Edit(**/.env**prod**)"
+                "Edit(**/.env**stag**)"
+                "Edit(**/.env**test**)"
+                "Edit(**/values**dev**)"
+                "Edit(**/values**prod**)"
+                "Edit(**/values**stag**)"
+                "Edit(**/values**test**)"
+                "Edit(**/*secret*.yaml)"
+                "Edit(**/*secret*.yml)"
+                "Edit(**/*.pem)"
+                "Edit(**/*.key)"
+                "Edit(**/id_rsa*)"
+                "Edit(**/id_ed25519*)"
+                "Edit(**/.ssh/**)"
+                "Edit(**/.aws/credentials)"
+                "Edit(**/.config/gcloud/**)"
+                "Edit(**/.kube/config)"
+                "Edit(**/secrets/**)"
+                "Glob(**/.env)"
+                "Glob(**/.env.local)"
+                "Glob(**/.env**local)"
+                "Glob(**/.env**dev**)"
+                "Glob(**/.env**prod**)"
+                "Glob(**/.env**stag**)"
+                "Glob(**/.env**test**)"
+                "Glob(**/values**dev**)"
+                "Glob(**/values**prod**)"
+                "Glob(**/values**stag**)"
+                "Glob(**/values**test**)"
+                "Glob(**/*secret*.yaml)"
+                "Glob(**/*secret*.yml)"
+                "Glob(**/*.pem)"
+                "Glob(**/*.key)"
+                "Glob(**/.ssh/**)"
+                "Glob(**/secrets/**)"
+                "Grep(**/.env)"
+                "Grep(**/.env.local)"
+                "Grep(**/.env**local)"
+                "Grep(**/.env**dev**)"
+                "Grep(**/.env**prod**)"
+                "Grep(**/.env**stag**)"
+                "Grep(**/.env**test**)"
+                "Grep(**/values**dev**)"
+                "Grep(**/values**prod**)"
+                "Grep(**/values**stag**)"
+                "Grep(**/values**test**)"
+                "Grep(**/*secret*.yaml)"
+                "Grep(**/*secret*.yml)"
+                "Grep(**/*.pem)"
+                "Grep(**/*.key)"
+                "Grep(**/.ssh/**)"
+                "Grep(**/secrets/**)"
+                "Bash(cat **/.env)"
+                "Bash(cat **/.env.local)"
+                "Bash(cat **/.env**local)"
+                "Bash(cat **/.env**dev**)"
+                "Bash(cat **/.env**prod**)"
+                "Bash(cat **/.env**stag**)"
+                "Bash(cat **/.env**test**)"
+                "Bash(cat **/values**dev**)"
+                "Bash(cat **/values**prod**)"
+                "Bash(cat **/values**stag**)"
+                "Bash(cat **/values**test**)"
+                "Bash(cat **/*secret*.yaml)"
+                "Bash(cat **/*secret*.yml)"
+                "Bash(cat *.pem)"
+                "Bash(cat **/*.pem)"
+                "Bash(cat *.key)"
+                "Bash(cat **/*.key)"
+                "Bash(cat **/id_rsa*)"
+                "Bash(cat **/id_ed25519*)"
+                "Bash(cat **/.ssh/**)"
+                "Bash(cat **/.aws/credentials)"
+                "Bash(cat **/.config/gcloud/**)"
+                "Bash(cat **/.kube/config)"
+                "Bash(cat **/.netrc)"
+                "Bash(head **/.env)"
+                "Bash(head **/.env.local)"
+                "Bash(head **/.env**local)"
+                "Bash(head **/.env**dev**)"
+                "Bash(head **/.env**prod**)"
+                "Bash(head **/.env**stag**)"
+                "Bash(head **/.env**test**)"
+                "Bash(head **/values**dev**)"
+                "Bash(head **/values**prod**)"
+                "Bash(head **/values**stag**)"
+                "Bash(head **/values**test**)"
+                "Bash(head **/*secret*.yaml)"
+                "Bash(head **/*secret*.yml)"
+                "Bash(tail **/.env)"
+                "Bash(tail **/.env.local)"
+                "Bash(tail **/.env**local)"
+                "Bash(tail **/.env**dev**)"
+                "Bash(tail **/.env**prod**)"
+                "Bash(tail **/.env**stag**)"
+                "Bash(tail **/.env**test**)"
+                "Bash(tail **/values**dev**)"
+                "Bash(tail **/values**prod**)"
+                "Bash(tail **/values**stag**)"
+                "Bash(tail **/values**test**)"
+                "Bash(tail **/*secret*.yaml)"
+                "Bash(tail **/*secret*.yml)"
+                # Extra read-vector denials — block exfiltration of secret files by
+                # encoding/dumping (base64/xxd/od/hexdump/strings) or copying them
+                # out (cp), plus git-credentials.
+                "Bash(base64 **/.ssh/**)"
+                "Bash(base64 **/*.pem)"
+                "Bash(base64 **/*.key)"
+                "Bash(base64 **/.env)"
+                "Bash(base64 **/.env.local)"
+                "Bash(base64 **/.env**local)"
+                "Bash(base64 **/.env**dev**)"
+                "Bash(base64 **/.env**prod**)"
+                "Bash(base64 **/.env**stag**)"
+                "Bash(base64 **/.env**test**)"
+                "Bash(base64 **/values**dev**)"
+                "Bash(base64 **/values**prod**)"
+                "Bash(base64 **/values**stag**)"
+                "Bash(base64 **/values**test**)"
+                "Bash(base64 **/*secret*.yaml)"
+                "Bash(base64 **/*secret*.yml)"
+                "Bash(base64 **/.aws/**)"
+                "Bash(base64 **/.config/gcloud/**)"
+                "Bash(base64 **/.kube/**)"
+                "Bash(xxd **/.ssh/**)"
+                "Bash(xxd **/*.key)"
+                "Bash(xxd **/*.pem)"
+                "Bash(od **/.ssh/**)"
+                "Bash(hexdump **/.ssh/**)"
+                "Bash(strings **/.ssh/**)"
+                "Bash(strings **/*.key)"
+                "Bash(less **/.ssh/**)"
+                "Bash(more **/.ssh/**)"
+                "Bash(nl **/.ssh/**)"
+                "Bash(tac **/.ssh/**)"
+                "Bash(cp **/.ssh/**)"
+                "Bash(cp **/.aws/**)"
+                "Bash(cp **/.config/gcloud/**)"
+                "Bash(cp **/.kube/**)"
+                "Bash(cat **/.git-credentials)"
+                "Read(**/.git-credentials)"
+              ]
+              ++ secretExfilDeny;
+            };
           description = "Permission configuration for Claude Code.";
           # NB: deny extras above are unconditional (applied on both platforms).
         };
@@ -699,6 +925,19 @@ in
 
       # OpenCode configuration
       opencodeConfig = {
+        settings = lib.mkOption {
+          type = (pkgs.formats.json { }).type;
+          default = { };
+          example = {
+            instructions = [ "/workspace/AGENTS.md" ];
+          };
+          description = ''
+            Additional declarative OpenCode configuration. It is deep-merged
+            into the persistent global opencode.json; undeclared live keys are
+            preserved and the typed options below remain authoritative.
+          '';
+        };
+
         defaultAgent = lib.mkOption {
           type = lib.types.str;
           default = "Orchestrator";
@@ -735,8 +974,12 @@ in
         permission = lib.mkOption {
           type = lib.types.attrsOf lib.types.anything;
           default = {
-            bash = {
+            bash = opencodeSecretBashRules // {
               "sudo *" = "deny";
+              "su *" = "deny";
+              "rm -rf /" = "deny";
+              "rm -rf /*" = "deny";
+              "chmod 777 *" = "deny";
             };
             # Secret-file denylist for OpenCode. OpenCode's wildcard matcher
             # (packages/opencode/src/util/wildcard.ts) supports only `*` and
@@ -744,67 +987,10 @@ in
             # already matches arbitrary directory prefixes.
             # Last match wins via length-asc sort, so longer allow rules
             # below correctly override shorter deny rules above.
-            read = {
-              "*/.env" = "deny";
-              "*/.env.*" = "deny";
-              "*/.env.example" = "allow";
-              "*/.env.sample" = "allow";
-              "*/.env.template" = "allow";
-              # Environment-specific Helm/k8s values files (values-dev.yaml,
-              # values.prod.yaml, ...). Base values.yaml stays readable.
-              "*/values*dev*" = "deny";
-              "*/values*prod*" = "deny";
-              "*/values*stag*" = "deny";
-              "*/values*test*" = "deny";
-              "*/*secret*.yaml" = "deny";
-              "*/*secret*.yml" = "deny";
-              "*/*.pem" = "deny";
-              "*/*.pub" = "allow";
-              "*/*.key" = "deny";
-              "*/id_rsa" = "deny";
-              "*/id_rsa.*" = "deny";
-              "*/id_ed25519" = "deny";
-              "*/id_ed25519.*" = "deny";
-              "*/id_ecdsa" = "deny";
-              "*/id_ecdsa.*" = "deny";
-              "*/.ssh/*" = "deny";
-              "*/.aws/credentials" = "deny";
-              "*/.aws/*" = "deny";
-              "*/.netrc" = "deny";
-              "*/.npmrc" = "deny";
-              "*/.pypirc" = "deny";
-              "*/.kube/config" = "deny";
-              "*/.kube/*" = "deny";
-              "*/.config/gcloud/*" = "deny";
-              "*/secrets/*" = "deny";
-              "*/credentials.json" = "deny";
-              "*/service-account*.json" = "deny";
-              "*/gcp-key*.json" = "deny";
-              "*/*.gpg" = "deny";
-              "*/*.asc" = "deny";
-            };
-            edit = {
-              "*/.env" = "deny";
-              "*/.env.*" = "deny";
-              "*/.env.example" = "allow";
-              "*/.env.sample" = "allow";
-              "*/.env.template" = "allow";
-              "*/values*dev*" = "deny";
-              "*/values*prod*" = "deny";
-              "*/values*stag*" = "deny";
-              "*/values*test*" = "deny";
-              "*/*secret*.yaml" = "deny";
-              "*/*secret*.yml" = "deny";
-              "*/*.pem" = "deny";
-              "*/*.key" = "deny";
-              "*/id_rsa*" = "deny";
-              "*/id_ed25519*" = "deny";
-              "*/.ssh/*" = "deny";
-              "*/.aws/credentials" = "deny";
-              "*/.config/gcloud/*" = "deny";
-              "*/.kube/config" = "deny";
-              "*/secrets/*" = "deny";
-            };
+            read = opencodeReadRules;
+            edit = opencodeEditRules;
+            glob = opencodeReadRules;
+            grep = opencodeReadRules;
           };
           description = "Permission configuration for OpenCode.";
         };
