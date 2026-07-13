@@ -813,7 +813,7 @@ let
   # OpenCode plugin: desktop-notification + tmux-title bridge. Subscribes to the
   # OpenCode event bus and maps lifecycle events onto agent-signal.sh — the same
   # producer the Claude Code hooks use. Event → state:
-  #   session.idle          -> done     (turn finished)
+  #   session.idle          -> done     (only after a terminal assistant finish)
   #   permission.asked/​updated -> waiting (blocked on approval)
   #   permission.replied    -> working  (approval answered)
   #   message.updated(user) -> start    (new prompt)
@@ -851,12 +851,22 @@ let
         // Debounce "start" to genuinely new user messages (message.updated also
         // fires as the assistant streams tokens).
         let lastUserMsg = ""
+        const assistantFinish = new Map<string, string>()
         return {
           event: async ({ event }: { event: { type: string; properties?: any } }) => {
             switch (event.type) {
-              case "session.idle":
-                signal("done")
+              case "session.idle": {
+                const sessionID = event.properties?.sessionID
+                const finish = sessionID && assistantFinish.get(sessionID)
+                // OpenCode may briefly emit idle between reasoning/tool-loop
+                // steps. Its TUI likewise treats tool-calls and unknown as
+                // unfinished assistant messages.
+                if (finish && !["tool-calls", "unknown"].includes(finish)) {
+                  assistantFinish.delete(sessionID)
+                  signal("done")
+                }
                 break
+              }
               // Permission-prompt event names vary slightly across OpenCode
               // builds; match the common ones — any of them means a prompt is
               // now waiting on the human.
@@ -871,7 +881,11 @@ let
                 const info = event.properties?.info
                 if (info?.role === "user" && info?.id && info.id !== lastUserMsg) {
                   lastUserMsg = info.id
+                  if (info.sessionID) assistantFinish.delete(info.sessionID)
                   signal("start")
+                }
+                if (info?.role === "assistant" && info?.sessionID && info?.finish) {
+                  assistantFinish.set(info.sessionID, info.finish)
                 }
                 break
               }
@@ -914,8 +928,8 @@ let
 
   # Codex user config. `notify` MUST be a root key (before any [table]); Codex
   # ignores it in project-local .codex/config.toml and only honours the
-  # user-level ~/.codex/config.toml. Installed copy-if-missing by the entrypoint
-  # so user edits are preserved.
+  # user-level ~/.codex/config.toml. The entrypoint installs it or adds the root
+  # key to an existing config while preserving user settings.
   codexConfigToml = writeTextFile {
     name = "config.toml";
     text = ''
@@ -1089,10 +1103,23 @@ let
       cp -f "$SKEL_DIR"/.local/bin/codex-notify.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.config/opencode/plugins/notify.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
       chmod +x "$HOME_DIR"/.local/bin/agent-signal.sh "$HOME_DIR"/.local/bin/codex-notify.sh 2>/dev/null || true
-      # Codex honours `notify` only in the user-level config; install the managed
-      # default copy-if-missing so hand edits to ~/.codex/config.toml are kept.
-      if [ ! -f "$HOME_DIR/.codex/config.toml" ] && [ -f "$SKEL_DIR/.codex/config.toml" ]; then
-        cp -f "$SKEL_DIR/.codex/config.toml" "$HOME_DIR/.codex/config.toml" 2>/dev/null || true
+      # Codex honours `notify` only as a root key in the user-level config. Add
+      # the managed default to existing configs without replacing user settings.
+      CODEX_CONFIG="$HOME_DIR/.codex/config.toml"
+      if [ ! -f "$CODEX_CONFIG" ] && [ -f "$SKEL_DIR/.codex/config.toml" ]; then
+        cp -f "$SKEL_DIR/.codex/config.toml" "$CODEX_CONFIG" 2>/dev/null || true
+      elif ! awk '
+        /^\[/ { exit }
+        /^[[:space:]]*notify[[:space:]]*=/ { found = 1 }
+        END { exit !found }
+      ' "$CODEX_CONFIG"; then
+        CODEX_CONFIG_TMP=$(mktemp)
+        {
+          printf '%s\n\n' 'notify = ["bash", "/home/agent/.local/bin/codex-notify.sh"]'
+          cat "$CODEX_CONFIG"
+        } > "$CODEX_CONFIG_TMP"
+        cat "$CODEX_CONFIG_TMP" > "$CODEX_CONFIG"
+        rm -f "$CODEX_CONFIG_TMP"
       fi
     fi
 
