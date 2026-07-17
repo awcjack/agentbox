@@ -694,11 +694,11 @@ in
                 "Bash(tail **/.env.template)"
                 # Allow writing / editing template files. The Edit deny above is
                 # enumerated to concrete secret variants (never a blanket .env.*),
-                # so templates fall through; these explicit Write/Edit allows make
-                # that intent clear per tool, just like Read/Grep/Bash above.
-                "Write(**/.env.example)"
-                "Write(**/.env.sample)"
-                "Write(**/.env.template)"
+                # so templates fall through; these explicit Edit allows make that
+                # intent clear, just like Read/Grep/Bash above. Edit(path) rules
+                # cover ALL file-editing tools (Write/MultiEdit/NotebookEdit) —
+                # Write(path) rules are not matched by the permission checks at
+                # all, so only Edit entries are listed.
                 "Edit(**/.env.example)"
                 "Edit(**/.env.sample)"
                 "Edit(**/.env.template)"
@@ -714,8 +714,11 @@ in
                 "Bash(rm -rf /*)"
                 "Bash(chmod 777 *)"
                 # Secret-file denylist (defense-in-depth at the harness layer).
-                # Each tool is denied separately — Claude Code does not propagate
-                # a Read deny to Grep / Glob / Bash-via-cat.
+                # Read(path) rules cover ALL file-reading tools (Read, Glob, and
+                # friends) — Glob(path) rules are not matched by the permission
+                # checks at all, so only Read entries are listed. Grep and
+                # Bash-via-cat are NOT covered by Read denies and keep their own
+                # explicit entries below.
                 "Read(**/.env)"
                 "Read(**/.env.local)"
                 "Read(**/.env**local)"
@@ -768,23 +771,6 @@ in
                 "Edit(**/.config/gcloud/**)"
                 "Edit(**/.kube/config)"
                 "Edit(**/secrets/**)"
-                "Glob(**/.env)"
-                "Glob(**/.env.local)"
-                "Glob(**/.env**local)"
-                "Glob(**/.env**dev**)"
-                "Glob(**/.env**prod**)"
-                "Glob(**/.env**stag**)"
-                "Glob(**/.env**test**)"
-                "Glob(**/values**dev**)"
-                "Glob(**/values**prod**)"
-                "Glob(**/values**stag**)"
-                "Glob(**/values**test**)"
-                "Glob(**/*secret*.yaml)"
-                "Glob(**/*secret*.yml)"
-                "Glob(**/*.pem)"
-                "Glob(**/*.key)"
-                "Glob(**/.ssh/**)"
-                "Glob(**/secrets/**)"
                 "Grep(**/.env)"
                 "Grep(**/.env.local)"
                 "Grep(**/.env**local)"
