@@ -29,6 +29,7 @@ let
       root        Open a shell as root user
       exec        Execute a command in the container
       opencode    Start opencode in a tmux session
+      claude      Attach to the Claude Code tmux session (starts it if needed)
       restart     Restart the container service
       stop        Stop the container service
       start       Start the container service
@@ -38,6 +39,7 @@ let
       agentbox exec ls -la              # Run command in container
       agentbox logs -f                  # Follow container logs
       agentbox opencode                 # Start opencode in tmux
+      agentbox claude                   # Attach to Claude Code in tmux
 
     The container is managed by systemd (docker-$CONTAINER_NAME.service).
     EOF
@@ -96,6 +98,19 @@ let
           fi
         }
 
+        cmd_claude() {
+          ensure_running
+          # ENABLE_CLAUDE_CODE=true starts a detached 'claude' session at boot;
+          # attach to that one so the headless and interactive views share a
+          # single process. Create it on demand when the boot start is disabled.
+          if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t claude 2>/dev/null; then
+            docker exec -it -u agent -w /workspace "$CONTAINER_NAME" tmux attach-session -t claude
+          else
+            docker exec -it -u agent -w /workspace "$CONTAINER_NAME" \
+              tmux new-session -s claude claude --dangerously-skip-permissions
+          fi
+        }
+
         cmd_restart() {
           echo "Restarting agentbox service..."
           sudo systemctl restart "docker-$CONTAINER_NAME.service" 2>/dev/null || \
@@ -127,6 +142,7 @@ let
           root)     cmd_root ;;
           exec)     shift; cmd_exec "$@" ;;
           opencode) cmd_opencode ;;
+          claude)   cmd_claude ;;
           restart)  cmd_restart ;;
           stop)     cmd_stop ;;
           start)    cmd_start ;;
