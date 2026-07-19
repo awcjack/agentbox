@@ -1351,11 +1351,24 @@ let
       fi
     fi
 
-    # Start Claude Code if enabled
+    # Start Claude Code if enabled.
+    #
+    # Launched in a detached tmux session as the agent user, not as a bare
+    # background process: Claude Code is a TUI, so it needs a PTY to run at all,
+    # and it refuses --dangerously-skip-permissions under uid 0. Detaching keeps
+    # it headless at boot while leaving the same process attachable later with
+    # `agentbox claude` — one session serving both modes, rather than a boot
+    # instance and a separate interactive one competing over the same state.
+    # pipe-pane keeps the log file the previous redirect provided.
     if [ "''${ENABLE_CLAUDE_CODE:-false}" = "true" ]; then
       if command -v claude >/dev/null 2>&1; then
-        echo "Starting Claude Code..."
-        claude --dangerously-skip-permissions > "$AGENT_LOGS/claude-code.log" 2>&1 &
+        if install_as_agent "tmux has-session -t claude 2>/dev/null"; then
+          echo "Claude Code already running (tmux session: claude)"
+        else
+          echo "Starting Claude Code (tmux session: claude)..."
+          install_as_agent "cd /workspace && tmux new-session -d -s claude 'claude --dangerously-skip-permissions' && tmux pipe-pane -t claude -o 'cat >> $AGENT_LOGS/claude-code.log'" \
+            || echo "WARNING: Failed to start Claude Code in tmux"
+        fi
       else
         echo "WARNING: ENABLE_CLAUDE_CODE=true but 'claude' not found in PATH"
       fi
