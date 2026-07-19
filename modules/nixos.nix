@@ -464,17 +464,30 @@ in
       ++ cfg.extraVolumes;
     };
 
-    # Load the Nix-built image on activation
-    # Note: The image is loaded lazily - it won't be built until activation runs
-    system.activationScripts.agentbox-image =
+    # Load the Nix-built image into the backend. This is a unit rather than an
+    # activation script because the daemon has to be running: switch-to-
+    # configuration stops ${cfg.backend}.service before activation and only
+    # restarts it afterwards, so an activation-time `load` always ran against a
+    # dead socket and failed the whole activation.
+    systemd.services.agentbox-image-load =
       let
         dockerBin =
           if cfg.backend == "docker" then "${pkgs.docker}/bin/docker" else "${pkgs.podman}/bin/podman";
         # Store the image path as a string to avoid forcing evaluation during build
         imagePath = toString cfg.image;
+        # Only docker has a daemon unit to order against; podman is socket-activated.
+        daemonUnit = lib.optional (cfg.backend == "docker") "docker.service";
       in
       {
-        text = ''
+        description = "Load the agentbox image into ${cfg.backend}";
+        after = daemonUnit;
+        requires = daemonUnit;
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+        };
+        script = ''
           # Load the Nix-built agentbox image into Docker/Podman
           if [ -f "${imagePath}" ]; then
             echo "Loading agentbox image from ${imagePath}..."
@@ -484,12 +497,25 @@ in
             echo "Build it with: nix build .#agentboxImage"
           fi
         '';
-        deps = [ ];
       };
 
     # Setup configuration files before container starts
     system.activationScripts.agentbox-config = {
       text = ''
+                        # The tmpfiles rules above own these directories, but they are
+                        # applied by systemd-tmpfiles-resetup.service, which runs after
+                        # activation — so on the switch that first introduces a rule the
+                        # directory does not exist yet and every write below fails.
+                        # Create them here; tmpfiles still reconciles mode and ownership.
+                        mkdir -p "${cfg.dataDir}/managed" \
+                                 "${cfg.dataDir}/home/.claude" \
+                                 "${cfg.dataDir}/home/.codex" \
+                                 "${cfg.dataDir}/home/.config/opencode"
+                        chown ${cfg.user}:${cfg.group} \
+                          "${cfg.dataDir}/home/.claude" \
+                          "${cfg.dataDir}/home/.codex" \
+                          "${cfg.dataDir}/home/.config/opencode"
+
                         # Create .bashrc marker file to prevent container from overwriting mounted volumes
                         # The container's entrypoint checks for .bashrc to detect "initialized" home directory
                         # Without this, it copies skeleton over mounted .claude directory, wiping credentials
@@ -939,7 +965,6 @@ in
                         )}
       '';
       deps = [
-        "agentbox-image"
         "setupSecrets"
       ];
     };
@@ -949,10 +974,12 @@ in
       # Start after the socket proxy (when enabled) so DOCKER_HOST is reachable.
       after = [
         "network-online.target"
+        "agentbox-image-load.service"
       ]
       ++ lib.optional cfg.settings.dockerProxy.enable "${cfg.backend}-agentbox-docker-proxy.service";
       wants = [
         "network-online.target"
+        "agentbox-image-load.service"
       ]
       ++ lib.optional cfg.settings.dockerProxy.enable "${cfg.backend}-agentbox-docker-proxy.service";
       # Restart policy
