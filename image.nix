@@ -1954,7 +1954,13 @@ in
     Env = [
       # nix profile dirs are on PATH so packages installed via `nix profile
       # install` are found by non-login `agentbox exec` too (harmless when empty).
-      "PATH=/run/wrappers/bin:/home/agent/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/bin:/usr/bin:/usr/local/bin"
+      # The agent's ~/.local/bin, ~/.bun/bin and ~/.cargo/bin are here for the
+      # same reason: runtime-installed tools (notably the claude-code native
+      # binary, which the entrypoint installs into ~/.local/bin) must resolve
+      # without a login shell, both for `agentbox exec` and for the entrypoint's
+      # own `command -v` availability checks, which run as root with this PATH.
+      # The login-shell profile sets the same dirs (see profileFile).
+      "PATH=/run/wrappers/bin:/home/agent/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/home/agent/.local/bin:/home/agent/.bun/bin:/home/agent/.cargo/bin:/bin:/usr/bin:/usr/local/bin"
       "LANG=en_US.UTF-8"
       "LC_ALL=en_US.UTF-8"
       "TERM=xterm-256color"
