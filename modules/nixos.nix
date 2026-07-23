@@ -617,6 +617,12 @@ in
                         # it outranks the agent-writable settings.json (authoritative deny +
                         # managed hooks). Kept ROOT-owned (not chowned to the agent) — Claude
                         # Code only honors managed settings that are not user-writable.
+                        # Docker creates a directory at a missing bind source. Repair that
+                        # exact legacy shape so an earlier failed start can self-heal.
+                        _managed_settings="${cfg.dataDir}/managed/managed-settings.json"
+                        if [ -d "$_managed_settings" ]; then
+                          ${pkgs.coreutils}/bin/rm -rf -- "$_managed_settings"
+                        fi
                         cp -f ${managedSettingsJson} "${cfg.dataDir}/managed/managed-settings.json"
                         chown root:root "${cfg.dataDir}/managed/managed-settings.json"
                         chmod 644 "${cfg.dataDir}/managed/managed-settings.json"
