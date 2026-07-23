@@ -1328,24 +1328,18 @@ let
     # Start OpenCode server if enabled
     # Uses 'opencode serve' to start HTTP API server on port 4096
     # OpenCode is installed via Nix from anomalyco/opencode flake
-    # Run as agent user so .cache and other files are owned by agent
+    # Run as agent user so workspace files created by builds are agent-owned
     if [ "''${ENABLE_OPENCODE:-false}" = "true" ]; then
       if command -v opencode >/dev/null 2>&1; then
         echo "Starting OpenCode server..."
-        # Enable plugin debug logging to see plugin loading
-        # Pass OPENCODE_SERVER_PASSWORD for HTTP Basic Auth (if set)
-        # Set HOME to agent's home so OpenCode finds config in the right place
-        HOME=/home/agent \
-        XDG_CONFIG_HOME=/home/agent/.config \
-        CLAUDE_PROVIDER_DEBUG=1 \
-        OPENCODE_SERVER_PASSWORD="''${OPENCODE_SERVER_PASSWORD:-}" \
-          opencode serve --port 4096 --hostname "''${OPENCODE_BIND_ADDRESS:-127.0.0.1}" > "$AGENT_LOGS/opencode.log" 2>&1 &
-        # Fix opencode directory ownership to agent (opencode serve runs as root and
-        # creates files with root ownership, which breaks session persistence)
-        sleep 1
-        chown -R agent:agent /home/agent/.cache/opencode 2>/dev/null || true
-        chown -R agent:agent /home/agent/.local/share/opencode 2>/dev/null || true
-        chown -R agent:agent /home/agent/.local/state/opencode 2>/dev/null || true
+        setpriv --reuid=agent --regid=agent --init-groups -- \
+          bash -lc '
+            HOME=/home/agent \
+            XDG_CONFIG_HOME=/home/agent/.config \
+            CLAUDE_PROVIDER_DEBUG=1 \
+            OPENCODE_SERVER_PASSWORD="''${OPENCODE_SERVER_PASSWORD:-}" \
+            opencode serve --port 4096 --hostname "''${OPENCODE_BIND_ADDRESS:-127.0.0.1}"
+          ' > "$AGENT_LOGS/opencode.log" 2>&1 &
       else
         echo "WARNING: ENABLE_OPENCODE=true but 'opencode' not found in PATH"
       fi
