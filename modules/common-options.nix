@@ -258,6 +258,33 @@ in
         '';
       };
 
+      historyArchive = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Enable explicit, user-requested conversation archive intents. This
+            only exposes a host-visible request inbox; it does not give the
+            container object-storage credentials or upload transcripts.
+          '';
+        };
+
+        hostId = lib.mkOption {
+          type = lib.types.either (lib.types.enum [ "" ]) (
+            lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+          );
+          default = "";
+          example = "home-macbook";
+          description = "Opaque producer host ID included in archive requests.";
+        };
+
+        requestTtlSeconds = lib.mkOption {
+          type = lib.types.ints.between 60 3600;
+          default = 900;
+          description = "Time allowed for a completion event to resolve an archive intent.";
+        };
+      };
+
       # Container→host isolation knobs. The agent is autonomous and may be
       # prompt-injected, so the goal is to keep a kernel-level escape hard while
       # leaving the in-container dev workflow (sudo, installs) intact.
@@ -494,6 +521,10 @@ in
                 hooks = [
                   {
                     type = "command";
+                    command = "/home/agent/.claude/hooks/archive-request-cancel.sh";
+                  }
+                  {
+                    type = "command";
                     command = "/home/agent/.hooks/claude-prompt-start.sh";
                   }
                 ];
@@ -513,6 +544,10 @@ in
                   {
                     type = "command";
                     command = "/home/agent/.claude/hooks/stop-test-runner.sh";
+                  }
+                  {
+                    type = "command";
+                    command = "/home/agent/.claude/hooks/archive-request-resolver.sh";
                   }
                 ];
               }
@@ -953,6 +988,9 @@ in
             # the shared agent-signal.sh producer for the same "✅ done" /
             # "🔔 needs you" tmux rename + desktop notification as Claude Code.
             "file:///home/agent/.config/opencode/plugins/notify.ts"
+            # Resolves an explicitly invoked archive command against the exact
+            # OpenCode session ID at the next idle boundary.
+            "file:///home/agent/.config/opencode/plugins/archive-request.ts"
           ];
           description = "List of OpenCode plugins. Uses the current OpenCode hook API — tool.execute.before / tool.execute.after (test-runner, gitleaks) and the event bus (notify).";
         };

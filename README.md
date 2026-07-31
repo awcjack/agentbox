@@ -126,6 +126,38 @@ covering `hardening`, `enableDocker`, `enableNotification`, cloud creds, the
 `dockerProxy`, `autoCloneRepos`, …). Each platform module adds only its
 OS-specific top-level options and config body (systemd vs launchd/manual).
 
+## Selective conversation archive requests
+
+Agentbox can expose an opt-in request inbox for a separate host collector. It
+does not upload transcripts and never receives object-storage credentials.
+
+```nix
+services.agentbox.settings.historyArchive = {
+  enable = true;
+  hostId = "home-macbook";
+};
+```
+
+This creates only `<dataDir>/history-sync/requests` and mounts that directory at
+`/home/agent/.agent-history/requests`. The rest of a collector's spool should be
+host-only and must not be mounted into Agentbox.
+
+Explicitly invoke `/archive-conversation` in Claude Code or OpenCode. The command
+creates a bounded intent; the next Claude `Stop` or terminal OpenCode idle event
+resolves it with the native session ID. The request timestamp is the content
+cutoff, so delayed resolution must not include later messages. Archiving more of
+the session requires another explicit request. Codex support is intentionally
+deferred until its skill invocation can be bound to a native thread ID before
+the completion callback.
+
+Resolved files contain identifiers, timestamps, event type, and local source
+context, but no message content. They are untrusted input: a host collector must
+still validate repository remotes and allowlists before reading or uploading a
+transcript. The request is an opt-in user interface, not an authentication
+boundary: code running inside Agentbox can forge or delete inbox files, just as
+it can alter its local transcript. A collector must derive host and trust-domain
+identity from host configuration rather than trusting request fields.
+
 ## Advanced: baking extra agents in
 
 Beyond the three bundled agents, this standalone ships no others — and there is

@@ -164,6 +164,10 @@ let
     CLAUDE_CODE_VERSION = cfg.settings.claudeCodeVersion;
     CLAUDE_CWD = "/workspace";
     CLAUDE_PROVIDER_MAX_TURNS = "500";
+    AGENT_HISTORY_REQUESTS_ENABLED = lib.boolToString cfg.settings.historyArchive.enable;
+    AGENT_HISTORY_REQUEST_DIR = "/home/agent/.agent-history/requests";
+    AGENT_HISTORY_PRODUCER_ID = cfg.settings.historyArchive.hostId;
+    AGENT_HISTORY_REQUEST_TTL_SECONDS = toString cfg.settings.historyArchive.requestTtlSeconds;
   }
   # Point Application Default Credentials at the bind-mounted service-account
   # key so client libraries and the GKE auth plugin can mint tokens. The path
@@ -274,6 +278,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !cfg.settings.historyArchive.enable || cfg.settings.historyArchive.hostId != "";
+        message = "services.agentbox.settings.historyArchive.hostId must be set when archive requests are enabled";
+      }
+    ];
+
     # Default image: base image, with build-time variants toggled by settings —
     # the cloud-tools bundle (enableCloudTools) and the nix CLI (enableNix, on by
     # default; only overridden off here). lib.mkDefault lets an explicit
@@ -335,6 +346,7 @@ in
       # honors managed settings that are not user-writable.
       "d ${cfg.dataDir}/managed 0755 root root -"
     ]
+    ++ lib.optional cfg.settings.historyArchive.enable "d ${cfg.dataDir}/history-sync/requests 0700 ${cfg.user} ${cfg.group} -"
     # Notification signal dir: the in-container hooks write here; the host
     # watcher (below) reads it and pops a desktop notification.
     ++ lib.optional cfg.settings.enableNotification "d ${cfg.dataDir}/signals 0755 ${cfg.user} ${cfg.group} -";
@@ -448,6 +460,7 @@ in
       ]
       # Notification signals: hooks write here; the host watcher reads them.
       ++ lib.optional cfg.settings.enableNotification "${cfg.dataDir}/signals:/home/agent/.signals"
+      ++ lib.optional cfg.settings.historyArchive.enable "${cfg.dataDir}/history-sync/requests:/home/agent/.agent-history/requests"
       ++ lib.optional (
         cfg.settings.awsCredentialsPath != null
       ) "${cfg.dataDir}/home/.aws/credentials:/home/agent/.aws/credentials:ro"
@@ -511,6 +524,11 @@ in
                                  "${cfg.dataDir}/home/.claude" \
                                  "${cfg.dataDir}/home/.codex" \
                                  "${cfg.dataDir}/home/.config/opencode"
+                        ${lib.optionalString cfg.settings.historyArchive.enable ''
+                          mkdir -p "${cfg.dataDir}/history-sync/requests"
+                          chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/history-sync/requests"
+                          chmod 700 "${cfg.dataDir}/history-sync/requests"
+                        ''}
                         chown ${cfg.user}:${cfg.group} \
                           "${cfg.dataDir}/home/.claude" \
                           "${cfg.dataDir}/home/.codex" \

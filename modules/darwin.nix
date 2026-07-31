@@ -168,6 +168,10 @@ let
         CLAUDE_CODE_VERSION = cfg.settings.claudeCodeVersion;
         CLAUDE_CWD = "/workspace";
         CLAUDE_PROVIDER_MAX_TURNS = "500";
+        AGENT_HISTORY_REQUESTS_ENABLED = lib.boolToString cfg.settings.historyArchive.enable;
+        AGENT_HISTORY_REQUEST_DIR = "/home/agent/.agent-history/requests";
+        AGENT_HISTORY_PRODUCER_ID = cfg.settings.historyArchive.hostId;
+        AGENT_HISTORY_REQUEST_TTL_SECONDS = toString cfg.settings.historyArchive.requestTtlSeconds;
       }
       # Env contributed via the generic extension surface
       # (services.agentbox.extraEnvironment) — used by any add-on module.
@@ -212,6 +216,7 @@ let
       # calls osascript to show notification center alerts.
       "-v ${cfg.dataDir}/signals:/home/agent/.signals"
     ]
+    ++ lib.optional cfg.settings.historyArchive.enable "-v ${cfg.dataDir}/history-sync/requests:/home/agent/.agent-history/requests"
     # Volumes contributed by optional integration add-ons (each "src:dst" is
     # prefixed with -v here).
     ++ map (v: "-v ${v}") cfg.extraVolumes
@@ -537,6 +542,10 @@ let
       mkdir -p "$DATA_DIR/workspaces/opencode"
       mkdir -p "$DATA_DIR/hooks"
       mkdir -p "$DATA_DIR/signals"
+      ${lib.optionalString cfg.settings.historyArchive.enable ''
+        mkdir -p "$DATA_DIR/history-sync/requests"
+        chmod 700 "$DATA_DIR/history-sync/requests"
+      ''}
 
       # Set SSH directory permissions
       chmod 700 "$DATA_DIR/home/.ssh"
@@ -648,6 +657,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !cfg.settings.historyArchive.enable || cfg.settings.historyArchive.hostId != "";
+        message = "services.agentbox.settings.historyArchive.hostId must be set when archive requests are enabled";
+      }
+    ];
+
     # Add agentbox CLI to system packages
     environment.systemPackages = [
       agentboxScript
@@ -699,6 +715,10 @@ in
             mkdir -p "${cfg.dataDir}/hooks"
             mkdir -p "${cfg.dataDir}/signals"
             mkdir -p "${cfg.dataDir}/managed"
+            ${lib.optionalString cfg.settings.historyArchive.enable ''
+              mkdir -p "${cfg.dataDir}/history-sync/requests"
+              chmod 700 "${cfg.dataDir}/history-sync/requests"
+            ''}
 
             # Activation contributed via the generic extension surface
             # (services.agentbox.extraActivation).

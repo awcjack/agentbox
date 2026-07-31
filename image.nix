@@ -941,6 +941,128 @@ let
     '';
   };
 
+  agentArchiveRequestScript = writeTextFile {
+    name = "agent-archive-request.sh";
+    executable = true;
+    text = builtins.readFile ./scripts/agent-archive-request.sh;
+  };
+
+  claudeArchiveRequestResolver = writeTextFile {
+    name = "archive-request-resolver.sh";
+    executable = true;
+    text = ''
+      #!/usr/bin/env bash
+      set -u
+      [ "''${AGENT_HISTORY_REQUESTS_ENABLED:-false}" = "true" ] || exit 0
+      payload="$(cat)"
+      command -v jq >/dev/null 2>&1 || exit 0
+      background_count=$(printf '%s' "$payload" | jq '(.background_tasks // []) | length' 2>/dev/null)
+      [ -n "$background_count" ] || background_count=0
+      [ "$background_count" -gt 0 ] 2>/dev/null && exit 0
+      session_id=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
+      [ -n "$session_id" ] || exit 0
+      cwd=$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)
+      transcript_path=$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null)
+      bash /home/agent/.local/bin/agent-archive-request.sh \
+          resolve claude "$session_id" Stop "$cwd" "$transcript_path" || true
+    '';
+  };
+
+  claudeArchiveRequestCancel = writeTextFile {
+    name = "archive-request-cancel.sh";
+    executable = true;
+    text = ''
+      #!/usr/bin/env bash
+      set -u
+      [ "''${AGENT_HISTORY_REQUESTS_ENABLED:-false}" = "true" ] || exit 0
+      bash /home/agent/.local/bin/agent-archive-request.sh cancel claude || true
+    '';
+  };
+
+  opencodeArchiveRequestPlugin = writeTextFile {
+    name = "archive-request.ts";
+    text = ''
+      /** Resolve explicit archive requests against OpenCode's native session ID. */
+      import { execFile } from "child_process"
+
+      const SCRIPT = "/home/agent/.local/bin/agent-archive-request.sh"
+      const REQUEST_RE = /^\s*bash\s+\/home\/agent\/\.local\/bin\/agent-archive-request\.sh\s+request\s+opencode\s*$/
+
+      function quote(value: string) {
+        return `'` + value.replace(/'/g, `'"'"'`) + `'`
+      }
+
+      function run(args: string[]) {
+        return new Promise<void>((resolve) => {
+          try {
+            execFile("bash", [SCRIPT, ...args], () => resolve())
+          } catch {
+            resolve()
+          }
+        })
+      }
+
+      export const ArchiveRequestPlugin = async ({ directory }: any) => {
+        if (process.env.AGENT_HISTORY_REQUESTS_ENABLED !== "true") return {}
+        const terminalAssistant = new Set<string>()
+        return {
+          "tool.execute.before": async (
+            input: { tool: string; sessionID: string },
+            output: { args: any },
+          ) => {
+            if (input.tool !== "bash" || !input.sessionID) return
+            const command: string = output.args?.command ?? ""
+            if (!REQUEST_RE.test(command)) return
+            const cwd: string = output.args?.cwd ?? directory ?? process.cwd()
+            output.args.command = [
+              "bash",
+              SCRIPT,
+              "request",
+              "opencode",
+              quote(input.sessionID),
+              quote(cwd),
+              quote(input.sessionID),
+            ].join(" ")
+          },
+          event: async ({ event }: { event: { type: string; properties?: any } }) => {
+            const properties = event.properties ?? {}
+            const sessionID = properties.sessionID
+            if (event.type === "message.updated") {
+              const info = properties.info
+              if (info?.role === "user" && info?.sessionID) {
+                terminalAssistant.delete(info.sessionID)
+                await run(["cancel", "opencode", info.sessionID])
+              }
+              if (info?.role === "assistant" && info?.sessionID && info?.finish) {
+                if (["tool-calls", "unknown"].includes(info.finish)) {
+                  terminalAssistant.delete(info.sessionID)
+                } else {
+                  terminalAssistant.add(info.sessionID)
+                }
+              }
+              return
+            }
+            const idle = event.type === "session.idle"
+              || (event.type === "session.status" && properties.status?.type === "idle")
+            if (!idle || !sessionID || !terminalAssistant.has(sessionID)) return
+            await run([
+              "resolve",
+              "opencode",
+              sessionID,
+              event.type,
+              directory ?? "",
+              "",
+              sessionID,
+            ])
+            terminalAssistant.delete(sessionID)
+          },
+        }
+      }
+
+      export default ArchiveRequestPlugin
+    '';
+  };
+
   # All packages to include in the image (minimal set for AI coding agents).
   #
   # The list is split into three tiers so the closure can be reasoned about:
@@ -1101,8 +1223,14 @@ let
       mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/opencode/plugins" "$HOME_DIR/.codex"
       cp -f "$SKEL_DIR"/.local/bin/agent-signal.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.local/bin/codex-notify.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.local/bin/agent-archive-request.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.config/opencode/plugins/notify.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
-      chmod +x "$HOME_DIR"/.local/bin/agent-signal.sh "$HOME_DIR"/.local/bin/codex-notify.sh 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.config/opencode/plugins/archive-request.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.claude/hooks/archive-request-resolver.sh "$HOME_DIR/.claude/hooks/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.claude/hooks/archive-request-cancel.sh "$HOME_DIR/.claude/hooks/" 2>/dev/null || true
+      chmod +x "$HOME_DIR"/.local/bin/agent-signal.sh "$HOME_DIR"/.local/bin/codex-notify.sh \
+        "$HOME_DIR"/.local/bin/agent-archive-request.sh "$HOME_DIR"/.claude/hooks/archive-request-resolver.sh \
+        "$HOME_DIR"/.claude/hooks/archive-request-cancel.sh 2>/dev/null || true
       # Codex honours `notify` only as a root key in the user-level config. Add
       # the managed default to existing configs without replacing user settings.
       CODEX_CONFIG="$HOME_DIR/.codex/config.toml"
@@ -1800,6 +1928,16 @@ let
     chmod +x $out/.local/bin/codex-notify.sh
     cp ${codexConfigToml} $out/.codex/config.toml
 
+    # Explicit conversation archive request bridge. The request writer has no
+    # network credentials; it only emits bounded JSON into a host-mounted inbox.
+    cp ${agentArchiveRequestScript} $out/.local/bin/agent-archive-request.sh
+    chmod +x $out/.local/bin/agent-archive-request.sh
+    cp ${claudeArchiveRequestResolver} $out/.claude/hooks/archive-request-resolver.sh
+    chmod +x $out/.claude/hooks/archive-request-resolver.sh
+    cp ${claudeArchiveRequestCancel} $out/.claude/hooks/archive-request-cancel.sh
+    chmod +x $out/.claude/hooks/archive-request-cancel.sh
+    cp ${opencodeArchiveRequestPlugin} $out/.config/opencode/plugins/archive-request.ts
+
     # Claude Code PostToolUse wiring
     cp ${claudeCodeTestRunnerHook} $out/.claude/hooks/test-runner.sh
     chmod +x $out/.claude/hooks/test-runner.sh
@@ -1851,6 +1989,11 @@ let
         } > "$dest/SKILL.md"
       done
     ''}
+
+    # Built-in opt-in command. Copy after external skills so its explicit-only
+    # semantics cannot be replaced accidentally by a consumer skill bundle.
+    cp ${./skills/archive-conversation-claude.md} $out/.claude/commands/archive-conversation.md
+    cp ${./skills/archive-conversation-opencode.md} $out/.config/opencode/command/archive-conversation.md
 
     # Writable context directory placeholder — actual writes happen at runtime
     mkdir -p $out/contexts

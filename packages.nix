@@ -34,4 +34,20 @@ in
       }
     else
       null;
+
+  agent-archive-request-test =
+    pkgs.runCommand "agent-archive-request-test"
+      {
+        nativeBuildInputs = [
+          pkgs.bash
+          pkgs.coreutils
+          pkgs.findutils
+          pkgs.jq
+          pkgs.util-linux
+        ];
+      }
+      ''
+        bash ${./tests/agent-archive-request.sh} ${./scripts/agent-archive-request.sh}
+        touch $out
+      '';
 }
