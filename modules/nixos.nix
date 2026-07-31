@@ -364,9 +364,12 @@ in
       script = ''
         f="${cfg.dataDir}/signals/claude-notify"
         [ -f "$f" ] || exit 0
-        msg=$(${pkgs.coreutils}/bin/cut -f1 "$f")
+        IFS=$'\t' read -r msg _target title < "$f"
         [ -n "$msg" ] || msg="Claude"
-        ${pkgs.libnotify}/bin/notify-send "agentbox" "$msg" || true
+        [ -n "$title" ] || title="Agentbox"
+        msg=$(printf '%s' "$msg" | ${pkgs.coreutils}/bin/tr -d '\000-\037')
+        title=$(printf '%s' "$title" | ${pkgs.coreutils}/bin/tr -d '\000-\037')
+        ${pkgs.libnotify}/bin/notify-send "$title" "$msg" || true
       '';
     };
 

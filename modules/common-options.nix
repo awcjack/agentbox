@@ -983,10 +983,9 @@ in
             # Gitleaks pre-commit guard — aborts `git commit` bash calls when
             # staged content matches a secret pattern (uses tool.execute.before).
             "file:///home/agent/.config/opencode/plugins/gitleaks-precommit.ts"
-            # Notification / tmux-title bridge — subscribes to the OpenCode event
-            # bus (session.idle / permission.* / message.updated) and delegates to
-            # the shared agent-signal.sh producer for the same "✅ done" /
-            # "🔔 needs you" tmux rename + desktop notification as Claude Code.
+            # Notification / tmux-title bridge — waits for all todos before a
+            # completion alert, flags permission/question prompts that need the
+            # user, and includes the OpenCode session title.
             "file:///home/agent/.config/opencode/plugins/notify.ts"
             # Resolves an explicitly invoked archive command against the exact
             # OpenCode session ID at the next idle boundary.

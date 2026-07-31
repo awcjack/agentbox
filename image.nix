@@ -669,9 +669,10 @@ let
   #   agent-signal.sh working  resumed after a prompt   -> clear bell, live title
   #   agent-signal.sh start    new user prompt          -> clear flags, live title
   #
-  # AGENT_NAME (env, default "Agent") labels the notification, e.g.
-  # "OpenCode done: fix parser". Invoked via `bash agent-signal.sh …`, so it does
-  # not depend on the exec bit surviving the skeleton copy.
+  # AGENT_NAME (env, default "Agent") labels the notification. AGENT_TITLE adds
+  # the OpenCode session title when available. Invoked via `bash
+  # agent-signal.sh …`, so it does not depend on the exec bit surviving the
+  # skeleton copy.
   agentSignalScript = writeTextFile {
     name = "agent-signal.sh";
     text = ''
@@ -679,6 +680,7 @@ let
       set -u
       state="''${1:-}"
       AGENT_NAME="''${AGENT_NAME:-Agent}"
+      AGENT_TITLE="''${AGENT_TITLE:-}"
 
       # Resolve tmux (hooks/plugins run non-interactively, so brew/nix PATH
       # additions from .bashrc are absent).
@@ -727,10 +729,12 @@ let
       # a prior ✅ / 🔔) + its space, then truncate to 15 chars with an … suffix
       # (mirrors the tmux automatic-rename-format).
       clean_title() {
-          local t="$1" fb
-          fb=$(printf '%s' "$t" | od -An -tu1 -N1 | tr -d ' \n')
-          if [ -n "$fb" ] && [ "$fb" -gt 127 ] 2>/dev/null; then
-              t="''${t#* }"
+          local t="$1" strip_status="''${2:-1}" fb
+          if [ "$strip_status" = 1 ]; then
+              fb=$(printf '%s' "$t" | od -An -tu1 -N1 | tr -d ' \n')
+              if [ -n "$fb" ] && [ "$fb" -gt 127 ] 2>/dev/null; then
+                  t="''${t#* }"
+              fi
           fi
           [ "''${#t}" -gt 15 ] && t="''${t:0:14}…"
           printf '%s' "$t"
@@ -740,9 +744,12 @@ let
       # rename it "<prefix> <title>". Echoes the cleaned title on stdout.
       freeze_and_rename() {
           local prefix="$1" fallback="$2" title=""
+          [ -n "$AGENT_TITLE" ] && title=$(clean_title "$AGENT_TITLE" 0)
           if have_tmux; then
-              title=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null || true)
-              title=$(clean_title "$title")
+              if [ -z "$title" ]; then
+                  title=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{pane_title}' 2>/dev/null || true)
+                  title=$(clean_title "$title")
+              fi
               [ -z "$title" ] && title="$fallback"
               "$tmux_bin" set-window-option -t "$TMUX_PANE" automatic-rename off
               "$tmux_bin" set-window-option -t "$TMUX_PANE" allow-rename off
@@ -758,16 +765,17 @@ let
           fi
       }
 
-      # Drop the host signal file: "<message>\t<session:window>". Strip control
-      # chars from the message (incl. the TAB delimiter and newlines) and restrict
-      # the jump target to the charset the host validators accept. Written to the
-      # SAME path the existing Claude watcher already polls, so no host change.
+      # Drop the host signal file: "<message>\t<session:window>\t<title>". Strip
+      # control chars from user-visible fields and restrict the jump target to the
+      # charset the host validators accept.
       emit_signal() {
-          local msg="$1" target=""
+          local msg="$1" target="" title="$AGENT_NAME"
           have_tmux && target=$("$tmux_bin" display-message -t "$TMUX_PANE" -p '#{session_name}:#{window_index}' 2>/dev/null || true)
+          [ -n "$AGENT_TITLE" ] && title="$AGENT_NAME: $AGENT_TITLE"
           msg=$(printf '%s' "$msg" | tr -d '\000-\037')
+          title=$(printf '%s' "$title" | tr -d '\000-\037')
           target=$(printf '%s' "$target" | tr -cd 'A-Za-z0-9_:.-')
-          printf '%s\t%s' "$msg" "$target" > /home/agent/.signals/claude-notify 2>/dev/null || true
+          printf '%s\t%s\t%s\n' "$msg" "$target" "$title" > /home/agent/.signals/claude-notify 2>/dev/null || true
       }
 
       done_flag="/tmp/agent-done-''${TMUX_PANE}"
@@ -812,11 +820,9 @@ let
 
   # OpenCode plugin: desktop-notification + tmux-title bridge. Subscribes to the
   # OpenCode event bus and maps lifecycle events onto agent-signal.sh — the same
-  # producer the Claude Code hooks use. Event → state:
-  #   session.idle          -> done     (only after a terminal assistant finish)
-  #   permission.asked/​updated -> waiting (blocked on approval)
-  #   permission.replied    -> working  (approval answered)
-  #   message.updated(user) -> start    (new prompt)
+  # producer the Claude Code hooks use. Completion waits for a terminal assistant
+  # response and, when a todo list exists, for every todo to be terminal. Child
+  # sessions are ignored so subagent completion cannot notify for the parent.
   opencodeNotifyPlugin = writeTextFile {
     name = "notify.ts";
     text = ''
@@ -826,70 +832,199 @@ let
        * Delegates every lifecycle transition to the shared producer
        * /home/agent/.local/bin/agent-signal.sh so OpenCode gets the identical
        * "✅ done" / "🔔 needs you" tmux window rename and desktop notification as
-       * Claude Code. The host watcher is reused unchanged (reads
-       * ~/.signals/claude-notify).
+       * Claude Code. The host watcher reads the shared
+       * ~/.signals/claude-notify path.
        */
       import { execFile } from "child_process"
 
       const SIGNAL = "/home/agent/.local/bin/agent-signal.sh"
 
-      // Fire-and-forget: never block the OpenCode event loop on tmux/IO.
-      function signal(state: string) {
-        try {
-          execFile(
-            "bash",
-            [SIGNAL, state],
-            { env: { ...process.env, AGENT_NAME: "OpenCode" } },
-            () => {},
-          )
-        } catch {
-          /* best-effort: a notification failure must never break the session */
-        }
+      // Keep state transitions ordered without blocking OpenCode's event loop.
+      function signal(state: string, title?: string) {
+        return new Promise<void>((resolve) => {
+          try {
+            execFile(
+              "bash",
+              [SIGNAL, state],
+              { env: { ...process.env, AGENT_NAME: "OpenCode", AGENT_TITLE: title ?? "" } },
+              () => resolve(),
+            )
+          } catch {
+            // A notification failure must never break the session.
+            resolve()
+          }
+        })
       }
 
-      export const NotifyPlugin = async (_input: any) => {
+      export const NotifyPlugin = async ({ client }: any) => {
         // Debounce "start" to genuinely new user messages (message.updated also
         // fires as the assistant streams tokens).
         let lastUserMsg = ""
         const assistantFinish = new Map<string, string>()
+        const todoComplete = new Map<string, boolean>()
+        const sessions = new Map<string, { title?: string; parentID?: string }>()
+        const pendingActions = new Map<string, Set<string>>()
+        const sessionStatus = new Map<string, string>()
+        const completionRetries = new Map<string, number>()
+        let eventQueue = Promise.resolve()
+
+        async function sessionInfo(
+          sessionID: string,
+        ): Promise<{ title?: string; parentID?: string } | undefined> {
+          const cached = sessions.get(sessionID)
+          if (cached) return cached
+          try {
+            const response = await client.session.get({ path: { id: sessionID } })
+            const info = response.data
+            if (!info?.id) return undefined
+            sessions.set(sessionID, info)
+            return info
+          } catch {
+            return undefined
+          }
+        }
+
+        async function signalSession(state: string, sessionID?: string) {
+          if (!sessionID) return false
+          const info = await sessionInfo(sessionID)
+          if (!info) return false
+          if (info.parentID) return true
+          await signal(state, info.title)
+          return true
+        }
+
+        async function todosAreComplete(sessionID: string) {
+          const cached = todoComplete.get(sessionID)
+          if (cached !== undefined) return cached
+          try {
+            const response = await client.session.todo({ path: { id: sessionID } })
+            const todos = response.data
+            if (!Array.isArray(todos)) return undefined
+            if (todos.length === 0) return true
+            const complete = todos.every((todo: any) => ["completed", "cancelled"].includes(todo.status))
+            todoComplete.set(sessionID, complete)
+            return complete
+          } catch {
+            // Do not report completion when persisted todo state is unknown.
+            return undefined
+          }
+        }
+
+        function retryCompletion(sessionID: string) {
+          const attempt = (completionRetries.get(sessionID) ?? 0) + 1
+          if (attempt > 3) return
+          completionRetries.set(sessionID, attempt)
+          setTimeout(() => {
+            eventQueue = eventQueue.then(() => finishSession(sessionID)).catch(() => {})
+          }, attempt * 1000)
+        }
+
+        async function finishSession(sessionID?: string) {
+          if (!sessionID) return
+          const finish = assistantFinish.get(sessionID)
+          if (!finish || ["tool-calls", "unknown"].includes(finish)) return
+          if (pendingActions.get(sessionID)?.size) return
+          const todosDone = await todosAreComplete(sessionID)
+          if (todosDone === false) {
+            completionRetries.delete(sessionID)
+            return
+          }
+          if (todosDone === undefined || !(await signalSession("done", sessionID))) {
+            retryCompletion(sessionID)
+            return
+          }
+          completionRetries.delete(sessionID)
+          assistantFinish.delete(sessionID)
+        }
+
+        async function actionAsked(properties: any) {
+          const sessionID = properties.sessionID
+          if (!sessionID) return
+          const pending = pendingActions.get(sessionID) ?? new Set<string>()
+          if (properties.id) pending.add(properties.id)
+          pendingActions.set(sessionID, pending)
+          await signalSession("waiting", sessionID)
+        }
+
+        async function actionAnswered(properties: any) {
+          const sessionID = properties.sessionID
+          if (!sessionID) return
+          const pending = pendingActions.get(sessionID)
+          if (pending && properties.requestID) pending.delete(properties.requestID)
+          if (pending?.size) return
+          pendingActions.delete(sessionID)
+          await signalSession("working", sessionID)
+        }
+
         return {
-          event: async ({ event }: { event: { type: string; properties?: any } }) => {
-            switch (event.type) {
-              case "session.idle": {
-                const sessionID = event.properties?.sessionID
-                const finish = sessionID && assistantFinish.get(sessionID)
-                // OpenCode may briefly emit idle between reasoning/tool-loop
-                // steps. Its TUI likewise treats tool-calls and unknown as
-                // unfinished assistant messages.
-                if (finish && !["tool-calls", "unknown"].includes(finish)) {
-                  assistantFinish.delete(sessionID)
-                  signal("done")
+          event: ({ event }: { event: { type: string; properties?: any } }) => {
+            eventQueue = eventQueue
+              .then(async () => {
+                const properties = event.properties ?? {}
+                switch (event.type) {
+                  case "session.created":
+                  case "session.updated": {
+                    const info = properties.info
+                    if (info?.id) sessions.set(info.id, info)
+                    break
+                  }
+                  case "session.status": {
+                    const status = properties.status?.type
+                    if (properties.sessionID && status) sessionStatus.set(properties.sessionID, status)
+                    if (status === "idle") {
+                      await finishSession(properties.sessionID)
+                    }
+                    break
+                  }
+                  case "todo.updated": {
+                    const todos = properties.todos
+                    if (!properties.sessionID || !Array.isArray(todos) || todos.length === 0) {
+                      if (properties.sessionID) todoComplete.delete(properties.sessionID)
+                      break
+                    }
+                    todoComplete.set(
+                      properties.sessionID,
+                      todos.every((todo: any) => ["completed", "cancelled"].includes(todo.status)),
+                    )
+                    break
+                  }
+                  case "permission.asked":
+                  case "permission.v2.asked":
+                  case "question.asked":
+                  case "question.v2.asked":
+                    await actionAsked(properties)
+                    break
+                  case "permission.replied":
+                  case "permission.v2.replied":
+                  case "question.replied":
+                  case "question.rejected":
+                  case "question.v2.replied":
+                  case "question.v2.rejected":
+                    await actionAnswered(properties)
+                    break
+                  case "message.updated": {
+                    const info = properties.info
+                    if (info?.role === "user" && info?.id && info.id !== lastUserMsg) {
+                      lastUserMsg = info.id
+                      if (info.sessionID) {
+                        assistantFinish.delete(info.sessionID)
+                        completionRetries.delete(info.sessionID)
+                        const active = ["busy", "retry"].includes(sessionStatus.get(info.sessionID) ?? "")
+                        if (!active) {
+                          pendingActions.delete(info.sessionID)
+                          await signalSession("start", info.sessionID)
+                        }
+                      }
+                    }
+                    if (info?.role === "assistant" && info?.sessionID && info?.finish) {
+                      assistantFinish.set(info.sessionID, info.finish)
+                    }
+                    break
+                  }
                 }
-                break
-              }
-              // Permission-prompt event names vary slightly across OpenCode
-              // builds; match the common ones — any of them means a prompt is
-              // now waiting on the human.
-              case "permission.asked":
-              case "permission.updated":
-                signal("waiting")
-                break
-              case "permission.replied":
-                signal("working")
-                break
-              case "message.updated": {
-                const info = event.properties?.info
-                if (info?.role === "user" && info?.id && info.id !== lastUserMsg) {
-                  lastUserMsg = info.id
-                  if (info.sessionID) assistantFinish.delete(info.sessionID)
-                  signal("start")
-                }
-                if (info?.role === "assistant" && info?.sessionID && info?.finish) {
-                  assistantFinish.set(info.sessionID, info.finish)
-                }
-                break
-              }
-            }
+              })
+              .catch(() => {})
+            return eventQueue
           },
         }
       }

@@ -288,8 +288,8 @@ let
 
   # macOS notification script — runs on the host (via LaunchAgent) when notify.sh
   # or claude-waiting.sh drops a file in ${cfg.dataDir}/signals/. The signal is
-  # "message<TAB>session:window"; terminal-notifier shows the banner and only on
-  # click does -execute run jumpScript with that target. terminal-notifier is the
+  # "message<TAB>session:window<TAB>title"; terminal-notifier shows the banner
+  # and only on click does -execute run jumpScript with that target. It is the
   # Intel prebuilt run under Rosetta — chosen deliberately over a native osacompile
   # applet, which on this host never registers with Notification Center and so
   # never shows a banner.
@@ -298,20 +298,22 @@ let
     [ -f "$signal" ] || exit 0
     raw=$(cat "$signal" 2>/dev/null | head -c 300)
     rm -f "$signal"
-    IFS=$'\t' read -r msg target <<< "$raw"
-    # The signal file is written from inside the container, so treat both fields
+    IFS=$'\t' read -r msg target title <<< "$raw"
+    # The signal file is written from inside the container, so treat all fields
     # as untrusted. `target` is interpolated into terminal-notifier's -execute
     # shell string, which runs on the host (as this user) when the banner is
     # clicked — a single quote in it would break out of the quoting and execute
     # arbitrary code. Drop anything that is not a literal tmux "session:window"
-    # token, and strip control chars from the (argv-safe) message for hygiene.
+    # token, and strip control chars from the argv-safe text fields for hygiene.
     case "$target" in
       ""|*[!A-Za-z0-9_:.-]*) target="" ;;
     esac
     msg=$(printf '%s' "$msg" | tr -d '\000-\037')
+    title=$(printf '%s' "$title" | tr -d '\000-\037')
     : "''${msg:=Agentbox notification}"
+    : "''${title:=Agentbox}"
     ${pkgs.terminal-notifier}/bin/terminal-notifier \
-      -title "Agentbox" \
+      -title "$title" \
       -message "$msg" \
       -sound Glass \
       -execute "${jumpScript} '$target'"
