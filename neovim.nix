@@ -7,7 +7,6 @@
   vimPlugins,
   writeText,
   wrapNeovimUnstable,
-  neovimUtils,
 }:
 
 let
@@ -454,20 +453,20 @@ let
     conform-nvim
   ];
 
-  # Build the configured neovim
-  neovimConfig = neovimUtils.makeNeovimConfig {
-    inherit plugins;
-    customRC = ''
-      luafile ${initLua}
-    '';
-    viAlias = true;
-    vimAlias = true;
-  };
-
 in
-wrapNeovimUnstable neovim-unwrapped (neovimConfig // {
-  wrapperArgs = neovimConfig.wrapperArgs ++ [
-    "--set" "EDITOR" "nvim"
-    "--set" "VISUAL" "nvim"
+wrapNeovimUnstable neovim-unwrapped {
+  inherit plugins;
+  neovimRcContent = ''
+    luafile ${initLua}
+  '';
+  viAlias = true;
+  vimAlias = true;
+  wrapperArgs = [
+    "--set"
+    "EDITOR"
+    "nvim"
+    "--set"
+    "VISUAL"
+    "nvim"
   ];
-})
+}
