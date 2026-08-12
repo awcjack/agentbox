@@ -2,7 +2,7 @@
   description = "Agentbox — self-contained AI coding-agent sandbox (Nix OCI image + NixOS / nix-darwin modules)";
 
   # Deliberately depends on nothing but nixpkgs. Ships the sandbox with Claude
-  # Code, Codex and OpenCode; any further agents are NOT inputs here — a consumer
+  # Code, Codex, OpenCode and Pi; any further agents are NOT inputs here — a consumer
   # bakes their own builds in via `.override` (see README.md). Keeping them out
   # is what makes this flake standalone.
   #
@@ -44,7 +44,7 @@
       # top-level options + config. `.default` is the conventional attr;
       # `.agentbox` is a friendlier alias.
       #
-      # This is the clean standalone sandbox: Claude Code + Codex + OpenCode, no private
+      # This is the clean standalone sandbox: Claude Code + Codex + OpenCode + Pi, no private
       # agents bundled. Advanced users can still bake extra agents into the
       # image via .override and wire them through the generic extension surface
       # (services.agentbox.extraEnvironment / extraVolumes / extraActivation).

@@ -42,6 +42,7 @@
   # Development tools
   git,
   tmux,
+  ttyd,
   htop,
   tree,
   ripgrep,
@@ -62,11 +63,12 @@
   bun,
   python312,
   uv,
-  # AI coding CLIs bundled from nixpkgs (Codex + OpenCode). Claude Code is NOT a
+  # AI coding CLIs bundled from nixpkgs (Codex + OpenCode + Pi). Claude Code is NOT a
   # Nix package — the entrypoint installs it at runtime via Anthropic's native
   # installer (CLAUDE_CODE_VERSION) so its self-updater keeps it current.
   codex,
   opencode,
+  pi-coding-agent,
   # Language servers (LSPs)
   gopls,
   nil, # Nix LSP
@@ -128,7 +130,7 @@
 
 let
   # ---------------------------------------------------------------------------
-  # OpenCode Plugins — only plugins using the current API are included.
+  # Agent integrations — OpenCode plugins and the equivalent Pi extension.
   # Correct hooks: tool.execute.before / tool.execute.after (not tool.complete).
   # Dead plugins that used the non-existent tool.complete event have been
   # removed: build-validator, dangerous-command-blocker, pre-commit-lint,
@@ -654,6 +656,21 @@ let
       export default TestRunnerPlugin
     '';
   };
+
+  # Pi extension: mirrors the Agentbox-owned OpenCode integrations (sensitive
+  # path and dangerous-command guards, post-edit tests, gitleaks pre-commit,
+  # notifications, and selective archive resolution) using Pi's extension API.
+  piAgentboxExtension = writeTextFile {
+    name = "pi-agentbox.ts";
+    text = builtins.readFile ./extensions/pi-agentbox.ts;
+  };
+
+  # Force-load the immutable Agentbox extension for every Pi invocation. Pi has
+  # no managed-policy layer, so relying only on a user-writable ~/.pi extension
+  # would let a running agent disable its own guards.
+  piAgentboxCli = writeShellScriptBin "pi" ''
+    exec ${pi-coding-agent}/bin/pi -e ${piAgentboxExtension} "$@"
+  '';
 
   # ── Cross-agent notification / tmux-title bridge ────────────────────────────
   # agent-signal.sh is the ONE producer behind the "✅ done" / "🔔 needs you"
@@ -1239,6 +1256,7 @@ let
     git
     (if agentbox-neovim != null then agentbox-neovim else neovim) # Pre-configured neovim
     tmux
+    ttyd
     htop
     tree
     ripgrep
@@ -1258,9 +1276,10 @@ let
     bun
     python312
     uv
-    # AI coding CLIs (Codex + OpenCode bundled here; Claude Code at runtime).
+    # AI coding CLIs (Codex + OpenCode + Pi bundled here; Claude Code at runtime).
     codex
     opencode
+    piAgentboxCli
     # Language servers
     gopls
     nil # Nix LSP
@@ -1338,16 +1357,20 @@ let
       chmod +x "$HOME_DIR"/.claude/hooks/*.sh 2>/dev/null || true
     fi
 
-    # Keep baked agent skills available even when ~/.claude, ~/.codex, and
-    # ~/.config/opencode are bind-mounted persistent host directories. Host
+    # Keep baked agent skills available even when ~/.claude, ~/.codex,
+    # ~/.config/opencode, and ~/.pi are bind-mounted persistent host directories. Host
     # activation creates ~/.bashrc before first start, so the one-shot skeleton
     # copy below may never populate these mounted config dirs.
     if [ -d "$SKEL_DIR" ]; then
-      mkdir -p "$HOME_DIR/.claude/commands" "$HOME_DIR/.config/opencode/command" "$HOME_DIR/.codex/skills"
+      mkdir -p "$HOME_DIR/.claude/commands" "$HOME_DIR/.config/opencode/command" \
+        "$HOME_DIR/.codex/skills" "$HOME_DIR/.pi/agent/skills"
       cp -f "$SKEL_DIR"/.claude/commands/*.md "$HOME_DIR/.claude/commands/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.config/opencode/command/*.md "$HOME_DIR/.config/opencode/command/" 2>/dev/null || true
       if [ -d "$SKEL_DIR/.codex/skills" ]; then
         cp -rT "$SKEL_DIR/.codex/skills" "$HOME_DIR/.codex/skills" 2>/dev/null || true
+      fi
+      if [ -d "$SKEL_DIR/.pi/agent/skills" ]; then
+        cp -rT "$SKEL_DIR/.pi/agent/skills" "$HOME_DIR/.pi/agent/skills" 2>/dev/null || true
       fi
 
       # Cross-agent notification bridge (agent-signal.sh + the OpenCode plugin +
@@ -1359,12 +1382,17 @@ let
       cp -f "$SKEL_DIR"/.local/bin/agent-signal.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.local/bin/codex-notify.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.local/bin/agent-archive-request.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.local/bin/shared-test-runner.ts "$HOME_DIR/.local/bin/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.local/bin/dd-gitleaks-precommit.sh "$HOME_DIR/.local/bin/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.config/opencode/plugins/test-runner.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
+      cp -f "$SKEL_DIR"/.config/opencode/plugins/gitleaks-precommit.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.config/opencode/plugins/notify.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.config/opencode/plugins/archive-request.ts "$HOME_DIR/.config/opencode/plugins/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.claude/hooks/archive-request-resolver.sh "$HOME_DIR/.claude/hooks/" 2>/dev/null || true
       cp -f "$SKEL_DIR"/.claude/hooks/archive-request-cancel.sh "$HOME_DIR/.claude/hooks/" 2>/dev/null || true
       chmod +x "$HOME_DIR"/.local/bin/agent-signal.sh "$HOME_DIR"/.local/bin/codex-notify.sh \
-        "$HOME_DIR"/.local/bin/agent-archive-request.sh "$HOME_DIR"/.claude/hooks/archive-request-resolver.sh \
+        "$HOME_DIR"/.local/bin/agent-archive-request.sh "$HOME_DIR"/.local/bin/dd-gitleaks-precommit.sh \
+        "$HOME_DIR"/.claude/hooks/archive-request-resolver.sh \
         "$HOME_DIR"/.claude/hooks/archive-request-cancel.sh 2>/dev/null || true
       # Codex honours `notify` only as a root key in the user-level config. Add
       # the managed default to existing configs without replacing user settings.
@@ -1608,6 +1636,45 @@ let
       fi
     fi
 
+    # Pi has no native HTTP server. Expose its exact pinned, wrapped TUI through
+    # ttyd so browser sessions retain the immutable Agentbox extension and the
+    # same ~/.pi state as terminal sessions. tmux keeps the TUI alive across
+    # browser disconnects.
+    PI_WEB_STARTED=false
+    if [ "''${ENABLE_PI_WEB:-false}" = "true" ]; then
+      if command -v ttyd >/dev/null 2>&1 && command -v pi >/dev/null 2>&1; then
+        echo "Starting Pi web interface..."
+        PI_WEB_ARGS=(
+          --writable
+          --check-origin
+          --interface "''${PI_WEB_BIND_ADDRESS:-127.0.0.1}"
+          --port "''${PI_WEB_PORT:-4097}"
+          --max-clients 1
+          --cwd /workspace
+          --client-option titleFixed="Agentbox Pi"
+        )
+        PI_WEB_SECRET="''${PI_WEB_PASSWORD:-''${OPENCODE_PASSWORD:-}}"
+        if [ -n "$PI_WEB_SECRET" ]; then
+          PI_WEB_ARGS+=(--credential "pi:$PI_WEB_SECRET")
+        elif [ "''${PI_WEB_BIND_ADDRESS:-127.0.0.1}" != "127.0.0.1" ] \
+          && [ "''${PI_WEB_BIND_ADDRESS:-127.0.0.1}" != "::1" ]; then
+          echo "WARNING: Pi web interface disabled: PI_WEB_PASSWORD or OPENCODE_PASSWORD is required for a non-loopback bind"
+          PI_WEB_ARGS=()
+        fi
+
+        if [ "''${#PI_WEB_ARGS[@]}" -gt 0 ]; then
+          setpriv --reuid=agent --regid=agent --init-groups -- \
+            env HOME=/home/agent XDG_CONFIG_HOME=/home/agent/.config \
+            ttyd "''${PI_WEB_ARGS[@]}" bash -lc \
+              'exec tmux new-session -A -s pi-web pi' \
+            > "$AGENT_LOGS/pi-web.log" 2>&1 &
+          PI_WEB_STARTED=true
+        fi
+      else
+        echo "WARNING: ENABLE_PI_WEB=true but 'ttyd' or 'pi' not found in PATH"
+      fi
+    fi
+
     # Start Claude Code if enabled.
     #
     # Launched in a detached tmux session as the agent user, not as a bare
@@ -1642,6 +1709,17 @@ let
       fi
     fi
 
+    # Pi is bundled from nixpkgs and invoked interactively. Its Agentbox
+    # extension is force-loaded by the immutable wrapper; skills are refreshed
+    # from the skeleton by entrypoint-user above.
+    if [ "''${ENABLE_PI:-false}" = "true" ]; then
+      if command -v pi >/dev/null 2>&1; then
+        echo "Pi CLI available: $(pi --version 2>/dev/null || echo present)"
+      else
+        echo "WARNING: ENABLE_PI=true but 'pi' not found in PATH"
+      fi
+    fi
+
     # Run user-provided boot commands/scripts (generic extension hook). Anything
     # wired in via the `bootScripts` module option (or mounted into the boot.d
     # dir) is launched as the agent user in the background here — use it to
@@ -1672,6 +1750,7 @@ let
     # If services were started in background, wait for them instead of starting a shell
     # This keeps the container alive when running as a systemd service
     if [ "''${ENABLE_OPENCODE:-false}" = "true" ] || \
+       [ "$PI_WEB_STARTED" = "true" ] || \
        [ "''${ENABLE_CLAUDE_CODE:-false}" = "true" ] || \
        [ "$AGENTBOX_BOOT_STARTED" = "true" ]; then
       # If a specific command was passed, run it then wait
@@ -2029,10 +2108,11 @@ let
     '';
   };
 
-  # Skeleton directory for new users (includes OpenCode plugins)
+  # Skeleton directory for new users (includes OpenCode plugins and Pi extension)
   skelDir = runCommand "skel-agent" { } ''
     mkdir -p $out/.config/opencode/plugins $out/.config/opencode/command $out/.local/bin $out/.ssh $out/.agentbox-logs $out/.cache
     mkdir -p $out/.codex/skills
+    mkdir -p $out/.pi/agent/skills
     mkdir -p $out/.claude/hooks $out/.claude/commands
     mkdir -p $out/.claude/plugins/agentbox-lsp
     mkdir -p $out/.claude/plugins/cache/claude-plugins-official/gopls-lsp/1.0.0
@@ -2089,9 +2169,9 @@ let
     chmod +x $out/.claude/hooks/gitleaks-precommit.sh
 
     # Skill commands from the external claude-skills repo. Claude Code and
-    # OpenCode use slash-command markdown files. Codex uses directory-based
-    # SKILL.md files, generated from the Claude command source so all three
-    # agents share the same skill names and instructions.
+    # OpenCode use slash-command markdown files. Codex and Pi use directory-based
+    # SKILL.md files, generated from the Claude command source so every agent
+    # shares the same skill names and instructions.
     ${lib.optionalString (claude-skills-src != null) ''
       cp ${claude-skills-src}/claude/*.md $out/.claude/commands/
       cp ${claude-skills-src}/opencode/*.md $out/.config/opencode/command/
@@ -2122,6 +2202,9 @@ let
             !in_fm { print }
           ' "$src"
         } > "$dest/SKILL.md"
+        pi_dest="$out/.pi/agent/skills/$name"
+        mkdir -p "$pi_dest"
+        cp "$dest/SKILL.md" "$pi_dest/SKILL.md"
       done
     ''}
 
@@ -2129,6 +2212,8 @@ let
     # semantics cannot be replaced accidentally by a consumer skill bundle.
     cp ${./skills/archive-conversation-claude.md} $out/.claude/commands/archive-conversation.md
     cp ${./skills/archive-conversation-opencode.md} $out/.config/opencode/command/archive-conversation.md
+    mkdir -p $out/.pi/agent/skills/archive-conversation
+    cp ${./skills/archive-conversation-pi.md} $out/.pi/agent/skills/archive-conversation/SKILL.md
 
     # Writable context directory placeholder — actual writes happen at runtime
     mkdir -p $out/contexts
@@ -2235,6 +2320,7 @@ in
     ExposedPorts = {
       "22/tcp" = { }; # SSH
       "4096/tcp" = { }; # OpenCode server
+      "4097/tcp" = { }; # Pi browser TUI
     };
     Env = [
       # nix profile dirs are on PATH so packages installed via `nix profile

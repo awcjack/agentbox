@@ -29,6 +29,8 @@ let
       root        Open a shell as root user
       exec        Execute a command in the container
       opencode    Start opencode in a tmux session
+      pi          Start Pi in a tmux session
+      pi-web      Show the Pi browser interface URL
       claude      Attach to the Claude Code tmux session (starts it if needed)
       restart     Restart the container service
       stop        Stop the container service
@@ -39,6 +41,8 @@ let
       agentbox exec ls -la              # Run command in container
       agentbox logs -f                  # Follow container logs
       agentbox opencode                 # Start opencode in tmux
+      agentbox pi                       # Start Pi in tmux
+      agentbox pi-web                   # Show Pi browser URL
       agentbox claude                   # Attach to Claude Code in tmux
 
     The container is managed by systemd (docker-$CONTAINER_NAME.service).
@@ -111,6 +115,21 @@ let
           fi
         }
 
+        cmd_pi() {
+          ensure_running
+          if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t pi 2>/dev/null; then
+            docker exec -it -u agent -w /workspace "$CONTAINER_NAME" tmux attach-session -t pi
+          else
+            docker exec -it -u agent -w /workspace "$CONTAINER_NAME" tmux new-session -s pi pi
+          fi
+        }
+
+        cmd_pi_web() {
+          ensure_running
+          echo "Pi web interface: http://localhost:4097"
+          echo "Basic Auth username: pi"
+        }
+
         cmd_restart() {
           echo "Restarting agentbox service..."
           sudo systemctl restart "docker-$CONTAINER_NAME.service" 2>/dev/null || \
@@ -142,6 +161,8 @@ let
           root)     cmd_root ;;
           exec)     shift; cmd_exec "$@" ;;
           opencode) cmd_opencode ;;
+          pi)       cmd_pi ;;
+          pi-web)   cmd_pi_web ;;
           claude)   cmd_claude ;;
           restart)  cmd_restart ;;
           stop)     cmd_stop ;;

@@ -122,6 +122,8 @@ let
       permission = effectiveOpencodePermission;
     }
   );
+  piSettingsJson = pkgs.writeText "pi-settings.json" (builtins.toJSON cfg.settings.piConfig.settings);
+  piModelsJson = pkgs.writeText "pi-models.json" (builtins.toJSON cfg.settings.piConfig.models);
 
   gitConfigFile = pkgs.writeText ".gitconfig" cfg.settings.gitConfig;
 
@@ -146,6 +148,10 @@ let
     TZ = cfg.settings.timezone;
     # OpenCode services
     ENABLE_OPENCODE = lib.boolToString cfg.settings.enableOpencode;
+    ENABLE_PI = lib.boolToString cfg.settings.enablePi;
+    ENABLE_PI_WEB = lib.boolToString cfg.settings.enablePiWeb;
+    PI_WEB_BIND_ADDRESS = "127.0.0.1";
+    PI_WEB_PORT = "4097";
     ENABLE_CHAT_BRIDGE = "false";
     # Claude Code services
     ENABLE_CLAUDE_CODE = lib.boolToString cfg.settings.enableClaudeCode;
@@ -339,6 +345,9 @@ in
       "d ${cfg.dataDir}/home/.config 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.config/opencode 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/home/.config/opencode/plugins 0755 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/home/.pi 0755 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/home/.pi/agent 0755 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir}/home/.pi/agent/skills 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/workspaces 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/workspaces/opencode 0755 ${cfg.user} ${cfg.group} -"
       "d ${cfg.dataDir}/hooks 0755 ${cfg.user} ${cfg.group} -"
@@ -458,6 +467,7 @@ in
         "${cfg.dataDir}/home/.claude:/home/agent/.claude"
         "${cfg.dataDir}/home/.codex:/home/agent/.codex"
         "${cfg.dataDir}/home/.config/opencode:/home/agent/.config/opencode"
+        "${cfg.dataDir}/home/.pi:/home/agent/.pi"
         "${cfg.dataDir}/workspaces/opencode:/workspace"
         "${cfg.dataDir}/hooks:/home/agent/.hooks:ro"
       ]
@@ -526,7 +536,8 @@ in
                         mkdir -p "${cfg.dataDir}/managed" \
                                  "${cfg.dataDir}/home/.claude" \
                                  "${cfg.dataDir}/home/.codex" \
-                                 "${cfg.dataDir}/home/.config/opencode"
+                                 "${cfg.dataDir}/home/.config/opencode" \
+                                 "${cfg.dataDir}/home/.pi/agent/skills"
                         ${lib.optionalString cfg.settings.historyArchive.enable ''
                           mkdir -p "${cfg.dataDir}/history-sync/requests"
                           chown ${cfg.user}:${cfg.group} "${cfg.dataDir}/history-sync/requests"
@@ -535,7 +546,8 @@ in
                         chown ${cfg.user}:${cfg.group} \
                           "${cfg.dataDir}/home/.claude" \
                           "${cfg.dataDir}/home/.codex" \
-                          "${cfg.dataDir}/home/.config/opencode"
+                          "${cfg.dataDir}/home/.config/opencode" \
+                          "${cfg.dataDir}/home/.pi"
 
                         # Create .bashrc marker file to prevent container from overwriting mounted volumes
                         # The container's entrypoint checks for .bashrc to detect "initialized" home directory
@@ -697,6 +709,22 @@ in
                           chown ${cfg.user}:${cfg.group} "$_live_opencode"
                           chmod 644 "$_live_opencode"
                         fi
+
+                        # Pi settings are shared with CLI-persisted preferences.
+                        # Merge declarative values over live settings while preserving
+                        # Pi-owned keys, and refresh custom model definitions.
+                        _live_pi_settings="${cfg.dataDir}/home/.pi/agent/settings.json"
+                        _merged_pi_settings=""
+                        if [ -f "$_live_pi_settings" ]; then
+                          _merged_pi_settings="$(${pkgs.jq}/bin/jq -s '.[0] * .[1]' \
+                            "$_live_pi_settings" ${piSettingsJson} 2>/dev/null)"
+                        fi
+                        [ -n "$_merged_pi_settings" ] || _merged_pi_settings="$(cat ${piSettingsJson})"
+                        printf '%s\n' "$_merged_pi_settings" > "$_live_pi_settings.tmp"
+                        mv -f "$_live_pi_settings.tmp" "$_live_pi_settings"
+                        cp -f ${piModelsJson} "${cfg.dataDir}/home/.pi/agent/models.json"
+                        chown -R ${cfg.user}:${cfg.group} "${cfg.dataDir}/home/.pi"
+                        chmod 644 "$_live_pi_settings" "${cfg.dataDir}/home/.pi/agent/models.json"
 
                         # Copy git config
                         cp -f ${gitConfigFile} "${cfg.dataDir}/home/.gitconfig"

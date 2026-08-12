@@ -119,6 +119,8 @@ let
       permission = effectiveOpencodePermission;
     }
   );
+  piSettingsJson = pkgs.writeText "pi-settings.json" (builtins.toJSON cfg.settings.piConfig.settings);
+  piModelsJson = pkgs.writeText "pi-models.json" (builtins.toJSON cfg.settings.piConfig.models);
 
   gitConfigFile = pkgs.writeText ".gitconfig" cfg.settings.gitConfig;
   tmuxConfigFile = pkgs.writeText ".tmux.conf" cfg.settings.tmuxConfig;
@@ -150,6 +152,12 @@ let
         TZ = cfg.settings.timezone;
         # OpenCode services
         ENABLE_OPENCODE = lib.boolToString cfg.settings.enableOpencode;
+        ENABLE_PI = lib.boolToString cfg.settings.enablePi;
+        ENABLE_PI_WEB = lib.boolToString cfg.settings.enablePiWeb;
+        # Docker Desktop/Colima/OrbStack host networking crosses a Linux VM, so
+        # container loopback is not consistently reachable from macOS.
+        PI_WEB_BIND_ADDRESS = "0.0.0.0";
+        PI_WEB_PORT = "4097";
         ENABLE_CHAT_BRIDGE = "false";
         # Claude Code services
         ENABLE_CLAUDE_CODE = lib.boolToString cfg.settings.enableClaudeCode;
@@ -209,6 +217,7 @@ let
       "-v ${cfg.dataDir}/managed/codex-requirements.toml:/etc/codex/requirements.toml:ro"
       "-v ${cfg.dataDir}/managed/opencode.json:/etc/opencode/opencode.json:ro"
       "-v ${cfg.dataDir}/home/.config/opencode:/home/agent/.config/opencode"
+      "-v ${cfg.dataDir}/home/.pi:/home/agent/.pi"
       "-v ${cfg.dataDir}/home/.local/share/opencode:/home/agent/.local/share/opencode"
       "-v ${cfg.dataDir}/workspaces/opencode:/workspace"
       "-v ${cfg.dataDir}/hooks:/home/agent/.hooks:ro"
@@ -258,6 +267,14 @@ let
     ) "--security-opt seccomp=${cfg.settings.hardening.seccompProfile}"
     ++ lib.optional cfg.settings.hardening.noNewPrivileges "--security-opt no-new-privileges"
   );
+
+  healthCommand =
+    if cfg.settings.enableOpencode then
+      ''curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health || exit 1''
+    else if cfg.settings.enablePiWeb then
+      ''password="$PI_WEB_PASSWORD"; [ -n "$password" ] || password="$OPENCODE_PASSWORD"; curl -fsS -u "pi:$password" http://127.0.0.1:4097/ >/dev/null || exit 1''
+    else
+      "true";
 
   # Click-to-jump handler — runs ONLY when you click an Agentbox notification
   # (terminal-notifier -execute). $1 is the "session:window" tmux target the hook
@@ -432,8 +449,8 @@ let
 
       echo "Starting agentbox container..."
 
-      # Build docker run command as an array so the healthcheck
-      # command (which contains $OPENCODE_PASSWORD) survives quoting
+      # Build docker run command as an array so the healthcheck command and its
+      # password variables survive quoting
       # and is expanded inside the container, not on the host.
       DOCKER_ARGS=(
         run -d
@@ -445,7 +462,7 @@ let
         --pids-limit=${toString cfg.settings.pidsLimit}
         ${containerEnvArgs}
         ${volumeArgs}
-        --health-cmd 'curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health || exit 1'
+        --health-cmd ${lib.escapeShellArg healthCommand}
         --health-interval=30s
         --health-timeout=5s
         --health-retries=3
@@ -465,6 +482,7 @@ let
       echo ""
       echo "Agentbox started!"
       echo "  OpenCode: http://localhost:4096"
+      ${lib.optionalString cfg.settings.enablePiWeb ''echo "  Pi:       http://localhost:4097"''}
       echo ""
       echo "Use 'agentbox shell' to access the container"
     }
@@ -520,6 +538,40 @@ let
       docker exec -it -u agent -w /workspace "$CONTAINER_NAME" bash -lc 'tmux new-session -A -s main'
     }
 
+    ensure_container_running() {
+      if ! docker ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
+        echo "Agentbox is not running. Starting it first..."
+        cmd_start
+        sleep 2
+      fi
+    }
+
+    cmd_opencode() {
+      check_docker
+      ensure_container_running
+      docker exec -it -u agent -w /workspace "$CONTAINER_NAME" bash -lc 'tmux new-session -A -s opencode opencode'
+    }
+
+    cmd_pi() {
+      check_docker
+      ensure_container_running
+      docker exec -it -u agent -w /workspace "$CONTAINER_NAME" bash -lc 'tmux new-session -A -s pi pi'
+    }
+
+    cmd_pi_web() {
+      check_docker
+      ensure_container_running
+      echo "Pi web interface: http://localhost:4097"
+      echo "Basic Auth username: pi"
+    }
+
+    cmd_claude() {
+      check_docker
+      ensure_container_running
+      docker exec -it -u agent -w /workspace "$CONTAINER_NAME" bash -lc \
+        'tmux new-session -A -s claude "claude --dangerously-skip-permissions"'
+    }
+
     cmd_load_image() {
       check_docker
       echo "Loading agentbox image from Nix store..."
@@ -540,6 +592,7 @@ let
       mkdir -p "$DATA_DIR/home/.claude"
       mkdir -p "$DATA_DIR/home/.codex/skills"
       mkdir -p "$DATA_DIR/home/.config/opencode/plugins"
+      mkdir -p "$DATA_DIR/home/.pi/agent/skills"
       mkdir -p "$DATA_DIR/home/.local/share/opencode"
       mkdir -p "$DATA_DIR/workspaces/opencode"
       mkdir -p "$DATA_DIR/hooks"
@@ -574,6 +627,10 @@ let
       status      Show container status
       logs        Show container logs (follow mode)
       shell       Open a shell in the container
+      opencode    Start OpenCode in a tmux session
+      pi          Start Pi in a tmux session
+      pi-web      Show the Pi browser interface URL
+      claude      Attach to the Claude Code tmux session
       load-image  Load the Nix-built Docker image
       setup       Initialize directories and configuration
 
@@ -592,6 +649,10 @@ let
       status)     cmd_status ;;
       logs)       shift; cmd_logs "$@" ;;
       shell)      cmd_shell ;;
+      opencode)   cmd_opencode ;;
+      pi)         cmd_pi ;;
+      pi-web)     cmd_pi_web ;;
+      claude)     cmd_claude ;;
       load-image) cmd_load_image ;;
       setup)      cmd_setup ;;
       help|--help|-h) usage ;;
@@ -712,6 +773,7 @@ in
             mkdir -p "${cfg.dataDir}/home/.claude"
             mkdir -p "${cfg.dataDir}/home/.codex/skills"
             mkdir -p "${cfg.dataDir}/home/.config/opencode/plugins"
+            mkdir -p "${cfg.dataDir}/home/.pi/agent/skills"
             mkdir -p "${cfg.dataDir}/home/.local/share/opencode"
             mkdir -p "${cfg.dataDir}/workspaces/opencode"
             mkdir -p "${cfg.dataDir}/hooks"
@@ -774,6 +836,20 @@ in
               mv -f "$_opencode_tmp" "$_live_opencode"
               chmod 644 "$_live_opencode"
             fi
+
+            # Merge declarative Pi preferences over live CLI state and refresh
+            # custom providers/models.
+            _live_pi_settings="${cfg.dataDir}/home/.pi/agent/settings.json"
+            _merged_pi_settings=""
+            if [ -f "$_live_pi_settings" ]; then
+              _merged_pi_settings="$(${pkgs.jq}/bin/jq -s '.[0] * .[1]' \
+                "$_live_pi_settings" "${piSettingsJson}" 2>/dev/null)"
+            fi
+            [ -n "$_merged_pi_settings" ] || _merged_pi_settings="$(cat "${piSettingsJson}")"
+            printf '%s\n' "$_merged_pi_settings" > "$_live_pi_settings.tmp"
+            mv -f "$_live_pi_settings.tmp" "$_live_pi_settings"
+            cp -f "${piModelsJson}" "${cfg.dataDir}/home/.pi/agent/models.json"
+            chmod 644 "$_live_pi_settings" "${cfg.dataDir}/home/.pi/agent/models.json"
 
             # Merge Claude Code configuration (MCP servers) into ~/.claude.json only
             # when the Nix config changed. The store path is content-addressed, so it

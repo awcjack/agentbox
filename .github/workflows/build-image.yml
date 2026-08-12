@@ -15,6 +15,10 @@ on:
       - "packages.nix"
       - "neovim.nix"
       - "package.nix"
+      - "extensions/**"
+      - "skills/**"
+      - "scripts/**"
+      - "tests/**"
       - "modules/**"
       - ".github/workflows/build-image.yml"
   pull_request:
@@ -24,6 +28,10 @@ on:
       - "packages.nix"
       - "neovim.nix"
       - "package.nix"
+      - "extensions/**"
+      - "skills/**"
+      - "scripts/**"
+      - "tests/**"
       - "modules/**"
   workflow_dispatch: {}
 
@@ -60,6 +68,11 @@ jobs:
 
       - name: Flake metadata (sanity)
         run: nix flake show --no-update-lock-file
+
+      - name: Test archive requests
+        run: |
+          nix build .#packages.x86_64-linux.agent-archive-request-test --no-update-lock-file
+          nix build .#packages.x86_64-linux.pi-agentbox-extension-test --no-update-lock-file
 
       - name: Build agentbox image
         run: |

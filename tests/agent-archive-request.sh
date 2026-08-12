@@ -67,4 +67,15 @@ test "$(find "$AGENT_HISTORY_PENDING_DIR" -type f -name 'opencode-*.json' | wc -
 bash "$script" cancel opencode opencode-scope
 test "$(find "$AGENT_HISTORY_PENDING_DIR" -type f -name 'opencode-*.json' | wc -l)" -eq 0
 
+# Pi requests carry the native session file as collector source context.
+pi_request="$(bash "$script" request pi pi-session /workspace/repo pi-session)"
+pi_destination="$(bash "$script" resolve pi pi-session archive-conversation /workspace/repo /tmp/pi-session.jsonl pi-session)"
+jq -e --arg request_id "$pi_request" '
+  .request_id == $request_id and
+  .agent == "pi" and
+  .native_session_id == "pi-session" and
+  .boundary.event == "archive-conversation" and
+  .context.source_path == "/tmp/pi-session.jsonl"
+' "$pi_destination" >/dev/null
+
 printf 'agent archive request tests passed\n'

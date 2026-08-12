@@ -2,16 +2,16 @@
 
 A self-contained AI coding-agent sandbox, packaged as a standalone Nix flake.
 It ships a full dev toolchain in an OCI container and runs **Claude Code**,
-**Codex**, and **OpenCode** inside it, isolated from the host.
+**Codex**, **OpenCode**, and **Pi** inside it, isolated from the host.
 
 - **`agentboxImage`** — a Nix-built OCI image (no Dockerfile, no Homebrew).
 - **`agentbox`** — a host-side CLI to drive the container (`status`, `shell`,
-  `logs`, `exec`, `start`/`stop`/`restart`).
+  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `claude`, `start`/`stop`/`restart`).
 - **`nixosModules.agentbox`** / **`darwinModules.agentbox`** — run it as a
   systemd `oci-containers` service (NixOS) or via manual management (macOS).
 
-It depends on **nothing but `nixpkgs`**. No private inputs, no bundled
-third-party agents — just the sandbox plus Claude Code and Codex.
+It depends on **nothing but `nixpkgs`**. No private inputs; Codex, OpenCode, and
+Pi come from nixpkgs, while Claude Code uses Anthropic's runtime installer.
 
 ## The agents
 
@@ -19,13 +19,36 @@ third-party agents — just the sandbox plus Claude Code and Codex.
 |---|---|---|
 | **Codex** | bundled in the image from nixpkgs (`codex`) | `settings.enableCodex` (false) |
 | **OpenCode** | bundled in the image from nixpkgs (`opencode`) | `settings.enableOpencode` (true) |
+| **Pi** | bundled in the image from nixpkgs (`pi-coding-agent`) | `settings.enablePi` (true; availability toggle) |
 | **Claude Code** | installed at container start by Anthropic's native installer (self-updates) | `settings.enableClaudeCode` (false) + `claudeCodeVersion` |
 
-All three are first-class: Codex and OpenCode are baked into the image from
+All four are first-class: Codex, OpenCode, and Pi are baked into the image from
 nixpkgs; Claude Code is runtime-installed so its own updater keeps it current.
 Each toggle sets the matching `ENABLE_*` env the entrypoint reads. Provide
 credentials through the secret `environmentFile` (e.g. `OPENAI_API_KEY` for
 Codex, `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code).
+
+Codex and Pi are interactive CLIs, so `enableCodex` and `enablePi` control
+startup availability checks rather than removing their binaries from the image.
+`enablePiWeb` separately controls Pi's browser service.
+
+Pi also has a browser TUI at `http://localhost:4097`, enabled by
+`settings.enablePiWeb` (default: true). It runs the exact wrapped Pi CLI in a
+persistent tmux session, so terminal and browser use the same native settings,
+credentials, sessions, skills, and immutable Agentbox extension. Set
+`PI_WEB_PASSWORD` in the secret `environmentFile`; `OPENCODE_PASSWORD` is used
+as a fallback. The Basic Auth username is `pi`. It binds to host loopback by
+default on NixOS. The Darwin container binds all interfaces because its Docker
+runtime may cross a Linux VM, and refuses to start Pi web without a password;
+use a trusted TLS reverse proxy or VPN rather than exposing plain HTTP Basic
+Auth directly.
+
+Pi force-loads an immutable Agentbox extension that mirrors the Agentbox-owned
+OpenCode integrations: secret-path and dangerous-command guards, post-edit
+tests, gitleaks before commits, tmux/desktop notifications, shared skills, and
+selective archive requests. Pi has no native managed-policy layer equivalent to
+OpenCode's `/etc/opencode` config, so the container remains the hard boundary;
+the extension supplies the strongest harness-level enforcement Pi exposes.
 
 ```nix
 services.agentbox = {
@@ -35,6 +58,8 @@ services.agentbox = {
     enableClaudeCode = true;
     enableCodex = true;
     enableOpencode = true; # on by default
+    enablePi = true;       # on by default
+    enablePiWeb = true;    # browser TUI on http://localhost:4097
   };
 };
 ```
@@ -45,7 +70,7 @@ services.agentbox = {
 |---|---|
 | Dev tools | git, neovim (pre-configured), tmux, htop, tree, ripgrep, fd, fzf, jq, yq-go, curl, wget, unzip, gnumake, pkg-config, gcc, nix |
 | Languages | go, nodejs 22, bun, python 3.12, uv |
-| **AI CLIs** | **codex**, **opencode** (Claude Code is runtime-installed) |
+| **AI CLIs** | **codex**, **opencode**, **pi** (Claude Code is runtime-installed) |
 | Language servers | gopls, nil, typescript-language-server, vscode-langservers-extracted |
 | Formatters | nixfmt (RFC), prettier |
 | Cloud CLIs | awscli2, kubectl, kubernetes-helm, google-cloud-sdk (+gke-gcloud-auth-plugin), docker-client |
@@ -142,13 +167,17 @@ This creates only `<dataDir>/history-sync/requests` and mounts that directory at
 `/home/agent/.agent-history/requests`. The rest of a collector's spool should be
 host-only and must not be mounted into Agentbox.
 
-Explicitly invoke `/archive-conversation` in Claude Code or OpenCode. The command
+Explicitly invoke `/archive-conversation` in Claude Code or OpenCode, or
+`/skill:archive-conversation` in Pi. The command
 creates a bounded intent; the next Claude `Stop` or terminal OpenCode idle event
 resolves it with the native session ID. The request timestamp is the content
 cutoff, so delayed resolution must not include later messages. Archiving more of
 the session requires another explicit request. Codex support is intentionally
 deferred until its skill invocation can be bound to a native thread ID before
 the completion callback.
+
+Pi's extension resolves its intent on the next `agent_end` event using Pi's
+native session ID and JSONL session path.
 
 Resolved files contain identifiers, timestamps, event type, and local source
 context, but no message content. They are untrusted input: a host collector must
@@ -160,9 +189,8 @@ identity from host configuration rather than trusting request fields.
 
 ## Advanced: baking extra agents in
 
-Beyond the three bundled agents, this standalone ships no others — and there is
-no agent-specific code in the image. To add your own you have four generic
-hooks, none of which require forking:
+Beyond the four bundled agents, this standalone ships no others. To add your own
+you have four generic hooks, none of which require forking:
 
 | Hook | Purpose |
 |---|---|
@@ -193,5 +221,5 @@ services.agentbox = {
 };
 ```
 
-The image itself stays agent-agnostic; everything specific to your agent lives
-in your own config.
+The generic hooks keep additional agents out of this repository; everything
+specific to an added agent lives in your own config.

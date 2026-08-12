@@ -5,7 +5,7 @@
 #                                 NixOS / nix-darwin config, which is what the
 #                                 modules default to.
 #
-# The bundled agents (Codex + OpenCode) come straight from nixpkgs via
+# The bundled agents (Codex + OpenCode + Pi) come straight from nixpkgs via
 # callPackage. Any further agents are intentionally NOT wired in — they stay
 # `null`; add them at the call site with `.override` (see README.md →
 # "Advanced").
@@ -23,7 +23,7 @@ in
 
   inherit agentbox-neovim;
 
-  # The OCI image. Linux-only (docker images are Linux). codex + opencode are
+  # The OCI image. Linux-only (docker images are Linux). codex + opencode + pi are
   # auto-filled from nixpkgs by callPackage; any further agents stay null.
   agentboxImage =
     if isLinux then
@@ -48,6 +48,23 @@ in
       }
       ''
         bash ${./tests/agent-archive-request.sh} ${./scripts/agent-archive-request.sh}
+        touch $out
+      '';
+
+  pi-agentbox-extension-test =
+    let
+      testSource = pkgs.runCommand "pi-agentbox-extension-test-source" { } ''
+        mkdir -p $out/tests $out/extensions
+        cp ${./tests/pi-agentbox.ts} $out/tests/pi-agentbox.ts
+        cp ${./extensions/pi-agentbox.ts} $out/extensions/pi-agentbox.ts
+      '';
+    in
+    pkgs.runCommand "pi-agentbox-extension-test"
+      {
+        nativeBuildInputs = [ pkgs.nodejs_22 ];
+      }
+      ''
+        node --experimental-strip-types ${testSource}/tests/pi-agentbox.ts
         touch $out
       '';
 }

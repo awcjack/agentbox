@@ -202,6 +202,23 @@ in
         description = "Enable OpenCode service.";
       };
 
+      enablePi = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Enable the Pi CLI startup availability check. Pi and its immutable Agentbox extension remain bundled in the image.";
+      };
+
+      enablePiWeb = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Expose Pi's wrapped TUI in a browser on port 4097. The service uses a
+          persistent tmux session and the same ~/.pi state as the CLI. Set
+          PI_WEB_PASSWORD (or OPENCODE_PASSWORD as a fallback) in environmentFile
+          when the service is reachable beyond host loopback.
+        '';
+      };
+
       enableClaudeCode = lib.mkOption {
         type = lib.types.bool;
         default = false;
@@ -1063,6 +1080,39 @@ in
             };
           };
           description = "Provider configuration for OpenCode (for custom OpenAI-compatible LLM providers).";
+        };
+      };
+
+      # Pi configuration. Agentbox-owned behavior is force-loaded from an
+      # immutable Nix-store extension by the bundled Pi wrapper; these options
+      # cover user preferences and custom provider/model definitions without
+      # making user-editable configuration the policy boundary.
+      piConfig = {
+        settings = lib.mkOption {
+          type = (pkgs.formats.json { }).type;
+          default = {
+            enableInstallTelemetry = false;
+          };
+          example = {
+            defaultProvider = "anthropic";
+            defaultModel = "claude-sonnet-4-6";
+            defaultThinkingLevel = "high";
+          };
+          description = "Declarative Pi settings merged into ~/.pi/agent/settings.json.";
+        };
+
+        models = lib.mkOption {
+          type = (pkgs.formats.json { }).type;
+          default = { };
+          example = {
+            providers.local = {
+              baseUrl = "http://localhost:8000/v1";
+              api = "openai-completions";
+              apiKey = "local";
+              models = [ { id = "model-a"; } ];
+            };
+          };
+          description = "Declarative Pi custom provider/model configuration written to ~/.pi/agent/models.json.";
         };
       };
 

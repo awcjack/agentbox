@@ -19,8 +19,8 @@ check_size() {
 
 validate_agent() {
     case "$1" in
-        claude|opencode) ;;
-        *) die "agent must be claude or opencode" ;;
+        claude|opencode|pi) ;;
+        *) die "agent must be claude, opencode, or pi" ;;
     esac
 }
 
