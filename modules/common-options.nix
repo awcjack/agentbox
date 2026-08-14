@@ -1103,7 +1103,9 @@ in
 
         models = lib.mkOption {
           type = (pkgs.formats.json { }).type;
-          default = { };
+          default = {
+            providers = { };
+          };
           example = {
             providers.local = {
               baseUrl = "http://localhost:8000/v1";
