@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai/oauth"
 import { execFile } from "node:child_process"
 import { basename, isAbsolute, resolve } from "node:path"
 
@@ -6,6 +7,11 @@ const SIGNAL = "/home/agent/.local/bin/agent-signal.sh"
 const TEST_RUNNER = "/home/agent/.local/bin/shared-test-runner.ts"
 const GITLEAKS = "/home/agent/.local/bin/dd-gitleaks-precommit.sh"
 const ARCHIVE = "/home/agent/.local/bin/agent-archive-request.sh"
+
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+const CODEX_AUTH_URL = "https://auth.openai.com"
+const CODEX_ACCOUNT_CLAIM = "https://api.openai.com/auth"
+const DEVICE_AUTH_TIMEOUT_MS = 15 * 60 * 1000
 
 const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"])
 const EDIT_TOOLS = new Set(["write", "edit"])
@@ -19,6 +25,150 @@ function run(file: string, args: string[], env?: Record<string, string | undefin
       resolveRun({ code: typeof error?.code === "number" ? error.code : error ? 1 : 0, stdout: stdout ?? "", stderr: stderr ?? "" })
     })
   })
+}
+
+function responseError(prefix: string, response: Response, body: string) {
+  let detail = body
+  try {
+    const parsed = JSON.parse(body)
+    detail = parsed.error_description
+      ?? (typeof parsed.error === "string" ? parsed.error : parsed.error?.message ?? parsed.error?.code)
+      ?? body
+  } catch {
+    // Preserve non-JSON response bodies.
+  }
+  return new Error(`${prefix} (${response.status})${detail ? `: ${detail}` : ""}`)
+}
+
+async function jsonResponse(response: Response, prefix: string) {
+  const body = await response.text()
+  if (!response.ok) throw responseError(prefix, response, body)
+  try {
+    return JSON.parse(body) as Record<string, unknown>
+  } catch {
+    throw new Error(`${prefix}: invalid JSON response`)
+  }
+}
+
+function jwtPayload(token: string) {
+  const payload = token.split(".")[1]
+  if (!payload) return undefined
+  try {
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, any>
+  } catch {
+    return undefined
+  }
+}
+
+function codexCredentials(tokens: Record<string, unknown>): OAuthCredentials {
+  const access = tokens.access_token
+  const refresh = tokens.refresh_token
+  if (typeof access !== "string" || typeof refresh !== "string") {
+    throw new Error("OpenAI Codex token response is missing access_token or refresh_token")
+  }
+
+  const payload = jwtPayload(access)
+  const accountId = payload?.[CODEX_ACCOUNT_CLAIM]?.chatgpt_account_id
+  const expiresIn = tokens.expires_in
+  const expires = typeof expiresIn === "number" && Number.isFinite(expiresIn)
+    ? Date.now() + expiresIn * 1000
+    : typeof payload?.exp === "number"
+      ? payload.exp * 1000
+      : undefined
+  if (typeof accountId !== "string" || !accountId) throw new Error("Failed to extract accountId from OpenAI Codex token")
+  if (typeof expires !== "number" || !Number.isFinite(expires)) throw new Error("Failed to extract expiry from OpenAI Codex token")
+  return { access, refresh, expires, accountId }
+}
+
+function wait(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolveWait, reject) => {
+    if (signal?.aborted) return reject(new Error("OpenAI Codex device login cancelled"))
+    const timer = setTimeout(resolveWait, ms)
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer)
+      reject(new Error("OpenAI Codex device login cancelled"))
+    }, { once: true })
+  })
+}
+
+export async function loginOpenAICodexDevice(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
+  const device = await jsonResponse(await fetch(`${CODEX_AUTH_URL}/api/accounts/deviceauth/usercode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: CODEX_CLIENT_ID }),
+    signal: callbacks.signal,
+  }), "OpenAI Codex device code request failed")
+
+  const deviceAuthId = device.device_auth_id
+  const userCode = device.user_code ?? device.usercode
+  const intervalSeconds = Number(device.interval)
+  if (typeof deviceAuthId !== "string" || typeof userCode !== "string") {
+    throw new Error("OpenAI Codex device code response is missing device_auth_id or user_code")
+  }
+  if (!Number.isFinite(intervalSeconds) || intervalSeconds < 0) {
+    throw new Error("OpenAI Codex device code response has an invalid polling interval")
+  }
+
+  const verificationUrl = `${CODEX_AUTH_URL}/codex/device`
+  callbacks.onAuth({
+    url: verificationUrl,
+    instructions: `Enter code ${userCode}. Waiting up to 15 minutes for authorization.`,
+  })
+  callbacks.onProgress?.(`Waiting for OpenAI authorization with code ${userCode}...`)
+
+  const deadline = Date.now() + DEVICE_AUTH_TIMEOUT_MS
+  let authorization: Record<string, unknown> | undefined
+  while (Date.now() < deadline) {
+    const response = await fetch(`${CODEX_AUTH_URL}/api/accounts/deviceauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
+      signal: callbacks.signal,
+    })
+    if (response.ok) {
+      authorization = await jsonResponse(response, "OpenAI Codex device authorization failed")
+      break
+    }
+    if (response.status !== 403 && response.status !== 404) {
+      throw responseError("OpenAI Codex device authorization failed", response, await response.text())
+    }
+    await response.text()
+    await wait(Math.max(0, Math.min(Math.max(intervalSeconds, 1) * 1000, deadline - Date.now())), callbacks.signal)
+  }
+
+  const code = authorization?.authorization_code
+  const verifier = authorization?.code_verifier
+  if (typeof code !== "string" || typeof verifier !== "string") {
+    if (!authorization) throw new Error("OpenAI Codex device login timed out after 15 minutes")
+    throw new Error("OpenAI Codex device authorization response is missing authorization_code or code_verifier")
+  }
+
+  const tokens = await jsonResponse(await fetch(`${CODEX_AUTH_URL}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: `${CODEX_AUTH_URL}/deviceauth/callback`,
+      client_id: CODEX_CLIENT_ID,
+      code_verifier: verifier,
+    }),
+    signal: callbacks.signal,
+  }), "OpenAI Codex device code exchange failed")
+  return codexCredentials(tokens)
+}
+
+export async function refreshOpenAICodexDevice(credentials: OAuthCredentials): Promise<OAuthCredentials> {
+  const tokens = await jsonResponse(await fetch(`${CODEX_AUTH_URL}/oauth/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: credentials.refresh,
+      client_id: CODEX_CLIENT_ID,
+    }),
+  }), "OpenAI Codex token refresh failed")
+  return codexCredentials(tokens)
 }
 
 function normalizePath(path: string, cwd: string) {
@@ -109,6 +259,15 @@ export default function (pi: ExtensionAPI) {
   let sessionID = ""
   let sessionFile = ""
   let sessionTitle = ""
+
+  pi.registerProvider("openai-codex", {
+    oauth: {
+      name: "ChatGPT Plus/Pro (Codex Device Code)",
+      login: loginOpenAICodexDevice,
+      refreshToken: refreshOpenAICodexDevice,
+      getApiKey: (credentials) => credentials.access,
+    },
+  })
 
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd
