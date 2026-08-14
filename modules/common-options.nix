@@ -1146,6 +1146,7 @@ in
           # "✅ done" / "🔔 needs you" bypass this format (automatic-rename off).
           setw -g automatic-rename-format "#{=/15/…:pane_title}"
           set -s extended-keys on
+          set -g extended-keys-format csi-u
           set -as terminal-features 'xterm*:extkeys'
           # Pin a stable window title (useful on macOS native terminals; harmless
           # elsewhere). Hook-set names still override via automatic-rename off.
