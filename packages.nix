@@ -5,11 +5,13 @@
 #                                 NixOS / nix-darwin config, which is what the
 #                                 modules default to.
 #
-# The bundled agents (Codex + OpenCode + Pi) come straight from nixpkgs via
-# callPackage. Any further agents are intentionally NOT wired in — they stay
-# `null`; add them at the call site with `.override` (see README.md →
-# "Advanced").
-{ pkgs }:
+# The bundled agents come from the package arguments via callPackage. Any
+# further agents are intentionally NOT wired in — they stay `null`; add them at
+# the call site with `.override` (see README.md → "Advanced").
+{
+  pkgs,
+  pi-coding-agent ? pkgs.pi-coding-agent,
+}:
 
 let
   isLinux = pkgs.stdenv.hostPlatform.isLinux;
@@ -23,12 +25,13 @@ in
 
   inherit agentbox-neovim;
 
-  # The OCI image. Linux-only (docker images are Linux). codex + opencode + pi are
-  # auto-filled from nixpkgs by callPackage; any further agents stay null.
+  # The OCI image. Linux-only (docker images are Linux). Codex and OpenCode are
+  # auto-filled from nixpkgs; Pi is supplied above so it can track current
+  # nixpkgs independently. Any further agents stay null.
   agentboxImage =
     if isLinux then
       pkgs.callPackage ./image.nix {
-        inherit agentbox-neovim;
+        inherit agentbox-neovim pi-coding-agent;
         # The extra-agent args default to null inside image.nix; override here
         # to bake one in.
       }
