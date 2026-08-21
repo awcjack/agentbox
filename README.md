@@ -46,13 +46,13 @@ Auth directly.
 Pi force-loads an immutable Agentbox extension that mirrors the Agentbox-owned
 OpenCode integrations: secret-path and dangerous-command guards, post-edit
 tests, gitleaks before commits, tmux/desktop notifications, shared skills, and
-selective archive requests. The extension also replaces Pi's localhost-based
-ChatGPT/Codex OAuth login with Codex's device-code flow: run `/login`, select
-`ChatGPT Plus/Pro (Codex Device Code)`, open the displayed URL, and enter the
-code. Pi stores and refreshes the resulting credentials normally in
-`~/.pi/agent/auth.json`. Pi has no native managed-policy layer equivalent to
-OpenCode's `/etc/opencode` config, so the container remains the hard boundary;
-the extension supplies the strongest harness-level enforcement Pi exposes.
+selective archive requests. For headless ChatGPT/Codex login, run `/login`,
+select `ChatGPT Plus/Pro (Codex)`, then choose `Device code login (headless)`.
+Open the displayed URL and enter the code. Pi stores and refreshes the resulting
+credentials normally in `~/.pi/agent/auth.json`. Pi has no native managed-policy
+layer equivalent to OpenCode's `/etc/opencode` config, so the container remains
+the hard boundary; the extension supplies the strongest harness-level
+enforcement Pi exposes.
 
 ```nix
 services.agentbox = {
