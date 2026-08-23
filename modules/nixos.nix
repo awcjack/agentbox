@@ -508,7 +508,7 @@ in
         description = "Load the agentbox image into ${cfg.backend}";
         after = daemonUnit;
         requires = daemonUnit;
-        wantedBy = [ "multi-user.target" ];
+        wantedBy = lib.optional cfg.autoStart "multi-user.target";
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
