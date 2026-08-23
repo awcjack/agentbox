@@ -35,6 +35,9 @@ let
       restart     Restart the container service
       stop        Stop the container service
       start       Start the container service
+      pause       Freeze container processes without losing tmux sessions
+      resume      Resume a paused container
+      service     Manage an on-demand service (list/start/stop/restart/status)
 
     Examples:
       agentbox shell                    # Interactive tmux shell as agent
@@ -44,17 +47,39 @@ let
       agentbox pi                       # Start Pi in tmux
       agentbox pi-web                   # Show Pi browser URL
       agentbox claude                   # Attach to Claude Code in tmux
+      agentbox service start my-service # Start a configured on-demand service
+      agentbox pause                    # Freeze Agentbox during a short break
+      agentbox resume                   # Continue a paused Agentbox
 
     The container is managed by systemd (docker-$CONTAINER_NAME.service).
     EOF
         }
 
         ensure_running() {
-          if ! docker ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
-            echo "Error: Container '$CONTAINER_NAME' is not running."
-            echo "Start it with: agentbox start"
-            exit 1
-          fi
+          local state
+          state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+          case "$state" in
+            running) ;;
+            paused)
+              echo "Error: Container '$CONTAINER_NAME' is paused."
+              echo "Resume it with: agentbox resume"
+              exit 1
+              ;;
+            *)
+              echo "Error: Container '$CONTAINER_NAME' is not running."
+              echo "Start it with: agentbox start"
+              exit 1
+              ;;
+          esac
+        }
+
+        validate_service_name() {
+          case "''${1:-}" in
+            ""|*[!A-Za-z0-9._-]*)
+              echo "Error: Service names may contain only letters, digits, '.', '_' and '-'." >&2
+              exit 2
+              ;;
+          esac
         }
 
         cmd_status() {
@@ -138,11 +163,35 @@ let
           echo "Service restarted."
         }
 
+        stop_docker_if_unused() {
+          if ! systemctl is-active --quiet docker.service; then
+            return
+          fi
+
+          local running
+          running=$(docker ps --format '{{.Names}}')
+          if [ -n "$running" ]; then
+            echo "Docker remains active because other containers are running:"
+            while IFS= read -r container; do
+              printf '  %s\n' "$container"
+            done <<< "$running"
+            return
+          fi
+
+          echo "No Docker containers remain; stopping docker.service and docker.socket..."
+          sudo systemctl stop docker.service docker.socket
+        }
+
         cmd_stop() {
           echo "Stopping agentbox service..."
-          sudo systemctl stop "docker-$CONTAINER_NAME.service" 2>/dev/null || \
-            sudo systemctl stop "podman-$CONTAINER_NAME.service" 2>/dev/null || \
-            { echo "Error: Could not stop service"; exit 1; }
+          if sudo systemctl stop "docker-$CONTAINER_NAME.service" 2>/dev/null; then
+            stop_docker_if_unused
+          elif sudo systemctl stop "podman-$CONTAINER_NAME.service" 2>/dev/null; then
+            : # Podman is daemonless; there is no backend service to stop.
+          else
+            echo "Error: Could not stop service"
+            exit 1
+          fi
           echo "Service stopped."
         }
 
@@ -152,6 +201,112 @@ let
             sudo systemctl start "podman-$CONTAINER_NAME.service" 2>/dev/null || \
             { echo "Error: Could not start service"; exit 1; }
           echo "Service started."
+        }
+
+        cmd_pause() {
+          local state
+          state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+          case "$state" in
+            running) ;;
+            paused)
+              echo "Agentbox is already paused."
+              return
+              ;;
+            *)
+              echo "Error: Container '$CONTAINER_NAME' is not running."
+              echo "Start it with: agentbox start"
+              exit 1
+              ;;
+          esac
+          echo "Pausing Agentbox..."
+          docker pause "$CONTAINER_NAME" >/dev/null
+          if docker inspect agentbox-docker-proxy >/dev/null 2>&1; then
+            docker pause agentbox-docker-proxy >/dev/null 2>&1 || true
+          fi
+          echo "Agentbox paused. Resume it with: agentbox resume"
+        }
+
+        cmd_resume() {
+          local state
+          state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+          case "$state" in
+            paused)
+              if [ "$(docker inspect --format '{{.State.Status}}' agentbox-docker-proxy 2>/dev/null || true)" = "paused" ]; then
+                docker unpause agentbox-docker-proxy >/dev/null
+              fi
+              docker unpause "$CONTAINER_NAME" >/dev/null
+              echo "Agentbox resumed."
+              ;;
+            running)
+              echo "Agentbox is already running."
+              ;;
+            *)
+              echo "Error: Container '$CONTAINER_NAME' is not paused or running."
+              echo "Start it with: agentbox start"
+              exit 1
+              ;;
+          esac
+        }
+
+        cmd_service() {
+          local action="''${1:-list}"
+          local name="''${2:-}"
+          local service_dir="/home/agent/.agentbox/on-demand.d"
+
+          ensure_running
+          if [ "$action" = "list" ]; then
+            docker exec -u agent "$CONTAINER_NAME" bash -lc \
+              "for script in $service_dir/*.sh; do [ -f \"\$script\" ] || continue; basename \"\$script\" .sh; done"
+            return
+          fi
+
+          validate_service_name "$name"
+          local script="$service_dir/$name.sh"
+          local session="service-$name"
+          if ! docker exec -u agent "$CONTAINER_NAME" test -x "$script"; then
+            echo "Error: Unknown on-demand service '$name'." >&2
+            echo "Available services:" >&2
+            cmd_service list >&2
+            exit 1
+          fi
+
+          case "$action" in
+            start)
+              if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t "$session" 2>/dev/null; then
+                echo "Service '$name' is already running."
+              else
+                docker exec -u agent -w /workspace "$CONTAINER_NAME" \
+                  tmux new-session -d -s "$session" "exec bash -l $script"
+                echo "Service '$name' started."
+              fi
+              ;;
+            stop)
+              if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t "$session" 2>/dev/null; then
+                docker exec -u agent "$CONTAINER_NAME" tmux kill-session -t "$session"
+                echo "Service '$name' stopped."
+              else
+                echo "Service '$name' is not running."
+              fi
+              ;;
+            restart)
+              docker exec -u agent "$CONTAINER_NAME" tmux kill-session -t "$session" 2>/dev/null || true
+              docker exec -u agent -w /workspace "$CONTAINER_NAME" \
+                tmux new-session -d -s "$session" "exec bash -l $script"
+              echo "Service '$name' restarted."
+              ;;
+            status)
+              if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t "$session" 2>/dev/null; then
+                echo "Service '$name' is running."
+              else
+                echo "Service '$name' is stopped."
+                return 3
+              fi
+              ;;
+            *)
+              echo "Usage: agentbox service {list|start|stop|restart|status} [name]" >&2
+              exit 2
+              ;;
+          esac
         }
 
         case "''${1:-help}" in
@@ -167,6 +322,9 @@ let
           restart)  cmd_restart ;;
           stop)     cmd_stop ;;
           start)    cmd_start ;;
+          pause)    cmd_pause ;;
+          resume)   cmd_resume ;;
+          service)  shift; cmd_service "$@" ;;
           help|--help|-h) usage ;;
           *) echo "Unknown command: $1"; usage; exit 1 ;;
         esac

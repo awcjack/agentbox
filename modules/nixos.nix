@@ -510,10 +510,21 @@ in
           RemainAfterExit = true;
         };
         script = ''
-          # Load the Nix-built agentbox image into Docker/Podman
+          # Docker/Podman keeps its image store across reboots. Avoid importing
+          # the same large Nix image again when both the tag and the source
+          # store path still match; reload after a rebuild or image prune.
           if [ -f "${imagePath}" ]; then
-            echo "Loading agentbox image from ${imagePath}..."
-            ${dockerBin} load < "${imagePath}"
+            marker="${cfg.dataDir}/.loaded-image-path"
+            if ${dockerBin} image inspect agentbox:latest >/dev/null 2>&1 \
+              && [ -f "$marker" ] \
+              && [ "$(cat "$marker")" = "${imagePath}" ]; then
+              echo "Agentbox image is already loaded from ${imagePath}; skipping import."
+            else
+              echo "Loading agentbox image from ${imagePath}..."
+              ${dockerBin} load < "${imagePath}"
+              printf '%s\n' "${imagePath}" > "$marker.tmp"
+              mv -f "$marker.tmp" "$marker"
+            fi
           else
             echo "Warning: Agentbox image not found at ${imagePath}"
             echo "Build it with: nix build .#agentboxImage"

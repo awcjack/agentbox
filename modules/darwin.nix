@@ -539,11 +539,29 @@ let
     }
 
     ensure_container_running() {
-      if ! docker ps --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
-        echo "Agentbox is not running. Starting it first..."
-        cmd_start
-        sleep 2
-      fi
+      local state
+      state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+      case "$state" in
+        running) ;;
+        paused)
+          echo "Agentbox is paused. Resume it with: agentbox resume" >&2
+          exit 1
+          ;;
+        *)
+          echo "Agentbox is not running. Starting it first..."
+          cmd_start
+          sleep 2
+          ;;
+      esac
+    }
+
+    validate_service_name() {
+      case "''${1:-}" in
+        ""|*[!A-Za-z0-9._-]*)
+          echo "Error: Service names may contain only letters, digits, '.', '_' and '-'." >&2
+          exit 2
+          ;;
+      esac
     }
 
     cmd_opencode() {
@@ -572,12 +590,129 @@ let
         'tmux new-session -A -s claude "claude --dangerously-skip-permissions"'
     }
 
+    cmd_pause() {
+      check_docker
+      local state
+      state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+      case "$state" in
+        running) ;;
+        paused)
+          echo "Agentbox is already paused."
+          return
+          ;;
+        *)
+          echo "Agentbox is not running. Start it with: agentbox start" >&2
+          exit 1
+          ;;
+      esac
+      docker pause "$CONTAINER_NAME" >/dev/null
+      if [ "$PROXY_ENABLED" = "true" ] && docker inspect "$PROXY_NAME" >/dev/null 2>&1; then
+        docker pause "$PROXY_NAME" >/dev/null 2>&1 || true
+      fi
+      echo "Agentbox paused. Resume it with: agentbox resume"
+    }
+
+    cmd_resume() {
+      check_docker
+      local state
+      state=$(docker inspect --format '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null || true)
+      case "$state" in
+        paused)
+          if [ "$PROXY_ENABLED" = "true" ] \
+            && [ "$(docker inspect --format '{{.State.Status}}' "$PROXY_NAME" 2>/dev/null || true)" = "paused" ]; then
+            docker unpause "$PROXY_NAME" >/dev/null
+          fi
+          docker unpause "$CONTAINER_NAME" >/dev/null
+          echo "Agentbox resumed."
+          ;;
+        running)
+          echo "Agentbox is already running."
+          ;;
+        *)
+          echo "Agentbox is not paused or running. Start it with: agentbox start" >&2
+          exit 1
+          ;;
+      esac
+    }
+
+    cmd_service() {
+      check_docker
+      ensure_container_running
+      local action="''${1:-list}"
+      local name="''${2:-}"
+      local service_dir="/home/agent/.agentbox/on-demand.d"
+
+      if [ "$action" = "list" ]; then
+        docker exec -u agent "$CONTAINER_NAME" bash -lc \
+          "for script in $service_dir/*.sh; do [ -f \"\$script\" ] || continue; basename \"\$script\" .sh; done"
+        return
+      fi
+
+      validate_service_name "$name"
+      local script="$service_dir/$name.sh"
+      local session="service-$name"
+      if ! docker exec -u agent "$CONTAINER_NAME" test -x "$script"; then
+        echo "Error: Unknown on-demand service '$name'." >&2
+        echo "Available services:" >&2
+        cmd_service list >&2
+        exit 1
+      fi
+
+      case "$action" in
+        start)
+          if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t "$session" 2>/dev/null; then
+            echo "Service '$name' is already running."
+          else
+            docker exec -u agent -w /workspace "$CONTAINER_NAME" \
+              tmux new-session -d -s "$session" "exec bash -l $script"
+            echo "Service '$name' started."
+          fi
+          ;;
+        stop)
+          if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t "$session" 2>/dev/null; then
+            docker exec -u agent "$CONTAINER_NAME" tmux kill-session -t "$session"
+            echo "Service '$name' stopped."
+          else
+            echo "Service '$name' is not running."
+          fi
+          ;;
+        restart)
+          docker exec -u agent "$CONTAINER_NAME" tmux kill-session -t "$session" 2>/dev/null || true
+          docker exec -u agent -w /workspace "$CONTAINER_NAME" \
+            tmux new-session -d -s "$session" "exec bash -l $script"
+          echo "Service '$name' restarted."
+          ;;
+        status)
+          if docker exec -u agent "$CONTAINER_NAME" tmux has-session -t "$session" 2>/dev/null; then
+            echo "Service '$name' is running."
+          else
+            echo "Service '$name' is stopped."
+            return 3
+          fi
+          ;;
+        *)
+          echo "Usage: agentbox service {list|start|stop|restart|status} [name]" >&2
+          exit 2
+          ;;
+      esac
+    }
+
     cmd_load_image() {
       check_docker
-      echo "Loading agentbox image from Nix store..."
       if [ -f "${cfg.image}" ]; then
-        docker load < "${cfg.image}"
-        echo "Image loaded successfully"
+        mkdir -p "$DATA_DIR"
+        marker="$DATA_DIR/.loaded-image-path"
+        if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1 \
+          && [ -f "$marker" ] \
+          && [ "$(cat "$marker")" = "${cfg.image}" ]; then
+          echo "Agentbox image is already loaded from ${cfg.image}; skipping import."
+        else
+          echo "Loading agentbox image from Nix store..."
+          docker load < "${cfg.image}"
+          printf '%s\n' "${cfg.image}" > "$marker.tmp"
+          mv -f "$marker.tmp" "$marker"
+          echo "Image loaded successfully"
+        fi
       else
         echo "Error: Image not found at ${cfg.image}"
         exit 1
@@ -631,6 +766,9 @@ let
       pi          Start Pi in a tmux session
       pi-web      Show the Pi browser interface URL
       claude      Attach to the Claude Code tmux session
+      pause       Freeze container processes without losing tmux sessions
+      resume      Resume a paused container
+      service     Manage an on-demand service (list/start/stop/restart/status)
       load-image  Load the Nix-built Docker image
       setup       Initialize directories and configuration
 
@@ -653,6 +791,9 @@ let
       pi)         cmd_pi ;;
       pi-web)     cmd_pi_web ;;
       claude)     cmd_claude ;;
+      pause)      cmd_pause ;;
+      resume)     cmd_resume ;;
+      service)    shift; cmd_service "$@" ;;
       load-image) cmd_load_image ;;
       setup)      cmd_setup ;;
       help|--help|-h) usage ;;

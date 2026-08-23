@@ -6,7 +6,8 @@ It ships a full dev toolchain in an OCI container and runs **Claude Code**,
 
 - **`agentboxImage`** — a Nix-built OCI image (no Dockerfile, no Homebrew).
 - **`agentbox`** — a host-side CLI to drive the container (`status`, `shell`,
-  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `claude`, `start`/`stop`/`restart`).
+  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `claude`, on-demand services,
+  `pause`/`resume`, and `start`/`stop`/`restart`).
 - **`nixosModules.agentbox`** / **`darwinModules.agentbox`** — run it as a
   systemd `oci-containers` service (NixOS) or via manual management (macOS).
 
@@ -203,6 +204,7 @@ you have four generic hooks, none of which require forking:
 | `services.agentbox.extraVolumes` | mount its data |
 | `services.agentbox.extraActivation` | stage files on the host at activation |
 | `services.agentbox.bootScripts` | **run it at container boot** (as the agent, backgrounded) |
+| `services.agentbox.onDemandScripts` | install a service that starts only through the Agentbox CLI |
 
 `bootScripts` is what lets a daemon-style agent actually start — the entrypoint
 launches each snippet in the background and keeps the container alive while it
@@ -219,11 +221,27 @@ nixpkgs.overlays = [
 
 services.agentbox = {
   extraEnvironment.MY_AGENT_PORT = "1234";
-  bootScripts.my-agent = ''
+  onDemandScripts.my-agent = ''
     exec my-agent serve --port "$MY_AGENT_PORT"
   '';
 };
 ```
+
+Manage the service without restarting the container:
+
+```bash
+agentbox service list
+agentbox service start my-agent
+agentbox service status my-agent
+agentbox service restart my-agent
+agentbox service stop my-agent
+```
+
+For a short break, `agentbox pause` freezes every process while preserving tmux
+sessions; `agentbox resume` continues them. `agentbox stop` tears the container
+down and, on NixOS, also stops Docker when no other containers are running.
+The NixOS image-load unit records the source store path and skips importing an
+unchanged `agentbox:latest` image after reboot.
 
 The generic hooks keep additional agents out of this repository; everything
 specific to an added agent lives in your own config.

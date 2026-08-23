@@ -166,6 +166,19 @@ in
       '';
     };
 
+    onDemandScripts = lib.mkOption {
+      type = lib.types.attrsOf lib.types.lines;
+      default = { };
+      example = {
+        my-service = "exec my-daemon --port 1234";
+      };
+      description = ''
+        Shell snippets installed in the container but not started at boot.
+        Manage them as persistent tmux sessions with
+        `agentbox service start|stop|restart|status <name>`.
+      '';
+    };
+
     settings = {
       timezone = lib.mkOption {
         type = lib.types.str;
@@ -1415,20 +1428,38 @@ in
   # the entrypoint launches it as the agent user at boot. Works on both
   # platforms because the platform config bodies already fold extraVolumes /
   # extraActivation into the container.
-  config = lib.mkIf (cfg.bootScripts != { }) {
-    services.agentbox.extraVolumes = [
-      "${cfg.dataDir}/boot.d:/home/agent/.agentbox/boot.d:ro"
-    ];
-    services.agentbox.extraActivation = ''
-      mkdir -p "${cfg.dataDir}/boot.d"
-      rm -f "${cfg.dataDir}/boot.d"/*.sh
-      ${lib.concatStringsSep "\n" (
-        lib.mapAttrsToList (
-          name: text:
-          ''cp -f ${pkgs.writeShellScript "agentbox-boot-${name}" text} "${cfg.dataDir}/boot.d/${name}.sh"''
-        ) cfg.bootScripts
-      )}
-      chmod 755 "${cfg.dataDir}/boot.d"/*.sh 2>/dev/null || true
-    '';
-  };
+  config = lib.mkMerge [
+    (lib.mkIf (cfg.bootScripts != { }) {
+      services.agentbox.extraVolumes = [
+        "${cfg.dataDir}/boot.d:/home/agent/.agentbox/boot.d:ro"
+      ];
+      services.agentbox.extraActivation = ''
+        mkdir -p "${cfg.dataDir}/boot.d"
+        rm -f "${cfg.dataDir}/boot.d"/*.sh
+        ${lib.concatStringsSep "\n" (
+          lib.mapAttrsToList (
+            name: text:
+            ''cp -f ${pkgs.writeShellScript "agentbox-boot-${name}" text} "${cfg.dataDir}/boot.d/${name}.sh"''
+          ) cfg.bootScripts
+        )}
+        chmod 755 "${cfg.dataDir}/boot.d"/*.sh 2>/dev/null || true
+      '';
+    })
+    (lib.mkIf (cfg.onDemandScripts != { }) {
+      services.agentbox.extraVolumes = [
+        "${cfg.dataDir}/on-demand.d:/home/agent/.agentbox/on-demand.d:ro"
+      ];
+      services.agentbox.extraActivation = ''
+        mkdir -p "${cfg.dataDir}/on-demand.d"
+        rm -f "${cfg.dataDir}/on-demand.d"/*.sh
+        ${lib.concatStringsSep "\n" (
+          lib.mapAttrsToList (
+            name: text:
+            ''cp -f ${pkgs.writeShellScript "agentbox-on-demand-${name}" text} "${cfg.dataDir}/on-demand.d/${name}.sh"''
+          ) cfg.onDemandScripts
+        )}
+        chmod 755 "${cfg.dataDir}/on-demand.d"/*.sh 2>/dev/null || true
+      '';
+    })
+  ];
 }
