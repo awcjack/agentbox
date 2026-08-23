@@ -305,10 +305,6 @@ in
     # Enable container backend
     virtualisation.docker = lib.mkIf (cfg.backend == "docker") {
       enable = lib.mkDefault true;
-      rootless = {
-        enable = lib.mkDefault true;
-        setSocketVariable = lib.mkDefault true;
-      };
       autoPrune.enable = lib.mkDefault true;
     };
 

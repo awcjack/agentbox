@@ -1311,9 +1311,9 @@ in
           example = "/run/user/1000/docker.sock";
           description = ''
             Host path of the real Docker socket, mounted read-only into the
-            proxy at /var/run/docker.sock. NOTE: this module enables rootless
-            Docker, whose socket is usually at /run/user/<uid>/docker.sock — set
-            this accordingly on rootless hosts.
+            proxy at /var/run/docker.sock. When the host is configured to use
+            rootless Docker, whose socket is usually at
+            /run/user/<uid>/docker.sock, set this accordingly.
           '';
         };
 
