@@ -643,8 +643,21 @@ let
       local service_dir="/home/agent/.agentbox/on-demand.d"
 
       if [ "$action" = "list" ]; then
-        docker exec -u agent "$CONTAINER_NAME" bash -lc \
-          "for script in $service_dir/*.sh; do [ -f \"\$script\" ] || continue; basename \"\$script\" .sh; done"
+        local service_name status
+        printf '%-32s %s\n' "SERVICE" "STATUS"
+        while IFS= read -r service_name; do
+          [ -n "$service_name" ] || continue
+          if docker exec -u agent "$CONTAINER_NAME" \
+            tmux has-session -t "service-$service_name" 2>/dev/null; then
+            status="active"
+          else
+            status="inactive"
+          fi
+          printf '%-32s %s\n' "$service_name" "$status"
+        done < <(
+          docker exec -u agent "$CONTAINER_NAME" bash -lc \
+            "for script in $service_dir/*.sh; do [ -f \"\$script\" ] || continue; basename \"\$script\" .sh; done"
+        )
         return
       fi
 
