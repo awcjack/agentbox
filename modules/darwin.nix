@@ -640,23 +640,38 @@ let
       ensure_container_running
       local action="''${1:-list}"
       local name="''${2:-}"
+      local boot_dir="/home/agent/.agentbox/boot.d"
       local service_dir="/home/agent/.agentbox/on-demand.d"
 
       if [ "$action" = "list" ]; then
-        local service_name status
-        printf '%-32s %s\n' "SERVICE" "STATUS"
-        while IFS= read -r service_name; do
+        local service_name startup status script
+        printf '%-32s %-12s %s\n' "SERVICE" "STARTUP" "STATUS"
+        while IFS=$'\t' read -r startup service_name; do
           [ -n "$service_name" ] || continue
-          if docker exec -u agent "$CONTAINER_NAME" \
-            tmux has-session -t "service-$service_name" 2>/dev/null; then
-            status="active"
-          else
-            status="inactive"
-          fi
-          printf '%-32s %s\n' "$service_name" "$status"
+          case "$startup" in
+            boot)
+              script="$boot_dir/$service_name.sh"
+              if docker exec -u agent "$CONTAINER_NAME" bash -lc \
+                'target="$1"; while IFS= read -r command; do [ "$command" = "bash -l $target" ] && exit 0; done < <(ps -C bash -o args=); exit 1' \
+                bash "$script"; then
+                status="active"
+              else
+                status="inactive"
+              fi
+              ;;
+            on-demand)
+              if docker exec -u agent "$CONTAINER_NAME" \
+                tmux has-session -t "service-$service_name" 2>/dev/null; then
+                status="active"
+              else
+                status="inactive"
+              fi
+              ;;
+          esac
+          printf '%-32s %-12s %s\n' "$service_name" "$startup" "$status"
         done < <(
           docker exec -u agent "$CONTAINER_NAME" bash -lc \
-            "for script in $service_dir/*.sh; do [ -f \"\$script\" ] || continue; basename \"\$script\" .sh; done"
+            "for script in $boot_dir/*.sh; do [ -f \"\$script\" ] || continue; printf 'boot\\t%s\\n' \"\$(basename \"\$script\" .sh)\"; done; for script in $service_dir/*.sh; do [ -f \"\$script\" ] || continue; printf 'on-demand\\t%s\\n' \"\$(basename \"\$script\" .sh)\"; done"
         )
         return
       fi
@@ -781,7 +796,7 @@ let
       claude      Attach to the Claude Code tmux session
       pause       Freeze container processes without losing tmux sessions
       resume      Resume a paused container
-      service     Manage an on-demand service (list/start/stop/restart/status)
+      service     List all services or manage an on-demand service
       load-image  Load the Nix-built Docker image
       setup       Initialize directories and configuration
 

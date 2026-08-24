@@ -237,6 +237,10 @@ agentbox service restart my-agent
 agentbox service stop my-agent
 ```
 
+`agentbox service list` includes both boot-time and on-demand services, showing
+each service's startup mode and current active or inactive status. The other
+service actions manage on-demand services only.
+
 For a short break, `agentbox pause` freezes every process while preserving tmux
 sessions; `agentbox resume` continues them. `agentbox stop` tears the container
 down and, on NixOS, also stops Docker when no other containers are running.
