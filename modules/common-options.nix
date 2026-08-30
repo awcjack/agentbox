@@ -396,7 +396,7 @@ in
           description = ''
             Enable explicit, user-requested conversation archive intents. This
             only exposes a host-visible request inbox; it does not give the
-            container object-storage credentials or upload transcripts.
+            container workflow webhook credentials or send transcripts.
           '';
         };
 

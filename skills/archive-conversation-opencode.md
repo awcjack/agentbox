@@ -8,5 +8,5 @@ Run exactly this command once:
 bash /home/agent/.local/bin/agent-archive-request.sh request opencode
 ```
 
-Report the request ID. Do not claim the conversation was uploaded: the host
-collector will validate and process the request asynchronously.
+Report the request ID. Do not claim the webhook accepted the conversation: the
+host delivery service will validate and process the request asynchronously.

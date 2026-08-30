@@ -1076,8 +1076,10 @@ OS-specific top-level options and config body (systemd vs launchd/manual).
 
 ## Selective conversation archive requests
 
-Agentbox can expose an opt-in request inbox for a separate host collector. It
-does not upload transcripts and never receives object-storage credentials.
+Agentbox can expose an opt-in request inbox for a separate host delivery
+service. Agentbox only writes the request: it does not send transcripts and
+never receives the workflow webhook URL, signing secret, or optional edge
+access credentials.
 
 ```nix
 services.agentbox.settings.historyArchive = {
@@ -1087,7 +1089,7 @@ services.agentbox.settings.historyArchive = {
 ```
 
 This creates only `<dataDir>/history-sync/requests` and mounts that directory at
-`/home/agent/.agent-history/requests`. The rest of a collector's spool should be
+`/home/agent/.agent-history/requests`. Delivery state and credentials remain
 host-only and must not be mounted into Agentbox.
 
 Explicitly invoke `/archive-conversation` in Claude Code or OpenCode, or
@@ -1108,12 +1110,12 @@ Pi's extension resolves its intent on the next `agent_end` event using Pi's
 native session ID and JSONL session path.
 
 Resolved files contain identifiers, timestamps, event type, and local source
-context, but no message content. They are untrusted input: a host collector must
-still validate repository remotes and allowlists before reading or uploading a
-transcript. The request is an opt-in user interface, not an authentication
-boundary: code running inside Agentbox can forge or delete inbox files, just as
-it can alter its local transcript. A collector must derive host and trust-domain
-identity from host configuration rather than trusting request fields.
+context, but no message content. They are untrusted input: the host service must
+validate them before reading the selected local conversation. The request is an
+opt-in user interface, not an authentication boundary: code running inside
+Agentbox can forge or delete inbox files, just as it can alter its local
+transcript. The host service must derive host identity from host configuration
+rather than trusting request fields.
 
 ## On-demand desktop
 

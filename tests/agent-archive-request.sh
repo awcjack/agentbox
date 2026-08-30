@@ -67,7 +67,7 @@ test "$(find "$AGENT_HISTORY_PENDING_DIR" -type f -name 'opencode-*.json' | wc -
 bash "$script" cancel opencode opencode-scope
 test "$(find "$AGENT_HISTORY_PENDING_DIR" -type f -name 'opencode-*.json' | wc -l)" -eq 0
 
-# Pi requests carry the native session file as collector source context.
+# Pi requests carry the native session file as host delivery source context.
 pi_request="$(bash "$script" request pi pi-session /workspace/repo pi-session)"
 pi_destination="$(bash "$script" resolve pi pi-session archive-conversation /workspace/repo /tmp/pi-session.jsonl pi-session)"
 jq -e --arg request_id "$pi_request" '
