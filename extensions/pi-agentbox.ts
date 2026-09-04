@@ -1,24 +1,190 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { execFile } from "node:child_process"
-import { basename, isAbsolute, resolve } from "node:path"
+import { existsSync } from "node:fs"
+import { isIP } from "node:net"
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path"
 
 const SIGNAL = "/home/agent/.local/bin/agent-signal.sh"
 const TEST_RUNNER = "/home/agent/.local/bin/shared-test-runner.ts"
 const GITLEAKS = "/home/agent/.local/bin/dd-gitleaks-precommit.sh"
 const ARCHIVE = "/home/agent/.local/bin/agent-archive-request.sh"
 
-const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls"])
+const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics"])
 const EDIT_TOOLS = new Set(["write", "edit"])
 const SECRET_READER_RE = /(?:^|[;&|\s])(cat|head|tail|base64|sed|awk|grep|egrep|fgrep|rg|ag|nl|tac|rev|cut|tr|fold|expand|paste|column|col|less|more|most|pg|xxd|od|hexdump|strings|base32|uuencode|vi|vim|nvim|nano|ex|view|emacs|dd|cp|mv|install|rsync|ln)(?:\s|$)/
 const GIT_COMMIT_RE = /(?:^|[;&|\s])git\s+commit(?:\s|$)/
 const WRITE_COMMAND_RE = /(?:^|[;&|\s])(rm|rmdir|truncate|tee|touch|chmod|chown|dd|cp|mv|install|rsync|ln|sed\s+-i|perl\s+-i)(?:\s|$)|(?:^|[^<])>{1,2}\s*/
+const MAX_TOOL_OUTPUT = 30_000
 
-function run(file: string, args: string[], env?: Record<string, string | undefined>) {
+function run(file: string, args: string[], env?: Record<string, string | undefined>, timeout = 90_000) {
   return new Promise<{ code: number; stdout: string; stderr: string }>((resolveRun) => {
-    execFile(file, args, { env: { ...process.env, ...env }, encoding: "utf8" }, (error: any, stdout, stderr) => {
+    execFile(file, args, {
+      env: { ...process.env, ...env },
+      encoding: "utf8",
+      maxBuffer: 2 * 1024 * 1024,
+      timeout,
+    }, (error: any, stdout, stderr) => {
       resolveRun({ code: typeof error?.code === "number" ? error.code : error ? 1 : 0, stdout: stdout ?? "", stderr: stderr ?? "" })
     })
   })
+}
+
+function findUp(start: string, marker: string) {
+  let directory = start
+  while (true) {
+    if (existsSync(join(directory, marker))) return directory
+    const parent = dirname(directory)
+    if (parent === directory) return undefined
+    directory = parent
+  }
+}
+
+function trimOutput(output: string) {
+  const text = output.trim()
+  if (text.length <= MAX_TOOL_OUTPUT) return text
+  return `${text.slice(0, MAX_TOOL_OUTPUT)}\n\n[output truncated]`
+}
+
+type DiagnosticResult = {
+  status: "passed" | "failed" | "unsupported"
+  checker?: string
+  output: string
+}
+
+async function codeDiagnostics(rawPath: string, cwd: string): Promise<DiagnosticResult> {
+  const path = normalizePath(rawPath, cwd)
+  const extension = extname(path).toLowerCase()
+  let checker: string | undefined
+  let command: string | undefined
+  let args: string[] = []
+
+  if (extension === ".go") {
+    checker = "gopls check"
+    command = "gopls"
+    args = ["check", path]
+  } else if ([".ts", ".tsx"].includes(extension)) {
+    const project = findUp(dirname(path), "tsconfig.json")
+    if (!project) return { status: "unsupported", output: "No tsconfig.json found for this TypeScript file." }
+    checker = "tsc --noEmit"
+    command = "tsc"
+    args = ["--noEmit", "--pretty", "false", "--project", join(project, "tsconfig.json")]
+  } else if ([".js", ".mjs", ".cjs"].includes(extension)) {
+    checker = "node --check"
+    command = "node"
+    args = ["--check", path]
+  } else if ([".jsx", ".html", ".css"].includes(extension)) {
+    checker = "Prettier parser"
+    command = "prettier"
+    args = [path]
+  } else if (extension === ".py") {
+    checker = "Python AST parser"
+    command = "python3"
+    args = [
+      "-c",
+      "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(), filename=sys.argv[1])",
+      path,
+    ]
+  } else if (extension === ".nix") {
+    checker = "nix-instantiate --parse"
+    command = "nix-instantiate"
+    args = ["--parse", path]
+  } else if (extension === ".json") {
+    checker = "jq"
+    command = "jq"
+    args = ["empty", path]
+  } else if ([".yaml", ".yml"].includes(extension)) {
+    checker = "yq"
+    command = "yq"
+    args = ["eval", ".", path]
+  } else if ([".sh", ".bash"].includes(extension)) {
+    checker = "bash -n"
+    command = "bash"
+    args = ["-n", path]
+  } else {
+    return { status: "unsupported", output: `No configured diagnostic checker for ${extension || "files without an extension"}.` }
+  }
+
+  const result = await run(command, args)
+  const output = trimOutput(`${result.stdout}\n${result.stderr}`)
+  const hasGoplsDiagnostics = checker === "gopls check" && output.length > 0
+  if (result.code === 0 && !hasGoplsDiagnostics) return { status: "passed", checker, output: "No diagnostics." }
+  return {
+    status: "failed",
+    checker,
+    output: output || `${checker} exited with status ${result.code}.`,
+  }
+}
+
+function validatePublicUrl(rawUrl: string) {
+  const url = new URL(rawUrl)
+  const hostname = url.hostname.toLowerCase()
+  if (url.protocol !== "https:") throw new Error("Only public HTTPS URLs can be fetched")
+  if (url.username || url.password) throw new Error("URLs containing credentials are not allowed")
+  if (isIP(hostname) || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal")) {
+    throw new Error("Local, private, and IP-literal URLs are not allowed")
+  }
+  return url
+}
+
+async function jinaRequest(url: URL, signal: AbortSignal | undefined) {
+  const headers: Record<string, string> = {
+    Accept: "text/plain",
+    "X-Retain-Images": "none",
+  }
+  if (process.env.JINA_API_KEY) headers.Authorization = `Bearer ${process.env.JINA_API_KEY}`
+
+  const requestSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+    : AbortSignal.timeout(30_000)
+  const response = await fetch(url, { headers, signal: requestSignal })
+  if (!response.ok) throw new Error(`Web request failed with HTTP ${response.status}`)
+  const content = trimOutput(await response.text())
+  if (!content) throw new Error("Web request returned no content")
+  return content
+}
+
+function htmlText(html: string) {
+  const entities: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    gt: ">",
+    hellip: "...",
+    lt: "<",
+    nbsp: " ",
+    quot: "\"",
+  }
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&#(\d+);/g, (_match, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_match, code) => String.fromCodePoint(Number.parseInt(code, 16)))
+    .replace(/&([a-z]+);/gi, (match, name) => entities[name.toLowerCase()] ?? match)
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+async function duckDuckGoSearch(query: string, signal: AbortSignal | undefined) {
+  const url = new URL("https://html.duckduckgo.com/html/")
+  url.searchParams.set("q", query)
+  const requestSignal = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+    : AbortSignal.timeout(30_000)
+  const response = await fetch(url, {
+    headers: { Accept: "text/html", "User-Agent": "Mozilla/5.0 (compatible; Agentbox/1.0)" },
+    signal: requestSignal,
+  })
+  if (!response.ok) throw new Error(`Web search failed with HTTP ${response.status}`)
+
+  const html = await response.text()
+  const pattern = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>[\s\S]*?<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi
+  const results: string[] = []
+  for (const match of html.matchAll(pattern)) {
+    const redirect = new URL(htmlText(match[1]), "https://duckduckgo.com")
+    const resultUrl = redirect.searchParams.get("uddg") ?? redirect.href
+    results.push(`${results.length + 1}. [${htmlText(match[2])}](${resultUrl})\n${htmlText(match[3])}`)
+    if (results.length === 10) break
+  }
+  if (results.length === 0) throw new Error("Web search returned no parseable results")
+  return trimOutput(results.join("\n\n"))
 }
 
 function normalizePath(path: string, cwd: string) {
@@ -110,6 +276,73 @@ export default function (pi: ExtensionAPI) {
   let sessionFile = ""
   let sessionTitle = ""
 
+  pi.registerTool({
+    name: "web_search",
+    label: "Web search",
+    description: "Search the public web for current information. Returns titles, snippets, and source URLs.",
+    promptSnippet: "web_search: search the public web for current information with source URLs",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", minLength: 1, maxLength: 500, description: "Search query" },
+      },
+      required: ["query"],
+    },
+    async execute(_toolCallId, params: { query: string }, signal) {
+      if (process.env.JINA_API_KEY) {
+        const url = new URL("https://s.jina.ai/")
+        url.searchParams.set("q", params.query)
+        const content = await jinaRequest(url, signal)
+        return { content: [{ type: "text", text: content }], details: { query: params.query, provider: "jina" } }
+      }
+      const content = await duckDuckGoSearch(params.query, signal)
+      return { content: [{ type: "text", text: content }], details: { query: params.query, provider: "duckduckgo" } }
+    },
+  })
+
+  pi.registerTool({
+    name: "web_fetch",
+    label: "Web fetch",
+    description: "Fetch readable Markdown from a public HTTPS page through Jina Reader. Local and private addresses are blocked.",
+    promptSnippet: "web_fetch: fetch readable content from a public HTTPS URL",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        url: { type: "string", minLength: 1, maxLength: 2_000, description: "Public HTTPS URL" },
+      },
+      required: ["url"],
+    },
+    async execute(_toolCallId, params: { url: string }, signal) {
+      const target = validatePublicUrl(params.url)
+      const content = await jinaRequest(new URL(`https://r.jina.ai/${target.href}`), signal)
+      return { content: [{ type: "text", text: content }], details: { url: target.href, provider: "jina" } }
+    },
+  })
+
+  pi.registerTool({
+    name: "code_diagnostics",
+    label: "Code diagnostics",
+    description: "Check one file for language-server, type, or syntax errors. Supports Go, TypeScript, JavaScript/JSX, Python, Nix, JSON, YAML, HTML, CSS, and shell.",
+    promptSnippet: "code_diagnostics: run language-aware diagnostics for one source file",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", minLength: 1, description: "File path relative to the working directory, or an absolute path" },
+      },
+      required: ["path"],
+    },
+    async execute(_toolCallId, params: { path: string }, _signal, _onUpdate, ctx) {
+      const result = await codeDiagnostics(params.path, ctx.cwd)
+      const text = result.status === "failed"
+        ? `<diagnostics checker="${result.checker}">\n${result.output}\n</diagnostics>`
+        : `${result.checker ? `${result.checker}: ` : ""}${result.output}`
+      return { content: [{ type: "text", text }], details: result }
+    },
+  })
+
   pi.on("session_start", async (_event, ctx) => {
     cwd = ctx.cwd
     sessionID = ctx.sessionManager.getSessionId()
@@ -188,10 +421,24 @@ export default function (pi: ExtensionAPI) {
     const path = toolPath(event.input)
     if (!path) return
 
-    const result = await run("bun", [TEST_RUNNER, normalizePath(path, ctx.cwd)])
-    if (result.code !== 2 || !result.stderr.trim()) return
+    const normalizedPath = normalizePath(path, ctx.cwd)
+    const [diagnostics, tests] = await Promise.all([
+      codeDiagnostics(normalizedPath, ctx.cwd),
+      run("bun", [TEST_RUNNER, normalizedPath]),
+    ])
+    const feedback: Array<{ type: "text"; text: string }> = []
+    if (diagnostics.status === "failed") {
+      feedback.push({
+        type: "text",
+        text: `<diagnostics checker="${diagnostics.checker}">\nDiagnostics failed after editing ${path}:\n\n${diagnostics.output}\n</diagnostics>`,
+      })
+    }
+    if (tests.code === 2 && tests.stderr.trim()) {
+      feedback.push({ type: "text", text: tests.stderr.trim() })
+    }
+    if (feedback.length === 0) return
     return {
-      content: [...event.content, { type: "text", text: result.stderr.trim() }],
+      content: [...event.content, ...feedback],
     }
   })
 

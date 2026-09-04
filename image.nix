@@ -95,7 +95,9 @@
   docker-client,
   # LSPs / formatters. Formerly under nodePackages.*, which was removed in
   # nixpkgs 26.05 — these now live at the top level.
+  typescript,
   typescript-language-server,
+  yaml-language-server,
   prettier,
   vscode-langservers-extracted,
   # Pre-configured neovim (from pkgs/agentbox-neovim)
@@ -1283,7 +1285,9 @@ let
     # Language servers
     gopls
     nil # Nix LSP
+    typescript
     typescript-language-server
+    yaml-language-server
     vscode-langservers-extracted
     # Formatters
     nixfmt

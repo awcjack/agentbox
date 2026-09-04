@@ -301,6 +301,11 @@ let
     -- TypeScript/JavaScript
     lspconfig.ts_ls.setup({})
 
+    -- HTML/CSS/JSON
+    lspconfig.html.setup({})
+    lspconfig.cssls.setup({})
+    lspconfig.jsonls.setup({})
+
     -- Nix
     lspconfig.nil_ls.setup({})
 

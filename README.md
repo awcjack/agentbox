@@ -55,6 +55,17 @@ layer equivalent to OpenCode's `/etc/opencode` config, so the container remains
 the hard boundary; the extension supplies the strongest harness-level
 enforcement Pi exposes.
 
+The extension also gives Pi three first-class tools that vanilla Pi does not
+ship: `web_search`, `web_fetch`, and `code_diagnostics`. Search uses anonymous
+DuckDuckGo HTML by default or Jina Search when `JINA_API_KEY` is present in
+`environmentFile`; readable page content comes through Jina Reader. Results are
+capped before they enter model context, and `web_fetch` accepts only public
+HTTPS targets.
+`code_diagnostics` uses `gopls check` for Go and deterministic type/syntax
+checks for TypeScript, JavaScript/JSX, Python, Nix, JSON, YAML, HTML, CSS, and
+shell. The same diagnostics run automatically after Pi's `write` and `edit`
+calls, alongside the existing project test runner.
+
 ```nix
 services.agentbox = {
   enable = true;
@@ -76,7 +87,7 @@ services.agentbox = {
 | Dev tools | git, neovim (pre-configured), tmux, htop, tree, ripgrep, fd, fzf, jq, yq-go, curl, wget, unzip, gnumake, pkg-config, gcc, nix |
 | Languages | go, nodejs 22, bun, python 3.12, uv |
 | **AI CLIs** | **codex**, **opencode**, **pi** (Claude Code is runtime-installed) |
-| Language servers | gopls, nil, typescript-language-server, vscode-langservers-extracted |
+| Language servers | gopls, nil, typescript-language-server, yaml-language-server, vscode-langservers-extracted |
 | Formatters | nixfmt (RFC), prettier |
 | Cloud CLIs | awscli2, kubectl, kubernetes-helm, google-cloud-sdk (+gke-gcloud-auth-plugin), docker-client |
 | VCS / scanning | gh, gitleaks, openssh |
