@@ -5,3 +5,6 @@ result-*
 # direnv / editor
 .direnv/
 .envrc.local
+
+# Reproducible JavaScript dependencies are built from package-lock.json.
+node_modules/
