@@ -6,7 +6,7 @@ It ships a full dev toolchain in an OCI container and runs **Claude Code**,
 
 - **`agentboxImage`** — a Nix-built OCI image (no Dockerfile, no Homebrew).
 - **`agentbox`** — a host-side CLI to drive the container (`status`, `shell`,
-  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `claude`, on-demand services,
+  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `pi-rpc`, `claude`, on-demand services,
   `pause`/`resume`, and `start`/`stop`/`restart`).
 - **`nixosModules.agentbox`** / **`darwinModules.agentbox`** — run it as a
   systemd `oci-containers` service (NixOS) or via manual management (macOS).
@@ -44,27 +44,55 @@ runtime may cross a Linux VM, and refuses to start Pi web without a password;
 use a trusted TLS reverse proxy or VPN rather than exposing plain HTTP Basic
 Auth directly.
 
-Pi force-loads an immutable Agentbox extension that mirrors the Agentbox-owned
-OpenCode integrations: secret-path and dangerous-command guards, post-edit
-tests, gitleaks before commits, tmux/desktop notifications, shared skills, and
-selective archive requests. For headless ChatGPT/Codex login, run `/login`,
-select `ChatGPT Plus/Pro (Codex)`, then choose `Device code login (headless)`.
-Open the displayed URL and enter the code. Pi stores and refreshes the resulting
-credentials normally in `~/.pi/agent/auth.json`. Pi has no native managed-policy
-layer equivalent to OpenCode's `/etc/opencode` config, so the container remains
-the hard boundary; the extension supplies the strongest harness-level
-enforcement Pi exposes.
+Pi runs through an immutable wrapper that rejects `-e`/`--extension`, disables
+extension discovery, and force-loads trusted Agentbox extensions in this order:
+core integration, workflow, MCP, and final managed policy. Delegated workflow
+jobs and RPC sessions re-enter the same wrapper. Pi's positional package/config/
+auth management commands remain available, but their installed extensions are
+not discovered by agent runs. The final policy fails closed
+if `/etc/pi/agentbox-policy.json` is absent or invalid. Direct file targets are
+canonicalized, so safe symlinks whose destinations are allowed work, while
+aliases into sensitive paths and writes through aliases into managed/Nix-store
+paths remain immutable denials. Obvious sudo/su and privilege-escalation calls,
+privileged containers or host-root mounts, root deletion, and filesystem/device
+destruction are also immutable denials. These run before configurable rules. Any
+matching configured `deny` wins; otherwise the last matching `allow` or `ask`
+wins per target. A multi-target call is denied if any target is denied, or asks
+if none is denied but any target asks. The defaults allow workspace file work
+plus todo/questions and ask for shell, web, MCP, and delegated tasks. Task prompts
+and bounded string arguments from MCP/custom tools are policy targets. The
+policy, workflow, and shared runtime JSON files are generated declaratively,
+mounted read-only, and cannot be replaced by Pi or project configuration.
 
-The extension also gives Pi three first-class tools that vanilla Pi does not
-ship: `web_search`, `web_fetch`, and `code_diagnostics`. Search uses anonymous
-DuckDuckGo HTML by default or Jina Search when `JINA_API_KEY` is present in
-`environmentFile`; readable page content comes through Jina Reader. Results are
-capped before they enter model context, and `web_fetch` accepts only public
-HTTPS targets.
-`code_diagnostics` uses `gopls check` for Go and deterministic type/syntax
-checks for TypeScript, JavaScript/JSX, Python, Nix, JSON, YAML, HTML, CSS, and
-shell. The same diagnostics run automatically after Pi's `write` and `edit`
-calls, alongside the existing project test runner.
+A Pi `bash` approval is approval of the submitted command string, not a command
+sandbox. The policy rejects listed immutable operations and inspects obvious
+nested `sh`/`bash` and interpreter `-c`/`-e` payloads, but shell parsing is
+necessarily heuristic: generated scripts, alternate interpreters, expansion,
+obfuscation, subprocesses, and time-of-check/time-of-use changes can evade
+string inspection. Treat an approved shell call as arbitrary code execution
+inside Agentbox. The security boundary is the container and the credentials,
+host mounts, network access, Docker access, and cloud permissions granted to it;
+scope each of those to the least privilege needed.
+
+Pi adds `web_search`, `web_fetch`, `code_diagnostics`, `code_navigation`,
+`todo`, `question`, and `task`. Diagnostics and navigation lazily start and reuse
+language servers for Go, Nix, TypeScript/JavaScript, JSON, YAML, HTML, and CSS;
+diagnostics fall back to the existing deterministic type/syntax checks and still
+run automatically after `write`/`edit` alongside project tests. LSP output and
+targets with disallowed file URIs are removed; free-form diagnostic and hover
+text is bounded but is not a sensitive-content filter. Search uses anonymous
+DuckDuckGo HTML or Jina Search with `JINA_API_KEY`; fetch only accepts public
+HTTPS URLs and output is bounded.
+
+Workflow defaults provide `simple-task`, `explore`, and `general` roles without
+pinning a provider or model. Roles inherit the active Pi selection unless
+configured otherwise. Todo/task state follows the current session branch,
+delegation has concurrency/job/step/output limits, and `question` works in both
+the TUI and an RPC-provided UI.
+
+For headless ChatGPT/Codex login, run `/login`, select `ChatGPT Plus/Pro
+(Codex)`, then choose `Device code login (headless)`. Pi stores and refreshes
+the result in `~/.pi/agent/auth.json`.
 
 ```nix
 services.agentbox = {
@@ -76,9 +104,85 @@ services.agentbox = {
     enableOpencode = true; # on by default
     enablePi = true;       # on by default
     enablePiWeb = true;    # browser TUI on http://localhost:4097
+
+    piConfig.workflow.maxConcurrency = 4;
+    piConfig.permissions.timeoutMs = 30000;
+
+    # Empty by default. Values below are interpreted as environment variable
+    # identifiers; keep the corresponding secret values in environmentFile.
+    piConfig.mcpServers.docs = {
+      transport = {
+        type = "http";
+        url = "https://mcp.example.com/rpc";
+        headers.Authorization = "DOCS_MCP_AUTH";
+      };
+      allowedTools = [ "search_*" ];
+      approval = "destructive";
+    };
   };
 };
 ```
+
+`settings.piConfig.workflow` types roles and delegation limits.
+`settings.piConfig.permissions` types and bounds ordered
+`tools`/`patterns`/`decision` rules, generated policy size, and approval timeout.
+`settings.piConfig.mcpServers` supports stdio
+(`command`, `args`, `cwd`, env references) and Streamable HTTP (`url`, header
+references), per-server allow/deny tool globs, approval mode, and connection,
+call, close, response, output, and tool-count limits. HTTP endpoints must use
+public HTTPS unless `transport.allowInsecureLoopback = true` explicitly enables
+a loopback endpoint. Identifier-shaped values cannot be distinguished from
+literals by the module schema, so MCP secret values belong in `environmentFile`.
+No MCP server is enabled by default.
+
+### Pi RPC API
+
+The optional `settings.piRpcApi` service exposes authenticated HTTP/SSE
+supervision on port 4098. It is disabled by default and binds to `127.0.0.1` on
+both NixOS and Darwin. Some Darwin Docker runtimes cannot route host requests to
+container loopback; `agentbox pi-rpc` still checks readiness inside the
+container. To make it host-accessible there, set `bindAddress = "0.0.0.0"` and
+explicitly acknowledge plain-HTTP exposure with
+`allowInsecureRemoteAccess = true`, then restrict access with a trusted TLS
+reverse proxy or VPN.
+
+Only the environment variable name for a bearer-token hash is placed in managed
+JSON. Put the lowercase SHA-256 digest in the secret `environmentFile`:
+
+```bash
+TOKEN="$(openssl rand -hex 32)"
+printf 'PI_RPC_TOKEN_SHA256=%s\n' "$(printf %s "$TOKEN" | sha256sum | cut -d' ' -f1)"
+```
+
+```nix
+services.agentbox.settings.piRpcApi = {
+  enable = true;
+  auth.tokens = [
+    {
+      sha256Env = "PI_RPC_TOKEN_SHA256";
+      scopes = [ "*" ];
+    }
+  ];
+  allowedOrigins = [ "https://agent.example.com" ];
+  profiles.default = {
+    cwd = "/workspace";
+    # Destination -> source variable in environmentFile.
+    env.PROVIDER_TOKEN = "PI_PROFILE_PROVIDER_TOKEN";
+  };
+};
+```
+
+`profiles`, command allowlists, token scopes, origins, and resource/time limits
+are typed. Session-switch/fork/clone/new-session, direct bash, HTML export, and
+raw UI-response commands are always forbidden by the supervisor. Extension UI
+dialogs use the checked `/ui` endpoint. Run `agentbox pi-rpc` to show the URL and
+check health; see `rpc-runtime/README.md` for routes and scopes.
+The container entrypoint bounds the API log and caps each backoff-controlled
+restart run; the API runtime separately supervises and bounds each
+`pi --mode rpc` child.
+Bearer authentication does not isolate same-UID code inside the container:
+agents with that trust level can inspect processes, credentials, and session
+files. Use separate containers and UIDs for mutually untrusted tenants.
 
 ## What's in the image
 
@@ -86,7 +190,7 @@ services.agentbox = {
 |---|---|
 | Dev tools | git, neovim (pre-configured), tmux, htop, tree, ripgrep, fd, fzf, jq, yq-go, curl, wget, unzip, gnumake, pkg-config, gcc, nix |
 | Languages | go, nodejs 22, bun, python 3.12, uv |
-| **AI CLIs** | **codex**, **opencode**, **pi** (Claude Code is runtime-installed) |
+| **AI CLIs** | **codex**, **opencode**, **pi**, Pi MCP runtime, Pi RPC supervisor (Claude Code is runtime-installed) |
 | Language servers | gopls, nil, typescript-language-server, yaml-language-server, vscode-langservers-extracted |
 | Formatters | nixfmt (RFC), prettier |
 | Cloud CLIs | awscli2, kubectl, kubernetes-helm, google-cloud-sdk (+gke-gcloud-auth-plugin), docker-client |
@@ -128,8 +232,9 @@ docker load < result           # loads agentbox:latest
 
 ### CI
 
-`.github/workflows/build-image.yml` builds the image with Nix on every push and
-PR, and on pushes to `main` / `v*` tags publishes it to GHCR
+`.github/workflows/build-image.yml` evaluates the flake, builds every extension
+and runtime test derivation, then builds the image on every push and PR. On
+pushes to `main` / `v*` tags it publishes to GHCR
 (`ghcr.io/<owner>/agentbox:latest` and `:<sha>` / `:<tag>`). Building needs no
 secrets (nixpkgs-only); only the push uses the built-in `GITHUB_TOKEN`.
 

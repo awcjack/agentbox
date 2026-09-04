@@ -69,6 +69,8 @@
   codex,
   opencode,
   pi-coding-agent,
+  pi-agentbox-mcp-runtime,
+  agentbox-pi-rpc-runtime,
   # Language servers (LSPs)
   gopls,
   nil, # Nix LSP
@@ -662,16 +664,50 @@ let
   # Pi extension: mirrors the Agentbox-owned OpenCode integrations (sensitive
   # path and dangerous-command guards, post-edit tests, gitleaks pre-commit,
   # notifications, and selective archive resolution) using Pi's extension API.
-  piAgentboxExtension = writeTextFile {
-    name = "pi-agentbox.ts";
-    text = builtins.readFile ./extensions/pi-agentbox.ts;
+  piAgentboxExtensions = runCommand "pi-agentbox-extensions" { } ''
+    mkdir -p $out
+    cp ${./extensions/pi-agentbox.ts} $out/pi-agentbox.ts
+    cp ${./extensions/lsp-client.ts} $out/lsp-client.ts
+  '';
+  piWorkflowExtension = writeTextFile {
+    name = "pi-workflow.ts";
+    text = builtins.readFile ./extensions/pi-workflow.ts;
   };
+  piPolicyExtension = writeTextFile {
+    name = "pi-policy.ts";
+    text = builtins.readFile ./extensions/pi-policy.ts;
+  };
+  piMcpExtension = "${pi-agentbox-mcp-runtime}/lib/pi-agentbox-mcp-runtime/pi-mcp.mjs";
 
-  # Force-load the immutable Agentbox extension for every Pi invocation. Pi has
-  # no managed-policy layer, so relying only on a user-writable ~/.pi extension
-  # would let a running agent disable its own guards.
+  # Disable extension discovery and force-load only immutable Agentbox code. The
+  # policy extension is deliberately last so it observes tools registered by all
+  # earlier trusted extensions. Delegated/RPC children re-enter this wrapper via
+  # PI_AGENTBOX_PI_WRAPPER instead of invoking the upstream CLI directly.
   piAgentboxCli = writeShellScriptBin "pi" ''
-    exec ${pi-coding-agent}/bin/pi -e ${piAgentboxExtension} "$@"
+    for arg in "$@"; do
+      case "$arg" in
+        -e|--extension|-e?*|--extension=*)
+          echo "pi: user extensions are disabled by Agentbox policy" >&2
+          exit 2
+          ;;
+      esac
+    done
+    case "''${1:-}" in
+      install|remove|uninstall|update|list|config|auth)
+        exec ${pi-coding-agent}/bin/pi "$@"
+        ;;
+    esac
+    export PI_AGENTBOX_PI_WRAPPER="$(${coreutils}/bin/readlink -f "$0")"
+    export PI_WORKFLOW_CONFIG=/etc/agentbox/pi-workflow.json
+    export PI_AGENTBOX_RUNTIME_CONFIG=/etc/agentbox/pi-runtime.json
+    export PI_POLICY_CONFIG=/etc/pi/agentbox-policy.json
+    exec ${pi-coding-agent}/bin/pi \
+      --no-extensions \
+      -e ${piAgentboxExtensions}/pi-agentbox.ts \
+      -e ${piWorkflowExtension} \
+      -e ${piMcpExtension} \
+      -e ${piPolicyExtension} \
+      "$@"
   '';
 
   # ── Cross-agent notification / tmux-title bridge ────────────────────────────
@@ -1282,6 +1318,8 @@ let
     codex
     opencode
     piAgentboxCli
+    pi-agentbox-mcp-runtime
+    agentbox-pi-rpc-runtime
     # Language servers
     gopls
     nil # Nix LSP
@@ -1679,6 +1717,25 @@ let
       fi
     fi
 
+    # Authenticated HTTP/SSE supervisor for Pi's native RPC mode. The runtime
+    # starts as the agent user and resolves /bin/pi once to its immutable Nix
+    # store wrapper. Configuration and token hashes are resolved at runtime from
+    # the read-only managed config and secret environment file.
+    PI_RPC_STARTED=false
+    if [ "''${ENABLE_PI_RPC_API:-false}" = "true" ]; then
+      if [ -x ${agentbox-pi-rpc-runtime}/bin/pi-rpc-runtime-supervise ]; then
+        echo "Starting Pi RPC API..."
+        setpriv --reuid=agent --regid=agent --init-groups -- \
+          env HOME=/home/agent XDG_CONFIG_HOME=/home/agent/.config \
+          PI_AGENTBOX_RUNTIME_CONFIG=/etc/agentbox/pi-runtime.json \
+          PI_RPC_LOG_FILE="$AGENT_LOGS/pi-rpc-runtime.log" \
+          ${agentbox-pi-rpc-runtime}/bin/pi-rpc-runtime-supervise &
+        PI_RPC_STARTED=true
+      else
+        echo "WARNING: ENABLE_PI_RPC_API=true but the Pi RPC supervisor is unavailable"
+      fi
+    fi
+
     # Start Claude Code if enabled.
     #
     # Launched in a detached tmux session as the agent user, not as a bare
@@ -1755,6 +1812,7 @@ let
     # This keeps the container alive when running as a systemd service
     if [ "''${ENABLE_OPENCODE:-false}" = "true" ] || \
        [ "$PI_WEB_STARTED" = "true" ] || \
+       [ "$PI_RPC_STARTED" = "true" ] || \
        [ "''${ENABLE_CLAUDE_CODE:-false}" = "true" ] || \
        [ "$AGENTBOX_BOOT_STARTED" = "true" ]; then
       # If a specific command was passed, run it then wait
@@ -2325,6 +2383,7 @@ in
       "22/tcp" = { }; # SSH
       "4096/tcp" = { }; # OpenCode server
       "4097/tcp" = { }; # Pi browser TUI
+      "4098/tcp" = { }; # Pi authenticated RPC API
     };
     Env = [
       # nix profile dirs are on PATH so packages installed via `nix profile

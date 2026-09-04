@@ -31,6 +31,7 @@ let
       opencode    Start opencode in a tmux session
       pi          Start Pi in a tmux session
       pi-web      Show the Pi browser interface URL
+      pi-rpc      Show and check the Pi RPC API endpoint
       claude      Attach to the Claude Code tmux session (starts it if needed)
       restart     Restart the container service
       stop        Stop the container service
@@ -46,6 +47,7 @@ let
       agentbox opencode                 # Start opencode in tmux
       agentbox pi                       # Start Pi in tmux
       agentbox pi-web                   # Show Pi browser URL
+      agentbox pi-rpc                   # Check Pi RPC API health
       agentbox claude                   # Attach to Claude Code in tmux
       agentbox service start my-service # Start a configured on-demand service
       agentbox pause                    # Freeze Agentbox during a short break
@@ -153,6 +155,18 @@ let
           ensure_running
           echo "Pi web interface: http://localhost:4097"
           echo "Basic Auth username: pi"
+        }
+
+        cmd_pi_rpc() {
+          ensure_running
+          local port
+          port=$(docker exec "$CONTAINER_NAME" bash -c 'printf %s "''${PI_RPC_PORT:-4098}"')
+          echo "Pi RPC API: http://localhost:$port"
+          if ! docker exec "$CONTAINER_NAME" curl -fsS "http://127.0.0.1:$port/health/ready"; then
+            echo "Pi RPC API is not enabled or healthy." >&2
+            return 1
+          fi
+          echo
         }
 
         cmd_restart() {
@@ -346,6 +360,7 @@ let
           opencode) cmd_opencode ;;
           pi)       cmd_pi ;;
           pi-web)   cmd_pi_web ;;
+          pi-rpc)   cmd_pi_rpc ;;
           claude)   cmd_claude ;;
           restart)  cmd_restart ;;
           stop)     cmd_stop ;;

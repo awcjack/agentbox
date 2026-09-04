@@ -122,6 +122,20 @@ let
     infrastructure mutations, force pushes, and uploads of private workspace
     data as high risk unless the user explicitly authorized the exact action.
   '';
+  piPolicyTargetPatternType = lib.types.addCheck lib.types.str (
+    value: value != "" && builtins.stringLength value <= 4096
+  );
+  piPolicyToolPatternType = lib.types.addCheck lib.types.str (
+    value:
+    value != ""
+    && builtins.stringLength value <= 256
+    && builtins.match "[-A-Za-z0-9_.*?:/+]+" value != null
+  );
+  boundedPiPolicyEntries =
+    type: lib.types.addCheck (lib.types.nonEmptyListOf type) (values: builtins.length values <= 128);
+  boundedMcpString = lib.types.addCheck lib.types.str (
+    value: value != "" && builtins.stringLength value <= 256
+  );
 in
 {
   options.services.agentbox = {
@@ -1128,6 +1142,504 @@ in
             };
           };
           description = "Declarative Pi custom provider/model configuration written to ~/.pi/agent/models.json.";
+        };
+
+        workflow = {
+          maxConcurrency = lib.mkOption {
+            type = lib.types.ints.between 1 16;
+            default = 4;
+            description = "Maximum number of delegated Pi jobs that may run concurrently.";
+          };
+          maxJobs = lib.mkOption {
+            type = lib.types.ints.between 1 32;
+            default = 8;
+            description = "Maximum jobs accepted by one Pi task tool call.";
+          };
+          maxOutputBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (1024 * 1024);
+            default = 64 * 1024;
+            description = "Maximum captured stdout and stderr bytes per delegated job.";
+          };
+          defaultMaxSteps = lib.mkOption {
+            type = lib.types.ints.between 1 1000;
+            default = 20;
+            description = "Default maximum assistant steps for a delegated job.";
+          };
+          roles = lib.mkOption {
+            type = lib.types.attrsOf (
+              lib.types.submodule {
+                options = {
+                  provider = lib.mkOption {
+                    type = lib.types.nullOr lib.types.str;
+                    default = null;
+                    description = "Optional Pi provider override; null inherits the active provider.";
+                  };
+                  model = lib.mkOption {
+                    type = lib.types.nullOr lib.types.str;
+                    default = null;
+                    description = "Optional Pi model override; null inherits the active model.";
+                  };
+                  thinking = lib.mkOption {
+                    type = lib.types.nullOr (
+                      lib.types.enum [
+                        "off"
+                        "minimal"
+                        "low"
+                        "medium"
+                        "high"
+                        "xhigh"
+                        "max"
+                      ]
+                    );
+                    default = null;
+                    description = "Optional thinking-level override for this role.";
+                  };
+                  systemPrompt = lib.mkOption {
+                    type = lib.types.nullOr lib.types.str;
+                    default = null;
+                    description = "Optional role-specific system prompt.";
+                  };
+                  maxSteps = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1 1000);
+                    default = null;
+                    description = "Optional role-specific assistant step limit.";
+                  };
+                };
+              }
+            );
+            default = {
+              simple-task = {
+                thinking = "minimal";
+                systemPrompt = "Complete the small, well-scoped task directly and report the result concisely.";
+                maxSteps = 8;
+              };
+              explore = {
+                thinking = "low";
+                systemPrompt = "Explore the codebase and return concrete findings with file references; do not make unrelated changes.";
+                maxSteps = 12;
+              };
+              general = {
+                thinking = "medium";
+                systemPrompt = "Handle the delegated engineering task carefully, verify the result, and summarize material outcomes.";
+                maxSteps = 20;
+              };
+            };
+            description = "Managed workflow roles. Null provider/model values inherit the current Pi selection.";
+          };
+        };
+
+        permissions = {
+          defaultDecision = lib.mkOption {
+            type = lib.types.enum [
+              "allow"
+              "ask"
+              "deny"
+            ];
+            default = "ask";
+            description = "Default managed Pi tool decision.";
+          };
+          timeoutMs = lib.mkOption {
+            type = lib.types.ints.between 1 300000;
+            default = 30000;
+            description = "Timeout for interactive Pi tool approvals.";
+          };
+          rules = lib.mkOption {
+            type = lib.types.listOf (
+              lib.types.submodule {
+                options = {
+                  tools = lib.mkOption {
+                    type = boundedPiPolicyEntries piPolicyToolPatternType;
+                    description = "Tool-name globs matched by this rule (1-128 entries, 256 characters each).";
+                  };
+                  patterns = lib.mkOption {
+                    type = boundedPiPolicyEntries piPolicyTargetPatternType;
+                    description = "Target globs matched by this rule (1-128 entries, 4096 characters each).";
+                  };
+                  decision = lib.mkOption {
+                    type = lib.types.enum [
+                      "allow"
+                      "ask"
+                      "deny"
+                    ];
+                    description = "Decision when both tool and target match.";
+                  };
+                };
+              }
+            );
+            apply =
+              rules:
+              if builtins.length rules <= 1000 then
+                rules
+              else
+                throw "services.agentbox.settings.piConfig.permissions.rules must contain at most 1000 entries";
+            default = [
+              {
+                tools = [
+                  "read"
+                  "grep"
+                  "find"
+                  "ls"
+                  "code_diagnostics"
+                  "code_navigation"
+                ];
+                patterns = [
+                  "/workspace"
+                  "/workspace/**"
+                ];
+                decision = "allow";
+              }
+              {
+                tools = [
+                  "write"
+                  "edit"
+                ];
+                patterns = [
+                  "/workspace"
+                  "/workspace/**"
+                ];
+                decision = "allow";
+              }
+              {
+                tools = [
+                  "todo"
+                  "question"
+                ];
+                patterns = [ "*" ];
+                decision = "allow";
+              }
+              {
+                tools = [
+                  "bash"
+                  "web_*"
+                  "mcp__*"
+                  "task"
+                ];
+                patterns = [ "*" ];
+                decision = "ask";
+              }
+            ];
+            description = ''
+              Managed Pi policy rules (at most 1000). Immutable sensitive-path
+              and managed-write denials run first. Among configured rules, any
+              matching deny wins; otherwise the last matching allow or ask wins
+              per target, and every target in a tool call must avoid denial.
+            '';
+          };
+        };
+
+        mcpLimits = {
+          connectTimeoutMs = lib.mkOption {
+            type = lib.types.ints.between 1 300000;
+            default = 10000;
+          };
+          callTimeoutMs = lib.mkOption {
+            type = lib.types.ints.between 1 3600000;
+            default = 60000;
+          };
+          closeTimeoutMs = lib.mkOption {
+            type = lib.types.ints.between 1 60000;
+            default = 5000;
+          };
+          maxOutputBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (1024 * 1024);
+            default = 64 * 1024;
+          };
+          maxResponseBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (16 * 1024 * 1024);
+            default = 1024 * 1024;
+            description = "Maximum HTTP request/response body and stdio protocol-buffer bytes.";
+          };
+          maxToolsPerServer = lib.mkOption {
+            type = lib.types.ints.between 1 1024;
+            default = 128;
+          };
+        };
+
+        mcpServers = lib.mkOption {
+          type = lib.types.attrsOf (
+            lib.types.submodule {
+              options = {
+                enable = lib.mkOption {
+                  type = lib.types.bool;
+                  default = true;
+                };
+                transport = {
+                  type = lib.mkOption {
+                    type = lib.types.enum [
+                      "stdio"
+                      "http"
+                    ];
+                  };
+                  command = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.addCheck lib.types.str (value: value != ""));
+                    default = null;
+                    description = "Stdio server executable.";
+                  };
+                  args = lib.mkOption {
+                    type = lib.types.listOf boundedMcpString;
+                    default = [ ];
+                    description = "At most 256 non-empty arguments, each at most 256 characters.";
+                  };
+                  cwd = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.addCheck lib.types.str (value: value != ""));
+                    default = null;
+                  };
+                  env = lib.mkOption {
+                    type = lib.types.attrsOf (lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*");
+                    default = { };
+                    description = "Destination environment names mapped to source identifiers resolved from the runtime environment.";
+                  };
+                  url = lib.mkOption {
+                    type = lib.types.nullOr lib.types.str;
+                    default = null;
+                    description = "Streamable HTTP MCP endpoint without embedded credentials.";
+                  };
+                  allowInsecureLoopback = lib.mkOption {
+                    type = lib.types.bool;
+                    default = false;
+                    description = "Allow a loopback MCP target, including plain HTTP. Non-loopback targets still require public HTTPS.";
+                  };
+                  headers = lib.mkOption {
+                    type = lib.types.attrsOf (lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*");
+                    default = { };
+                    description = "HTTP header names mapped to source identifiers resolved from the runtime environment.";
+                  };
+                };
+                approval = lib.mkOption {
+                  type = lib.types.enum [
+                    "never"
+                    "always"
+                    "destructive"
+                  ];
+                  default = "destructive";
+                };
+                allowedTools = lib.mkOption {
+                  type = lib.types.listOf boundedMcpString;
+                  default = [ "*" ];
+                  description = "At most 256 non-empty tool-name globs, each at most 256 characters.";
+                };
+                deniedTools = lib.mkOption {
+                  type = lib.types.listOf boundedMcpString;
+                  default = [ ];
+                  description = "At most 256 non-empty tool-name globs, each at most 256 characters.";
+                };
+                limits = {
+                  connectTimeoutMs = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1 300000);
+                    default = null;
+                  };
+                  callTimeoutMs = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1 3600000);
+                    default = null;
+                  };
+                  closeTimeoutMs = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1 60000);
+                    default = null;
+                  };
+                  maxOutputBytes = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1024 (1024 * 1024));
+                    default = null;
+                  };
+                  maxResponseBytes = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1024 (16 * 1024 * 1024));
+                    default = null;
+                  };
+                  maxTools = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.ints.between 1 1024);
+                    default = null;
+                  };
+                };
+              };
+            }
+          );
+          default = { };
+          description = "Managed Pi MCP servers. Env/header values are interpreted as runtime environment-variable identifiers; identifier syntax cannot prove a value is not a same-shaped literal, so keep actual secrets in environmentFile.";
+        };
+      };
+
+      piRpcApi = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Enable the authenticated Pi RPC HTTP/SSE supervisor.";
+        };
+        bindAddress = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          description = "Listen address. Null selects loopback on every platform.";
+        };
+        allowInsecureRemoteAccess = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = "Acknowledge that a non-loopback RPC bind exposes bearer-authenticated plain HTTP. Prefer a loopback TLS reverse proxy or VPN.";
+        };
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = 4098;
+        };
+        allowedOrigins = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          description = "Exact browser origins allowed by CORS. Non-browser clients may omit Origin.";
+        };
+        auth = {
+          tokens = lib.mkOption {
+            type = lib.types.listOf (
+              lib.types.submodule {
+                options = {
+                  sha256Env = lib.mkOption {
+                    type = lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*";
+                    default = "PI_RPC_TOKEN_SHA256";
+                    description = "Environment variable containing the lowercase SHA-256 bearer-token digest.";
+                  };
+                  scopes = lib.mkOption {
+                    type = lib.types.nonEmptyListOf (
+                      lib.types.enum [
+                        "*"
+                        "profiles:read"
+                        "sessions:create"
+                        "sessions:read"
+                        "sessions:write"
+                        "sessions:delete"
+                      ]
+                    );
+                    default = [ "*" ];
+                  };
+                };
+              }
+            );
+            default = [ { } ];
+            description = "Runtime bearer-token hash references. Hash values must be supplied by environmentFile and never enter the Nix store.";
+          };
+        };
+        allowedCommands = lib.mkOption {
+          type = lib.types.listOf lib.types.str;
+          default = [
+            "abort"
+            "abort_bash"
+            "abort_retry"
+            "clear_queue"
+            "compact"
+            "cycle_model"
+            "cycle_thinking_level"
+            "follow_up"
+            "get_available_models"
+            "get_available_thinking_levels"
+            "get_commands"
+            "get_entries"
+            "get_fork_messages"
+            "get_last_assistant_text"
+            "get_messages"
+            "get_session_stats"
+            "get_state"
+            "get_tree"
+            "prompt"
+            "set_auto_compaction"
+            "set_auto_retry"
+            "set_follow_up_mode"
+            "set_model"
+            "set_session_name"
+            "set_steering_mode"
+            "steer"
+          ];
+          description = "Pi RPC commands globally allowed by the supervisor. Filesystem/session escape commands remain hard-denied.";
+        };
+        profiles = lib.mkOption {
+          type = lib.types.attrsOf (
+            lib.types.submodule {
+              options = {
+                cwd = lib.mkOption {
+                  type = lib.types.strMatching "/.*";
+                  default = "/workspace";
+                };
+                sessionDir = lib.mkOption {
+                  type = lib.types.nullOr (lib.types.strMatching "/.*");
+                  default = "/home/agent/.pi/agent/sessions";
+                };
+                args = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  default = [ ];
+                };
+                env = lib.mkOption {
+                  type = lib.types.attrsOf (lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*");
+                  default = { };
+                  description = "Destination environment names mapped to source environment variable names.";
+                };
+                allowedCommands = lib.mkOption {
+                  type = lib.types.nullOr (lib.types.listOf lib.types.str);
+                  default = null;
+                  description = "Optional profile-specific narrowing of allowedCommands.";
+                };
+              };
+            }
+          );
+          default.default = { };
+        };
+        limits = {
+          maxSessions = lib.mkOption {
+            type = lib.types.ints.between 1 1000;
+            default = 16;
+          };
+          maxSseClients = lib.mkOption {
+            type = lib.types.ints.between 1 1000;
+            default = 8;
+          };
+          maxBodyBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (16 * 1024 * 1024);
+            default = 256 * 1024;
+          };
+          maxRecordBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (32 * 1024 * 1024);
+            default = 2 * 1024 * 1024;
+          };
+          maxEvents = lib.mkOption {
+            type = lib.types.ints.between 1 100000;
+            default = 1000;
+          };
+          maxEventBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (128 * 1024 * 1024);
+            default = 8 * 1024 * 1024;
+          };
+          maxStderrBytes = lib.mkOption {
+            type = lib.types.ints.between 1024 (16 * 1024 * 1024);
+            default = 64 * 1024;
+          };
+          maxPendingCommands = lib.mkOption {
+            type = lib.types.ints.between 1 10000;
+            default = 32;
+          };
+          maxPendingUi = lib.mkOption {
+            type = lib.types.ints.between 1 10000;
+            default = 32;
+          };
+          commandTimeoutMs = lib.mkOption {
+            type = lib.types.ints.between 10 600000;
+            default = 30000;
+          };
+          idleTimeoutMs = lib.mkOption {
+            type = lib.types.ints.between 100 604800000;
+            default = 1800000;
+          };
+          cleanupIntervalMs = lib.mkOption {
+            type = lib.types.ints.between 50 3600000;
+            default = 30000;
+          };
+          sseHeartbeatMs = lib.mkOption {
+            type = lib.types.ints.between 100 3600000;
+            default = 15000;
+          };
+          shutdownGraceMs = lib.mkOption {
+            type = lib.types.ints.between 10 60000;
+            default = 5000;
+          };
+          killGraceMs = lib.mkOption {
+            type = lib.types.ints.between 10 60000;
+            default = 2000;
+          };
+          requestTimeoutMs = lib.mkOption {
+            type = lib.types.ints.between 100 600000;
+            default = 35000;
+          };
         };
       };
 

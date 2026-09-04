@@ -3,13 +3,18 @@ import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
 import { isIP } from "node:net"
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path"
+import {
+  createLspClient,
+  type LspClient,
+  type LspNavigationAction,
+} from "./lsp-client.ts"
 
 const SIGNAL = "/home/agent/.local/bin/agent-signal.sh"
 const TEST_RUNNER = "/home/agent/.local/bin/shared-test-runner.ts"
 const GITLEAKS = "/home/agent/.local/bin/dd-gitleaks-precommit.sh"
 const ARCHIVE = "/home/agent/.local/bin/agent-archive-request.sh"
 
-const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics"])
+const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics", "code_navigation"])
 const EDIT_TOOLS = new Set(["write", "edit"])
 const SECRET_READER_RE = /(?:^|[;&|\s])(cat|head|tail|base64|sed|awk|grep|egrep|fgrep|rg|ag|nl|tac|rev|cut|tr|fold|expand|paste|column|col|less|more|most|pg|xxd|od|hexdump|strings|base32|uuencode|vi|vim|nvim|nano|ex|view|emacs|dd|cp|mv|install|rsync|ln)(?:\s|$)/
 const GIT_COMMIT_RE = /(?:^|[;&|\s])git\s+commit(?:\s|$)/
@@ -51,7 +56,7 @@ type DiagnosticResult = {
   output: string
 }
 
-async function codeDiagnostics(rawPath: string, cwd: string): Promise<DiagnosticResult> {
+async function syntaxDiagnostics(rawPath: string, cwd: string): Promise<DiagnosticResult> {
   const path = normalizePath(rawPath, cwd)
   const extension = extname(path).toLowerCase()
   let checker: string | undefined
@@ -112,6 +117,17 @@ async function codeDiagnostics(rawPath: string, cwd: string): Promise<Diagnostic
     status: "failed",
     checker,
     output: output || `${checker} exited with status ${result.code}.`,
+  }
+}
+
+function hasDiagnostics(output: string) {
+  try {
+    const value = JSON.parse(output)
+    if (Array.isArray(value)) return value.length > 0
+    if (value && typeof value === "object" && Array.isArray((value as any).items)) return (value as any).items.length > 0
+    return value !== null && value !== undefined
+  } catch {
+    return output.trim() !== "" && output.trim() !== "[]"
   }
 }
 
@@ -270,11 +286,51 @@ async function signal(state: "start" | "working" | "done" | "waiting", title?: s
   await run("bash", [SIGNAL, state], { AGENT_NAME: "Pi", AGENT_TITLE: title ?? "" })
 }
 
-export default function (pi: ExtensionAPI) {
+export interface PiAgentboxDependencies {
+  createLspClient?: typeof createLspClient
+}
+
+export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies = {}) {
+  return function piAgentbox(pi: ExtensionAPI) {
   let cwd = process.cwd()
   let sessionID = ""
   let sessionFile = ""
   let sessionTitle = ""
+  let lastRunFailed = false
+  let lsp: LspClient | undefined
+
+  const pathAllowed = (path: string) => !isSecretPath(path, cwd)
+  const lspClient = () => {
+    lsp ??= (dependencies.createLspClient ?? createLspClient)({ pathGuard: pathAllowed })
+    return lsp
+  }
+
+  const diagnosticsFor = async (rawPath: string, requestCwd: string, signal?: AbortSignal): Promise<DiagnosticResult> => {
+    const path = normalizePath(rawPath, requestCwd)
+    if (isSecretPath(path, requestCwd)) {
+      return { status: "failed", checker: "Agentbox path policy", output: `Sensitive path is not available to diagnostics: ${rawPath}` }
+    }
+
+    const client = lspClient()
+    if (!client.serverForPath(path)) return syntaxDiagnostics(path, requestCwd)
+    const root = findUp(dirname(path), ".git") ?? resolve(requestCwd)
+    try {
+      const result = await client.diagnostics({ path, root, signal })
+      return {
+        status: hasDiagnostics(result.output) ? "failed" : "passed",
+        checker: `LSP (${result.server})`,
+        output: hasDiagnostics(result.output) ? result.output : "No diagnostics.",
+      }
+    } catch (error) {
+      const fallback = await syntaxDiagnostics(path, requestCwd)
+      if (fallback.status !== "unsupported") return fallback
+      return {
+        status: "failed",
+        checker: "LSP",
+        output: `Language server failed and no syntax fallback is available: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
 
   pi.registerTool({
     name: "web_search",
@@ -324,7 +380,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "code_diagnostics",
     label: "Code diagnostics",
-    description: "Check one file for language-server, type, or syntax errors. Supports Go, TypeScript, JavaScript/JSX, Python, Nix, JSON, YAML, HTML, CSS, and shell.",
+    description: "Check one file with a persistent language server when mapped, falling back to deterministic type or syntax checks.",
     promptSnippet: "code_diagnostics: run language-aware diagnostics for one source file",
     parameters: {
       type: "object",
@@ -334,12 +390,71 @@ export default function (pi: ExtensionAPI) {
       },
       required: ["path"],
     },
-    async execute(_toolCallId, params: { path: string }, _signal, _onUpdate, ctx) {
-      const result = await codeDiagnostics(params.path, ctx.cwd)
+    async execute(_toolCallId, params: { path: string }, signal, _onUpdate, ctx) {
+      const result = await diagnosticsFor(params.path, ctx.cwd, signal)
       const text = result.status === "failed"
         ? `<diagnostics checker="${result.checker}">\n${result.output}\n</diagnostics>`
         : `${result.checker ? `${result.checker}: ` : ""}${result.output}`
       return { content: [{ type: "text", text }], details: result }
+    },
+  })
+
+  pi.registerTool({
+    name: "code_navigation",
+    label: "Code navigation",
+    description: "Query the persistent language server for definitions, declarations, type definitions, implementations, references, hover information, or document symbols. Line and character positions are zero-based.",
+    promptSnippet: "code_navigation: navigate source definitions, references, symbols, and hover information through LSP",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", minLength: 1, description: "File path relative to the working directory, or an absolute path" },
+        action: { type: "string", enum: ["definition", "declaration", "typeDefinition", "implementation", "references", "hover", "documentSymbol"] },
+        line: { type: "number", minimum: 0, description: "Zero-based line; omitted only for documentSymbol" },
+        character: { type: "number", minimum: 0, description: "Zero-based character; omitted only for documentSymbol" },
+        includeDeclaration: { type: "boolean", description: "Include declarations in references; defaults to true" },
+      },
+      required: ["path", "action"],
+    },
+    async execute(_toolCallId, params: {
+      path: string
+      action: LspNavigationAction
+      line?: number
+      character?: number
+      includeDeclaration?: boolean
+    }, signal, _onUpdate, ctx) {
+      const path = normalizePath(params.path, ctx.cwd)
+      if (isSecretPath(path, ctx.cwd)) {
+        return {
+          content: [{ type: "text", text: `Code navigation blocked for sensitive path: ${params.path}` }],
+          details: { status: "failed", path: params.path },
+          isError: true,
+        }
+      }
+      const root = findUp(dirname(path), ".git") ?? resolve(ctx.cwd)
+      try {
+        const result = await lspClient().navigate({
+          path,
+          root,
+          action: params.action,
+          signal,
+          includeDeclaration: params.includeDeclaration,
+          ...(params.action === "documentSymbol" ? {} : {
+            position: { line: params.line as number, character: params.character as number },
+          }),
+        })
+        return {
+          content: [{ type: "text", text: result.output }],
+          details: { status: "passed", ...result },
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return {
+          content: [{ type: "text", text: `Code navigation failed: ${message}` }],
+          details: { status: "failed", path: params.path, action: params.action },
+          isError: true,
+        }
+      }
     },
   })
 
@@ -349,6 +464,16 @@ export default function (pi: ExtensionAPI) {
     sessionFile = ctx.sessionManager.getSessionFile() ?? ""
     sessionTitle = ctx.sessionManager.getSessionName() ?? basename(ctx.cwd)
     process.env.PI_SESSION_ID = sessionID
+  })
+
+  pi.on("session_info_changed", async (event, ctx) => {
+    sessionTitle = event.name ?? basename(ctx.cwd)
+  })
+
+  pi.on("session_shutdown", async () => {
+    const client = lsp
+    lsp = undefined
+    await client?.shutdown()
   })
 
   pi.on("before_agent_start", async () => {
@@ -362,9 +487,13 @@ export default function (pi: ExtensionAPI) {
     await signal("working", sessionTitle)
   })
 
-  pi.on("agent_end", async (event, ctx) => {
+  pi.on("agent_end", async (event) => {
     const lastAssistant = [...event.messages].reverse().find((message: any) => message.role === "assistant") as any
-    if (ctx.hasPendingMessages() || lastAssistant?.stopReason === "error") return
+    lastRunFailed = lastAssistant?.stopReason === "error" || lastAssistant?.stopReason === "aborted"
+  })
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (!ctx.isIdle() || lastRunFailed) return
 
     if (process.env.AGENT_HISTORY_REQUESTS_ENABLED === "true" && sessionID && sessionFile) {
       await run("bash", [
@@ -372,7 +501,7 @@ export default function (pi: ExtensionAPI) {
         "resolve",
         "pi",
         sessionID,
-        "agent_end",
+        "agent_settled",
         cwd,
         sessionFile,
         sessionID,
@@ -423,7 +552,7 @@ export default function (pi: ExtensionAPI) {
 
     const normalizedPath = normalizePath(path, ctx.cwd)
     const [diagnostics, tests] = await Promise.all([
-      codeDiagnostics(normalizedPath, ctx.cwd),
+      diagnosticsFor(normalizedPath, ctx.cwd),
       run("bun", [TEST_RUNNER, normalizedPath]),
     ])
     const feedback: Array<{ type: "text"; text: string }> = []
@@ -442,4 +571,7 @@ export default function (pi: ExtensionAPI) {
     }
   })
 
+  }
 }
+
+export default createPiAgentboxExtension()

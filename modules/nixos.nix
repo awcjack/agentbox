@@ -28,6 +28,38 @@
 
 let
   cfg = config.services.agentbox;
+  validMcpServerName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9._-]{0,63}" name != null;
+  validMcpHttpUrl =
+    transport:
+    let
+      url = if transport.url == null then "" else lib.toLower transport.url;
+      hasCredentials = builtins.match "^[a-z]+://[^/?#]*@.*" url != null;
+      isHttps = builtins.match "^https://[^/?#]+([/?].*)?$" url != null;
+      authorityMatch = builtins.match "^[a-z]+://([^/?#]+)([/?].*)?$" url;
+      authority = if authorityMatch == null then "" else builtins.elemAt authorityMatch 0;
+      isLoopback =
+        builtins.match "^(localhost|[^:]+[.]localhost|127[.][0-9]+[.][0-9]+[.][0-9]+)(:[0-9]+)?$" authority
+        != null
+        || builtins.match "^[[]::1[]](:[0-9]+)?$" authority != null;
+      isBlockedLiteral =
+        isLoopback
+        ||
+          builtins.match "^(10[.][0-9]+[.][0-9]+[.][0-9]+|169[.]254[.][0-9]+[.][0-9]+|172[.](1[6-9]|2[0-9]|3[01])[.][0-9]+[.][0-9]+|192[.]168[.][0-9]+[.][0-9]+|168[.]63[.]129[.]16)(:[0-9]+)?$" authority
+          != null
+        ||
+          builtins.match "^(metadata|instance-data|metadata[.]aws[.]internal|metadata[.]google[.]internal)(:[0-9]+)?$" authority
+          != null
+        || builtins.match "^[[](fc|fd|fe[89ab]).*" authority != null;
+      isLoopbackHttp =
+        builtins.match "^http://(localhost|[^/?#]+[.]localhost|127[.][0-9]+[.][0-9]+[.][0-9]+|[[]::1[]])(:[0-9]+)?([/?].*)?$" url
+        != null;
+    in
+    !hasCredentials
+    && builtins.match ".*#.*" url == null
+    && (
+      (isHttps && (!isBlockedLiteral || (transport.allowInsecureLoopback && isLoopback)))
+      || (transport.allowInsecureLoopback && isLoopbackHttp)
+    );
 
   # Effective permission sets: curated defaults + per-host extras. Kept here so
   # settings.json and managed-settings.json stay in lock-step.
@@ -124,6 +156,86 @@ let
   );
   piSettingsJson = pkgs.writeText "pi-settings.json" (builtins.toJSON cfg.settings.piConfig.settings);
   piModelsJson = pkgs.writeText "pi-models.json" (builtins.toJSON cfg.settings.piConfig.models);
+  piWorkflowJson = pkgs.writeText "pi-workflow.json" (
+    builtins.toJSON (
+      cfg.settings.piConfig.workflow
+      // {
+        roles = lib.mapAttrs (
+          _name: role: lib.filterAttrs (_key: value: value != null) role
+        ) cfg.settings.piConfig.workflow.roles;
+      }
+    )
+  );
+  piPolicyValue = {
+    version = 1;
+    defaultDecision = cfg.settings.piConfig.permissions.defaultDecision;
+    timeout = cfg.settings.piConfig.permissions.timeoutMs;
+    rules = cfg.settings.piConfig.permissions.rules;
+  };
+  piPolicyText = builtins.toJSON piPolicyValue;
+  piPolicyJson = pkgs.writeText "agentbox-policy.json" piPolicyText;
+  piMcpServers = lib.mapAttrs (
+    _name: server:
+    {
+      disabled = !server.enable;
+      transport =
+        if server.transport.type == "stdio" then
+          {
+            type = "stdio";
+            command = server.transport.command;
+            args = server.transport.args;
+            env = server.transport.env;
+          }
+          // lib.optionalAttrs (server.transport.cwd != null) { cwd = server.transport.cwd; }
+        else
+          {
+            type = "http";
+            url = server.transport.url;
+            headers = server.transport.headers;
+            allowInsecureLoopback = server.transport.allowInsecureLoopback;
+          };
+      policy = {
+        allow = server.allowedTools;
+        deny = server.deniedTools;
+        approval = server.approval;
+      };
+    }
+    // lib.filterAttrs (_key: value: value != null) server.limits
+  ) cfg.settings.piConfig.mcpServers;
+  piRpcConfig = {
+    host =
+      if cfg.settings.piRpcApi.bindAddress == null then
+        "127.0.0.1"
+      else
+        cfg.settings.piRpcApi.bindAddress;
+    port = cfg.settings.piRpcApi.port;
+    executable = "/bin/pi";
+    allowedOrigins = cfg.settings.piRpcApi.allowedOrigins;
+    auth.tokens = cfg.settings.piRpcApi.auth.tokens;
+    allowedCommands = cfg.settings.piRpcApi.allowedCommands;
+    profiles = lib.mapAttrs (
+      _name: profile:
+      {
+        inherit (profile) cwd args;
+        envReferences = profile.env;
+      }
+      // lib.optionalAttrs (profile.sessionDir != null) { sessionDir = profile.sessionDir; }
+      // lib.optionalAttrs (profile.allowedCommands != null) {
+        allowedCommands = profile.allowedCommands;
+      }
+    ) cfg.settings.piRpcApi.profiles;
+    limits = cfg.settings.piRpcApi.limits;
+  };
+  piRuntimeJson = pkgs.writeText "pi-runtime.json" (
+    builtins.toJSON (
+      {
+        version = 1;
+        defaults = cfg.settings.piConfig.mcpLimits;
+        servers = piMcpServers;
+      }
+      // lib.optionalAttrs cfg.settings.piRpcApi.enable { piRpcApi = piRpcConfig; }
+    )
+  );
 
   gitConfigFile = pkgs.writeText ".gitconfig" cfg.settings.gitConfig;
 
@@ -152,6 +264,11 @@ let
     ENABLE_PI_WEB = lib.boolToString cfg.settings.enablePiWeb;
     PI_WEB_BIND_ADDRESS = "127.0.0.1";
     PI_WEB_PORT = "4097";
+    ENABLE_PI_RPC_API = lib.boolToString cfg.settings.piRpcApi.enable;
+    PI_RPC_PORT = toString cfg.settings.piRpcApi.port;
+    PI_AGENTBOX_RUNTIME_CONFIG = "/etc/agentbox/pi-runtime.json";
+    PI_WORKFLOW_CONFIG = "/etc/agentbox/pi-workflow.json";
+    PI_POLICY_CONFIG = "/etc/pi/agentbox-policy.json";
     ENABLE_CHAT_BRIDGE = "false";
     # Claude Code services
     ENABLE_CLAUDE_CODE = lib.boolToString cfg.settings.enableClaudeCode;
@@ -288,6 +405,61 @@ in
       {
         assertion = !cfg.settings.historyArchive.enable || cfg.settings.historyArchive.hostId != "";
         message = "services.agentbox.settings.historyArchive.hostId must be set when archive requests are enabled";
+      }
+      {
+        assertion = cfg.settings.piConfig.workflow.roles != { };
+        message = "services.agentbox.settings.piConfig.workflow.roles must define at least one role";
+      }
+      {
+        assertion = builtins.stringLength piPolicyText <= 1024 * 1024;
+        message = "services.agentbox.settings.piConfig.permissions generates a policy larger than the 1 MiB runtime limit";
+      }
+      {
+        assertion = !cfg.settings.piRpcApi.enable || cfg.settings.piRpcApi.auth.tokens != [ ];
+        message = "services.agentbox.settings.piRpcApi.auth.tokens must not be empty when the RPC API is enabled";
+      }
+      {
+        assertion = !cfg.settings.piRpcApi.enable || cfg.environmentFile != null;
+        message = "services.agentbox.environmentFile must provide runtime token hashes when the Pi RPC API is enabled";
+      }
+      {
+        assertion = !cfg.settings.piRpcApi.enable || cfg.settings.piRpcApi.profiles != { };
+        message = "services.agentbox.settings.piRpcApi.profiles must not be empty when the RPC API is enabled";
+      }
+      {
+        assertion =
+          !cfg.settings.piRpcApi.enable
+          || cfg.settings.piRpcApi.bindAddress == null
+          || builtins.elem cfg.settings.piRpcApi.bindAddress [
+            "127.0.0.1"
+            "::1"
+            "localhost"
+          ]
+          || cfg.settings.piRpcApi.allowInsecureRemoteAccess;
+        message = "A non-loopback Pi RPC bind requires settings.piRpcApi.allowInsecureRemoteAccess = true; prefer TLS termination on loopback";
+      }
+      {
+        assertion = lib.all (
+          server:
+          (server.transport.type == "stdio" && server.transport.command != null)
+          || (server.transport.type == "http" && validMcpHttpUrl server.transport)
+        ) (lib.attrValues cfg.settings.piConfig.mcpServers);
+        message = "Each Pi MCP stdio server requires a non-empty command; HTTP servers require credential-free HTTPS, except explicit allowInsecureLoopback loopback HTTP URLs";
+      }
+      {
+        assertion =
+          builtins.length (lib.attrNames cfg.settings.piConfig.mcpServers) <= 64
+          && lib.all validMcpServerName (lib.attrNames cfg.settings.piConfig.mcpServers);
+        message = "Pi MCP may define at most 64 servers, named with 1-64 ASCII letters, digits, dots, underscores, or hyphens and starting with a letter or digit";
+      }
+      {
+        assertion = lib.all (
+          server:
+          builtins.length server.transport.args <= 256
+          && builtins.length server.allowedTools <= 256
+          && builtins.length server.deniedTools <= 256
+        ) (lib.attrValues cfg.settings.piConfig.mcpServers);
+        message = "Each Pi MCP server may define at most 256 arguments and 256 allowed/denied tool patterns";
       }
     ];
 
@@ -460,6 +632,9 @@ in
         # add preferences but cannot disable the reviewer or secret-path denies.
         "${cfg.dataDir}/managed/codex-requirements.toml:/etc/codex/requirements.toml:ro"
         "${cfg.dataDir}/managed/opencode.json:/etc/opencode/opencode.json:ro"
+        "${cfg.dataDir}/managed/pi-policy.json:/etc/pi/agentbox-policy.json:ro"
+        "${cfg.dataDir}/managed/pi-workflow.json:/etc/agentbox/pi-workflow.json:ro"
+        "${cfg.dataDir}/managed/pi-runtime.json:/etc/agentbox/pi-runtime.json:ro"
         "${cfg.dataDir}/home/.claude:/home/agent/.claude"
         "${cfg.dataDir}/home/.codex:/home/agent/.codex"
         "${cfg.dataDir}/home/.config/opencode:/home/agent/.config/opencode"
@@ -698,6 +873,25 @@ in
                         cp -f ${opencodeManagedConfigJson} "${cfg.dataDir}/managed/opencode.json"
                         chown root:root "${cfg.dataDir}/managed/opencode.json"
                         chmod 644 "${cfg.dataDir}/managed/opencode.json"
+
+                        # Pi's workflow, runtime, and final policy inputs are immutable
+                        # read-only mounts. MCP env/header strings are treated as
+                        # runtime identifiers; keep actual secret values out of this
+                        # Nix-generated JSON and in environmentFile.
+                        for managed_pi_file in pi-policy.json pi-workflow.json pi-runtime.json; do
+                          if [ -d "${cfg.dataDir}/managed/$managed_pi_file" ]; then
+                            ${pkgs.coreutils}/bin/rm -rf -- "${cfg.dataDir}/managed/$managed_pi_file"
+                          fi
+                        done
+                        cp -f ${piPolicyJson} "${cfg.dataDir}/managed/pi-policy.json"
+                        cp -f ${piWorkflowJson} "${cfg.dataDir}/managed/pi-workflow.json"
+                        cp -f ${piRuntimeJson} "${cfg.dataDir}/managed/pi-runtime.json"
+                        chown root:root "${cfg.dataDir}/managed/pi-policy.json" \
+                          "${cfg.dataDir}/managed/pi-workflow.json" \
+                          "${cfg.dataDir}/managed/pi-runtime.json"
+                        chmod 644 "${cfg.dataDir}/managed/pi-policy.json" \
+                          "${cfg.dataDir}/managed/pi-workflow.json" \
+                          "${cfg.dataDir}/managed/pi-runtime.json"
 
                         # Preserve OpenCode-owned/global keys while reasserting all
                         # declarative settings and permission denies.

@@ -25,6 +25,38 @@
 
 let
   cfg = config.services.agentbox;
+  validMcpServerName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9._-]{0,63}" name != null;
+  validMcpHttpUrl =
+    transport:
+    let
+      url = if transport.url == null then "" else lib.toLower transport.url;
+      hasCredentials = builtins.match "^[a-z]+://[^/?#]*@.*" url != null;
+      isHttps = builtins.match "^https://[^/?#]+([/?].*)?$" url != null;
+      authorityMatch = builtins.match "^[a-z]+://([^/?#]+)([/?].*)?$" url;
+      authority = if authorityMatch == null then "" else builtins.elemAt authorityMatch 0;
+      isLoopback =
+        builtins.match "^(localhost|[^:]+[.]localhost|127[.][0-9]+[.][0-9]+[.][0-9]+)(:[0-9]+)?$" authority
+        != null
+        || builtins.match "^[[]::1[]](:[0-9]+)?$" authority != null;
+      isBlockedLiteral =
+        isLoopback
+        ||
+          builtins.match "^(10[.][0-9]+[.][0-9]+[.][0-9]+|169[.]254[.][0-9]+[.][0-9]+|172[.](1[6-9]|2[0-9]|3[01])[.][0-9]+[.][0-9]+|192[.]168[.][0-9]+[.][0-9]+|168[.]63[.]129[.]16)(:[0-9]+)?$" authority
+          != null
+        ||
+          builtins.match "^(metadata|instance-data|metadata[.]aws[.]internal|metadata[.]google[.]internal)(:[0-9]+)?$" authority
+          != null
+        || builtins.match "^[[](fc|fd|fe[89ab]).*" authority != null;
+      isLoopbackHttp =
+        builtins.match "^http://(localhost|[^/?#]+[.]localhost|127[.][0-9]+[.][0-9]+[.][0-9]+|[[]::1[]])(:[0-9]+)?([/?].*)?$" url
+        != null;
+    in
+    !hasCredentials
+    && builtins.match ".*#.*" url == null
+    && (
+      (isHttps && (!isBlockedLiteral || (transport.allowInsecureLoopback && isLoopback)))
+      || (transport.allowInsecureLoopback && isLoopbackHttp)
+    );
 
   # Effective permission sets: curated defaults + per-host extras. Kept here so
   # settings.json and managed-settings.json stay in lock-step.
@@ -121,6 +153,86 @@ let
   );
   piSettingsJson = pkgs.writeText "pi-settings.json" (builtins.toJSON cfg.settings.piConfig.settings);
   piModelsJson = pkgs.writeText "pi-models.json" (builtins.toJSON cfg.settings.piConfig.models);
+  piWorkflowJson = pkgs.writeText "pi-workflow.json" (
+    builtins.toJSON (
+      cfg.settings.piConfig.workflow
+      // {
+        roles = lib.mapAttrs (
+          _name: role: lib.filterAttrs (_key: value: value != null) role
+        ) cfg.settings.piConfig.workflow.roles;
+      }
+    )
+  );
+  piPolicyValue = {
+    version = 1;
+    defaultDecision = cfg.settings.piConfig.permissions.defaultDecision;
+    timeout = cfg.settings.piConfig.permissions.timeoutMs;
+    rules = cfg.settings.piConfig.permissions.rules;
+  };
+  piPolicyText = builtins.toJSON piPolicyValue;
+  piPolicyJson = pkgs.writeText "agentbox-policy.json" piPolicyText;
+  piMcpServers = lib.mapAttrs (
+    _name: server:
+    {
+      disabled = !server.enable;
+      transport =
+        if server.transport.type == "stdio" then
+          {
+            type = "stdio";
+            command = server.transport.command;
+            args = server.transport.args;
+            env = server.transport.env;
+          }
+          // lib.optionalAttrs (server.transport.cwd != null) { cwd = server.transport.cwd; }
+        else
+          {
+            type = "http";
+            url = server.transport.url;
+            headers = server.transport.headers;
+            allowInsecureLoopback = server.transport.allowInsecureLoopback;
+          };
+      policy = {
+        allow = server.allowedTools;
+        deny = server.deniedTools;
+        approval = server.approval;
+      };
+    }
+    // lib.filterAttrs (_key: value: value != null) server.limits
+  ) cfg.settings.piConfig.mcpServers;
+  piRpcConfig = {
+    host =
+      if cfg.settings.piRpcApi.bindAddress == null then
+        "127.0.0.1"
+      else
+        cfg.settings.piRpcApi.bindAddress;
+    port = cfg.settings.piRpcApi.port;
+    executable = "/bin/pi";
+    allowedOrigins = cfg.settings.piRpcApi.allowedOrigins;
+    auth.tokens = cfg.settings.piRpcApi.auth.tokens;
+    allowedCommands = cfg.settings.piRpcApi.allowedCommands;
+    profiles = lib.mapAttrs (
+      _name: profile:
+      {
+        inherit (profile) cwd args;
+        envReferences = profile.env;
+      }
+      // lib.optionalAttrs (profile.sessionDir != null) { sessionDir = profile.sessionDir; }
+      // lib.optionalAttrs (profile.allowedCommands != null) {
+        allowedCommands = profile.allowedCommands;
+      }
+    ) cfg.settings.piRpcApi.profiles;
+    limits = cfg.settings.piRpcApi.limits;
+  };
+  piRuntimeJson = pkgs.writeText "pi-runtime.json" (
+    builtins.toJSON (
+      {
+        version = 1;
+        defaults = cfg.settings.piConfig.mcpLimits;
+        servers = piMcpServers;
+      }
+      // lib.optionalAttrs cfg.settings.piRpcApi.enable { piRpcApi = piRpcConfig; }
+    )
+  );
 
   gitConfigFile = pkgs.writeText ".gitconfig" cfg.settings.gitConfig;
   tmuxConfigFile = pkgs.writeText ".tmux.conf" cfg.settings.tmuxConfig;
@@ -158,6 +270,11 @@ let
         # container loopback is not consistently reachable from macOS.
         PI_WEB_BIND_ADDRESS = "0.0.0.0";
         PI_WEB_PORT = "4097";
+        ENABLE_PI_RPC_API = lib.boolToString cfg.settings.piRpcApi.enable;
+        PI_RPC_PORT = toString cfg.settings.piRpcApi.port;
+        PI_AGENTBOX_RUNTIME_CONFIG = "/etc/agentbox/pi-runtime.json";
+        PI_WORKFLOW_CONFIG = "/etc/agentbox/pi-workflow.json";
+        PI_POLICY_CONFIG = "/etc/pi/agentbox-policy.json";
         ENABLE_CHAT_BRIDGE = "false";
         # Claude Code services
         ENABLE_CLAUDE_CODE = lib.boolToString cfg.settings.enableClaudeCode;
@@ -216,6 +333,9 @@ let
       # Codex managed requirements enforce the reviewer and secret-path policy.
       "-v ${cfg.dataDir}/managed/codex-requirements.toml:/etc/codex/requirements.toml:ro"
       "-v ${cfg.dataDir}/managed/opencode.json:/etc/opencode/opencode.json:ro"
+      "-v ${cfg.dataDir}/managed/pi-policy.json:/etc/pi/agentbox-policy.json:ro"
+      "-v ${cfg.dataDir}/managed/pi-workflow.json:/etc/agentbox/pi-workflow.json:ro"
+      "-v ${cfg.dataDir}/managed/pi-runtime.json:/etc/agentbox/pi-runtime.json:ro"
       "-v ${cfg.dataDir}/home/.config/opencode:/home/agent/.config/opencode"
       "-v ${cfg.dataDir}/home/.pi:/home/agent/.pi"
       "-v ${cfg.dataDir}/home/.local/share/opencode:/home/agent/.local/share/opencode"
@@ -268,13 +388,12 @@ let
     ++ lib.optional cfg.settings.hardening.noNewPrivileges "--security-opt no-new-privileges"
   );
 
-  healthCommand =
-    if cfg.settings.enableOpencode then
-      ''curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health || exit 1''
-    else if cfg.settings.enablePiWeb then
-      ''password="$PI_WEB_PASSWORD"; [ -n "$password" ] || password="$OPENCODE_PASSWORD"; curl -fsS -u "pi:$password" http://127.0.0.1:4097/ >/dev/null || exit 1''
-    else
-      "true";
+  healthCommand = lib.concatStringsSep " && " (
+    [ "true" ]
+    ++ lib.optional cfg.settings.enableOpencode ''(curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health >/dev/null)''
+    ++ lib.optional cfg.settings.enablePiWeb ''(password="$PI_WEB_PASSWORD"; [ -n "$password" ] || password="$OPENCODE_PASSWORD"; curl -fsS -u "pi:$password" http://127.0.0.1:4097/ >/dev/null)''
+    ++ lib.optional cfg.settings.piRpcApi.enable "(curl -fsS http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready >/dev/null)"
+  );
 
   # Click-to-jump handler — runs ONLY when you click an Agentbox notification
   # (terminal-notifier -execute). $1 is the "session:window" tmux target the hook
@@ -483,6 +602,7 @@ let
       echo "Agentbox started!"
       echo "  OpenCode: http://localhost:4096"
       ${lib.optionalString cfg.settings.enablePiWeb ''echo "  Pi:       http://localhost:4097"''}
+      ${lib.optionalString cfg.settings.piRpcApi.enable ''echo "  Pi RPC:   http://localhost:${toString cfg.settings.piRpcApi.port}"''}
       echo ""
       echo "Use 'agentbox shell' to access the container"
     }
@@ -581,6 +701,17 @@ let
       ensure_container_running
       echo "Pi web interface: http://localhost:4097"
       echo "Basic Auth username: pi"
+    }
+
+    cmd_pi_rpc() {
+      check_docker
+      ensure_container_running
+      echo "Pi RPC API: http://localhost:${toString cfg.settings.piRpcApi.port}"
+      if ! docker exec "$CONTAINER_NAME" curl -fsS "http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready"; then
+        echo "Pi RPC API is not healthy (settings.piRpcApi.enable=${lib.boolToString cfg.settings.piRpcApi.enable})." >&2
+        return 1
+      fi
+      echo
     }
 
     cmd_claude() {
@@ -793,6 +924,7 @@ let
       opencode    Start OpenCode in a tmux session
       pi          Start Pi in a tmux session
       pi-web      Show the Pi browser interface URL
+      pi-rpc      Show and check the Pi RPC API endpoint
       claude      Attach to the Claude Code tmux session
       pause       Freeze container processes without losing tmux sessions
       resume      Resume a paused container
@@ -818,6 +950,7 @@ let
       opencode)   cmd_opencode ;;
       pi)         cmd_pi ;;
       pi-web)     cmd_pi_web ;;
+      pi-rpc)     cmd_pi_rpc ;;
       claude)     cmd_claude ;;
       pause)      cmd_pause ;;
       resume)     cmd_resume ;;
@@ -893,6 +1026,61 @@ in
       {
         assertion = !cfg.settings.historyArchive.enable || cfg.settings.historyArchive.hostId != "";
         message = "services.agentbox.settings.historyArchive.hostId must be set when archive requests are enabled";
+      }
+      {
+        assertion = cfg.settings.piConfig.workflow.roles != { };
+        message = "services.agentbox.settings.piConfig.workflow.roles must define at least one role";
+      }
+      {
+        assertion = builtins.stringLength piPolicyText <= 1024 * 1024;
+        message = "services.agentbox.settings.piConfig.permissions generates a policy larger than the 1 MiB runtime limit";
+      }
+      {
+        assertion = !cfg.settings.piRpcApi.enable || cfg.settings.piRpcApi.auth.tokens != [ ];
+        message = "services.agentbox.settings.piRpcApi.auth.tokens must not be empty when the RPC API is enabled";
+      }
+      {
+        assertion = !cfg.settings.piRpcApi.enable || cfg.environmentFile != null;
+        message = "services.agentbox.environmentFile must provide runtime token hashes when the Pi RPC API is enabled";
+      }
+      {
+        assertion = !cfg.settings.piRpcApi.enable || cfg.settings.piRpcApi.profiles != { };
+        message = "services.agentbox.settings.piRpcApi.profiles must not be empty when the RPC API is enabled";
+      }
+      {
+        assertion =
+          !cfg.settings.piRpcApi.enable
+          || cfg.settings.piRpcApi.bindAddress == null
+          || builtins.elem cfg.settings.piRpcApi.bindAddress [
+            "127.0.0.1"
+            "::1"
+            "localhost"
+          ]
+          || cfg.settings.piRpcApi.allowInsecureRemoteAccess;
+        message = "A non-loopback Pi RPC bind requires settings.piRpcApi.allowInsecureRemoteAccess = true; prefer TLS termination on loopback";
+      }
+      {
+        assertion = lib.all (
+          server:
+          (server.transport.type == "stdio" && server.transport.command != null)
+          || (server.transport.type == "http" && validMcpHttpUrl server.transport)
+        ) (lib.attrValues cfg.settings.piConfig.mcpServers);
+        message = "Each Pi MCP stdio server requires a non-empty command; HTTP servers require credential-free HTTPS, except explicit allowInsecureLoopback loopback HTTP URLs";
+      }
+      {
+        assertion =
+          builtins.length (lib.attrNames cfg.settings.piConfig.mcpServers) <= 64
+          && lib.all validMcpServerName (lib.attrNames cfg.settings.piConfig.mcpServers);
+        message = "Pi MCP may define at most 64 servers, named with 1-64 ASCII letters, digits, dots, underscores, or hyphens and starting with a letter or digit";
+      }
+      {
+        assertion = lib.all (
+          server:
+          builtins.length server.transport.args <= 256
+          && builtins.length server.allowedTools <= 256
+          && builtins.length server.deniedTools <= 256
+        ) (lib.attrValues cfg.settings.piConfig.mcpServers);
+        message = "Each Pi MCP server may define at most 256 arguments and 256 allowed/denied tool patterns";
       }
     ];
 
@@ -1089,6 +1277,21 @@ in
             # OpenCode loads /etc/opencode after user and project config.
             cp -f "${opencodeManagedConfigJson}" "${cfg.dataDir}/managed/opencode.json"
             chmod 644 "${cfg.dataDir}/managed/opencode.json"
+
+            # Pi managed workflow/runtime/policy files. MCP env/header strings
+            # are treated as runtime identifiers; keep actual secret values out
+            # of this Nix-generated JSON and in environmentFile.
+            for managed_pi_file in pi-policy.json pi-workflow.json pi-runtime.json; do
+              if [ -d "${cfg.dataDir}/managed/$managed_pi_file" ]; then
+                rm -rf -- "${cfg.dataDir}/managed/$managed_pi_file"
+              fi
+            done
+            cp -f "${piPolicyJson}" "${cfg.dataDir}/managed/pi-policy.json"
+            cp -f "${piWorkflowJson}" "${cfg.dataDir}/managed/pi-workflow.json"
+            cp -f "${piRuntimeJson}" "${cfg.dataDir}/managed/pi-runtime.json"
+            chmod 644 "${cfg.dataDir}/managed/pi-policy.json" \
+              "${cfg.dataDir}/managed/pi-workflow.json" \
+              "${cfg.dataDir}/managed/pi-runtime.json"
 
             # Copy hooks from hooksDir if specified
             ${
@@ -1430,6 +1633,12 @@ in
             chmod 644 "${cfg.dataDir}/managed/codex-requirements.toml" 2>/dev/null || true
             chown root:wheel "${cfg.dataDir}/managed/opencode.json" 2>/dev/null || true
             chmod 644 "${cfg.dataDir}/managed/opencode.json" 2>/dev/null || true
+            chown root:wheel "${cfg.dataDir}/managed/pi-policy.json" \
+              "${cfg.dataDir}/managed/pi-workflow.json" \
+              "${cfg.dataDir}/managed/pi-runtime.json" 2>/dev/null || true
+            chmod 644 "${cfg.dataDir}/managed/pi-policy.json" \
+              "${cfg.dataDir}/managed/pi-workflow.json" \
+              "${cfg.dataDir}/managed/pi-runtime.json" 2>/dev/null || true
 
             echo "Agentbox setup complete. Run 'agentbox load-image' to load the Docker image."
     '';

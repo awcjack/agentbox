@@ -2,22 +2,47 @@ import { strict as assert } from "node:assert"
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import extension from "../extensions/pi-agentbox.ts"
+import { createPiAgentboxExtension } from "../extensions/pi-agentbox.ts"
 
 type Handler = (event: any, ctx: any) => Promise<any> | any
 
-const handlers = new Map<string, Handler>()
+const handlers = new Map<string, Handler[]>()
 const tools = new Map<string, any>()
+let lspCreated = 0
+let lspClosed = 0
+const lspRequests: any[] = []
 const pi = {
   on(name: string, handler: Handler) {
-    handlers.set(name, handler)
+    handlers.set(name, [...(handlers.get(name) ?? []), handler])
   },
   registerTool(tool: any) {
     tools.set(tool.name, tool)
   },
 } as any
 
-extension(pi)
+createPiAgentboxExtension({
+  createLspClient: (() => {
+    lspCreated++
+    return {
+      serverForPath: (path: string) => path.endsWith(".js") ? { id: "test-lsp" } : undefined,
+      diagnostics: async (request: any) => {
+        lspRequests.push({ type: "diagnostics", ...request })
+        return {
+          server: "test-lsp",
+          root: request.root,
+          action: "diagnostics",
+          output: request.path.endsWith("bad.js") ? JSON.stringify([{ message: "broken declaration" }]) : "[]",
+          truncated: false,
+        }
+      },
+      navigate: async (request: any) => {
+        lspRequests.push({ type: "navigation", ...request })
+        return { server: "test-lsp", root: request.root, action: request.action, output: "definition result", truncated: false }
+      },
+      shutdown: async () => { lspClosed++ },
+    }
+  }) as any,
+})(pi)
 
 const root = mkdtempSync(join(tmpdir(), "pi-agentbox-test-"))
 mkdirSync(join(root, "src"))
@@ -26,9 +51,10 @@ writeFileSync(join(root, "src", "bad.js"), "const = broken\n")
 writeFileSync(join(root, "src", "good.js"), "const answer = 42\n")
 const ctx = { cwd: root }
 
-const toolCall = handlers.get("tool_call")!
-const toolResult = handlers.get("tool_result")!
-const sessionStart = handlers.get("session_start")!
+const handler = (name: string) => handlers.get(name)![0]
+const toolCall = handler("tool_call")
+const toolResult = handler("tool_result")
+const sessionStart = handler("session_start")
 
 await sessionStart({}, {
   cwd: root,
@@ -39,6 +65,8 @@ await sessionStart({}, {
   },
 })
 assert.equal(process.env.PI_SESSION_ID, "pi-session-test")
+assert.equal(handlers.has("session_info_changed"), true)
+assert.equal(handlers.has("agent_settled"), true)
 
 assert.match(
   (await toolCall({ toolName: "read", input: { path: ".env" } }, ctx)).reason,
@@ -67,7 +95,8 @@ assert.match(
 )
 assert.equal(await toolCall({ toolName: "bash", input: { command: "go test ./..." } }, ctx), undefined)
 
-assert.deepEqual([...tools.keys()], ["web_search", "web_fetch", "code_diagnostics"])
+assert.deepEqual([...tools.keys()], ["web_search", "web_fetch", "code_diagnostics", "code_navigation"])
+assert.equal(lspCreated, 0, "the persistent LSP client must be initialized lazily")
 assert.match(
   (await toolCall({ toolName: "code_diagnostics", input: { path: ".env" } }, ctx)).reason,
   /sensitive path/,
@@ -79,6 +108,22 @@ assert.match(diagnostics.content[0].text, /diagnostics/)
 const validDiagnostics = await tools.get("code_diagnostics").execute("diagnostics", { path: "src/good.js" }, undefined, undefined, ctx)
 assert.equal(validDiagnostics.details.status, "passed")
 assert.match(validDiagnostics.content[0].text, /No diagnostics/)
+assert.equal(lspCreated, 1)
+assert.equal(lspRequests.filter((request) => request.type === "diagnostics").length, 2)
+
+const navigation = await tools.get("code_navigation").execute("navigation", {
+  path: "src/good.js",
+  action: "definition",
+  line: 0,
+  character: 6,
+}, undefined, undefined, ctx)
+assert.equal(navigation.details.server, "test-lsp")
+assert.match(navigation.content[0].text, /definition result/)
+assert.deepEqual(lspRequests.at(-1).position, { line: 0, character: 6 })
+assert.match(
+  (await toolCall({ toolName: "code_navigation", input: { path: ".env", action: "documentSymbol" } }, ctx)).reason,
+  /sensitive path/,
+)
 
 const editResult = await toolResult({
   toolName: "write",
@@ -126,5 +171,8 @@ assert.equal(requestedUrl, "https://r.jina.ai/https://example.com/docs")
 assert.match(fetched.content[0].text, /citation/)
 globalThis.fetch = originalFetch
 if (originalJinaKey) process.env.JINA_API_KEY = originalJinaKey
+
+await handler("session_shutdown")({}, ctx)
+assert.equal(lspClosed, 1)
 
 console.log("pi agentbox extension tests passed")

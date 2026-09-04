@@ -16,6 +16,8 @@ on:
       - "neovim.nix"
       - "package.nix"
       - "extensions/**"
+      - "runtime/**"
+      - "rpc-runtime/**"
       - "skills/**"
       - "scripts/**"
       - "tests/**"
@@ -29,6 +31,8 @@ on:
       - "neovim.nix"
       - "package.nix"
       - "extensions/**"
+      - "runtime/**"
+      - "rpc-runtime/**"
       - "skills/**"
       - "scripts/**"
       - "tests/**"
@@ -69,10 +73,23 @@ jobs:
       - name: Flake metadata (sanity)
         run: nix flake show --no-update-lock-file
 
-      - name: Test archive requests
+      - name: Evaluate flake
+        run: nix flake check --no-build --no-update-lock-file
+
+      - name: Run focused tests
         run: |
-          nix build .#packages.x86_64-linux.agent-archive-request-test --no-update-lock-file
-          nix build .#packages.x86_64-linux.pi-agentbox-extension-test --no-update-lock-file
+          for test in \
+            agent-archive-request-test \
+            pi-agentbox-extension-test \
+            pi-workflow-extension-test \
+            pi-policy-extension-test \
+            pi-lsp-client-test \
+            pi-mcp-runtime-test \
+            pi-rpc-runtime-test \
+            pi-agentbox-mcp-runtime \
+            agentbox-pi-rpc-runtime; do
+            nix build ".#packages.x86_64-linux.$test" --print-build-logs --no-update-lock-file
+          done
 
       - name: Build agentbox image
         run: |
