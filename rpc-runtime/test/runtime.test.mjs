@@ -502,9 +502,9 @@ test("runtime supervisor bounds logs and stops a crash loop", async (t) => {
   const runtimePath = join(directory, "runtime.sh");
   const countPath = join(directory, "count");
   const logPath = join(directory, "runtime.log");
-  await writeFile(runtimePath, `#!/usr/bin/env bash\nprintf x >> ${JSON.stringify(countPath)}\nprintf '%s\\n' '${"x".repeat(2048)}'\nexit 7\n`);
-  await chmod(runtimePath, 0o755);
   const bash = process.env.TEST_BASH ?? "/bin/bash";
+  await writeFile(runtimePath, `#!${bash}\nprintf x >> ${JSON.stringify(countPath)}\nprintf '%s\\n' '${"x".repeat(2048)}'\nexit 7\n`);
+  await chmod(runtimePath, 0o755);
   const result = spawnSync(bash, [new URL("../supervise.sh", import.meta.url).pathname], {
     encoding: "utf8",
     env: {
