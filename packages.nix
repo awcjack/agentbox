@@ -10,6 +10,7 @@
 # the call site with `.override` (see README.md → "Advanced").
 {
   pkgs,
+  opencode ? pkgs.opencode,
   pi-coding-agent ? pkgs.pi-coding-agent,
 }:
 
@@ -31,15 +32,16 @@ in
     pi-agentbox-mcp-runtime
     ;
 
-  # The OCI image. Linux-only (docker images are Linux). Codex and OpenCode are
-  # auto-filled from nixpkgs; Pi is supplied above so it can track current
-  # nixpkgs independently. Any further agents stay null.
+  # The OCI image. Linux-only (docker images are Linux). Codex is auto-filled
+  # from nixpkgs; OpenCode and Pi are supplied above so they can be pinned
+  # independently. Any further agents stay null.
   agentboxImage =
     if isLinux then
       pkgs.callPackage ./image.nix {
         inherit
           agentbox-neovim
           agentbox-pi-rpc-runtime
+          opencode
           pi-agentbox-mcp-runtime
           pi-coding-agent
           ;

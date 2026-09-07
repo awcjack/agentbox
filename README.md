@@ -11,20 +11,21 @@ It ships a full dev toolchain in an OCI container and runs **Claude Code**,
 - **`nixosModules.agentbox`** / **`darwinModules.agentbox`** — run it as a
   systemd `oci-containers` service (NixOS) or via manual management (macOS).
 
-It depends on **nothing but `nixpkgs`**. No private inputs; Codex, OpenCode, and
-Pi come from nixpkgs, while Claude Code uses Anthropic's runtime installer.
+It has no private inputs. Codex comes from the stable nixpkgs base, OpenCode is
+pinned to its upstream flake, Pi comes from unstable nixpkgs, and Claude Code
+uses Anthropic's runtime installer.
 
 ## The agents
 
 | Agent | How it gets into the box | Toggle (default) |
 |---|---|---|
 | **Codex** | bundled in the image from nixpkgs (`codex`) | `settings.enableCodex` (false) |
-| **OpenCode** | bundled in the image from nixpkgs (`opencode`) | `settings.enableOpencode` (true) |
+| **OpenCode** | bundled from the pinned upstream OpenCode flake | `settings.enableOpencode` (true) |
 | **Pi** | bundled in the image from nixpkgs (`pi-coding-agent`) | `settings.enablePi` (true; availability toggle) |
 | **Claude Code** | installed at container start by Anthropic's native installer (self-updates) | `settings.enableClaudeCode` (false) + `claudeCodeVersion` |
 
-All four are first-class: Codex, OpenCode, and Pi are baked into the image from
-nixpkgs; Claude Code is runtime-installed so its own updater keeps it current.
+All four are first-class: Codex, OpenCode, and Pi are baked into the image;
+Claude Code is runtime-installed so its own updater keeps it current.
 Each toggle sets the matching `ENABLE_*` env the entrypoint reads. Provide
 credentials through the secret `environmentFile` (e.g. `OPENAI_API_KEY` for
 Codex, `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code).

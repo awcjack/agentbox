@@ -63,8 +63,8 @@
   bun,
   python312,
   uv,
-  # AI coding CLIs bundled from nixpkgs (Codex + OpenCode + Pi). Claude Code is NOT a
-  # Nix package — the entrypoint installs it at runtime via Anthropic's native
+  # AI coding CLIs bundled with Nix. Claude Code is NOT a Nix package; the
+  # entrypoint installs it at runtime via Anthropic's native
   # installer (CLAUDE_CODE_VERSION) so its self-updater keeps it current.
   codex,
   opencode,
