@@ -456,6 +456,37 @@ test("shutdown detaches backpressured streams before Pi emits its final events",
   assert.equal(session.writeSse(client, ": cannot write after end\n\n"), false);
 });
 
+test("idle SSE subscriptions send body bytes immediately without advancing the replay cursor", async (t) => {
+  const { baseUrl, runtime } = await fixture(t, config({ limits: { sseHeartbeatMs: 60_000 } }));
+  const id = await createSession(baseUrl);
+  const session = runtime.sessions.get(id);
+  const cursor = session.metadata().latestEventId;
+  assert.equal(cursor, 1);
+  // There is nothing to replay. Both initial attachment and reconnection must
+  // yield a body without waiting for Pi activity or the periodic heartbeat.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1000);
+    try {
+      const response = await fetch(`${baseUrl}/v1/sessions/${id}/events?after=${cursor}`, {
+        headers: { Authorization: `Bearer ${TOKEN}` }, signal: controller.signal,
+      });
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type"), /text\/event-stream/);
+      const reader = response.body.getReader();
+      const first = await reader.read();
+      assert.equal(first.done, false);
+      assert.equal(new TextDecoder().decode(first.value), ": connected\n\n");
+      assert.equal(session.metadata().latestEventId, cursor);
+      assert.equal(session.events.records.length, 1);
+      await reader.cancel();
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+    }
+  }
+});
+
 test("SSE tolerates ordinary write backpressure and bounds a stalled client's buffer", async (t) => {
   const { baseUrl, runtime } = await fixture(t, config({ limits: { maxRecordBytes: 256 * 1024, maxEventBytes: 256 * 1024 } }));
   const id = await createSession(baseUrl);
@@ -471,11 +502,12 @@ test("SSE tolerates ordinary write backpressure and bounds a stalled client's bu
   session.addSseClient(client, 0);
   assert.equal(session.clients.has(client), true);
   assert.equal(client.destroyed, false);
-  assert.equal(frames.length, 2);
+  assert.equal(frames[0], ": connected\n\n");
+  assert.equal(frames.length, 3);
   // Model a drain, then verify live delivery remains connected.
   client.writableLength = 0;
   session.publish({ type: "agent_end" });
-  assert.equal(frames.length, 3);
+  assert.equal(frames.length, 4);
   assert.equal(client.destroyed, false);
   client.writableLength = 512 * 1024;
   session.publish({ type: "agent_start" });

@@ -732,6 +732,8 @@ class Session extends EventEmitter {
     if (this.clients.size >= this.config.limits.maxSseClients) {
       throw new HttpError(429, "too_many_streams", "too many event streams are open for this session");
     }
+    // Some browser/proxy paths buffer header-only responses until body data arrives.
+    if (!this.writeSse(response, ": connected\n\n")) return;
     const oldest = this.events.records[0]?.id ?? this.events.nextId;
     if (afterId > 0 && afterId < oldest - 1) {
       if (!this.writeSse(response, `event: reset\ndata: ${JSON.stringify({ oldestEventId: oldest })}\n\n`)) return;

@@ -82,6 +82,7 @@ const server = createServer(async (request, response) => {
     if (match[2] === "events") {
       session.subscriptions++;
       response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" }); response.flushHeaders();
+      response.write(": connected\n\n");
       for (const event of session.events) if (event.id > Number(url.searchParams.get("after") || 0)) response.write(event.frame);
       session.clients.add(response); response.on("close", () => session.clients.delete(response)); return;
     }
@@ -122,7 +123,9 @@ const server = createServer(async (request, response) => {
       if (body.message === "delayed acceptance") await new Promise((resolve) => { session.releasePrompt = resolve; });
     } else throw new Error(`Unhandled fixture command ${body.type}`);
     const result = { type: "response", command: body.type, success: true, ...(data === undefined ? {} : { data }) };
-    emit(session, result); json(response, 200, result);
+    // Match the supervisor: read snapshots are HTTP-only, not SSE replay data.
+    if (!["get_state", "get_messages", "get_available_models"].includes(body.type)) emit(session, result);
+    json(response, 200, result);
   } catch (error) { serverErrors.push(error.stack); if (!response.headersSent) json(response, 500, { error: { message: error.message } }); else response.destroy(); }
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));

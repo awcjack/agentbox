@@ -161,7 +161,12 @@ Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and
 pending UI requests. Accepted answers publish `extension_ui_resolved` supervisor
 events so other browser tabs remove the same request.
 
-SSE records use monotonically increasing IDs. Reconnect with `Last-Event-ID` or
+SSE records use monotonically increasing IDs.
+Each authenticated subscription immediately sends a `: connected` SSE comment,
+even when there is nothing to replay. This supplies body bytes without waiting
+for Pi activity or the periodic heartbeat and does not advance the event cursor.
+
+Reconnect with `Last-Event-ID` or
 `?after=<id>`. If the requested cursor predates the bounded ring, the first SSE
 message is a `reset` event containing `oldestEventId`.
 Read-command responses travel over HTTP only, not the SSE replay ring. Capture
