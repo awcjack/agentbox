@@ -441,8 +441,10 @@ async function runSession(ctx) {
     });
   }
 }
-function activate(meta) {
+function activate(meta, { reconnect = false } = {}) {
   if (records.get(meta.id)?.ending) return;
+  // Selecting the current conversation is navigation, not a reconnect request.
+  if (!reconnect && current?.id === meta.id && active(current)) { drawer(false); return; }
   selection++;
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, ready: false, online: false, cursor: 0 };
@@ -646,7 +648,11 @@ $("logout").addEventListener("click", () => logout());
 $("new-session").addEventListener("click", openNew);
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
 $("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ profile: $("new-profile").value, ...(name ? { name } : {}) }); });
-$("refresh-sessions").addEventListener("click", () => { refreshSessions(); if (current) activate(current.meta); });
+$("refresh-sessions").addEventListener("click", () => {
+  refreshSessions();
+  if (current?.online && current.ready) requestRefresh(current);
+  else if (current) activate(current.meta, { reconnect: true });
+});
 $("profile-filter").addEventListener("change", () => { renderSessions(); refreshSessions(); });
 $("dismiss-notice").addEventListener("click", () => { showNotice(""); if (current) current.record.notice = null; });
 $("open-drawer").addEventListener("click", () => drawer(true));
@@ -669,6 +675,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key.toLowerCase() === "n" && !event.ctrlKey && !event.altKey && !event.metaKey && !event.target.closest("input, textarea, select, [contenteditable], dialog")) openNew();
 });
 window.addEventListener("offline", () => { if (current) { current.online = false; current.streamController?.abort(); updateControls(); } setNetwork("reconnecting", "Offline"); });
-window.addEventListener("online", () => { if (token) { if (current) activate(current.meta); else setNetwork("online", "Connected"); refreshSessions(); } });
+window.addEventListener("online", () => { if (token) { if (current) activate(current.meta, { reconnect: true }); else setNetwork("online", "Connected"); refreshSessions(); } });
 window.addEventListener("pagehide", () => logout());
 logout();

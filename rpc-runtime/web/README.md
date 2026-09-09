@@ -72,8 +72,15 @@ and timestamp. Live tool results are correlated by `toolCallId`. Pending dialogs
 come from metadata, so historical requests cannot resurrect resolved approvals.
 Concurrent metadata reads are guarded against newer UI resolution events.
 
-Reads and subscriptions are cancelled on selection changes. Writes retain their
-original session identity, and only clear an unchanged draft after acceptance.
+Reads and subscriptions are cancelled on selection changes.
+Repeated clicks on the selected session keep the current stream and in-flight
+snapshot intact. Refresh reconciles a healthy session without replacing its
+stream; unavailable connections and browser network recovery explicitly reconnect.
+Selecting a different session changes the browser subscription, not the running
+Pi process.
+
+Writes retain their original session identity, and only clear an unchanged draft
+after acceptance.
 An ambiguous network failure preserves the draft and warns that acceptance is
 unknown. The application never retries writes, prompts, or creation requests.
 Browsers/proxies can transparently retry a connection failure before response

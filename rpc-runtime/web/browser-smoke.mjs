@@ -63,8 +63,10 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/v1/history") return json(response, 200, { sessions: [...saved.values()].map((session) => ({ id: session.nativeSessionId, name: session.name, profile: "default", cwd: "/workspace/project", modifiedAt: session.modifiedAt })) });
     if (url.pathname === "/v1/sessions") {
       if (request.method === "GET") return json(response, 200, { sessions: [...sessions.values()].map(meta) });
+      calls.push({ method: "POST", path: url.pathname, body });
       const previous = saved.get(body.resume);
       const session = { id: randomUUID(), nativeSessionId: body.resume || randomUUID(), name: previous?.name || body.name || "Untitled session", modifiedAt: new Date().toISOString(), cursor: 0, pendingUi: [], messages: structuredClone(previous?.messages || []), events: [], clients: new Set(), model: models[0], streaming: false, queued: [], subscriptions: 0 };
+      session.holdInitialSnapshot = !body.resume && session.name.includes("[slow snapshot]");
       sessions.set(session.id, session); saved.set(session.nativeSessionId, session);
       return json(response, 201, { session: meta(session) });
     }
@@ -76,7 +78,7 @@ const server = createServer(async (request, response) => {
       disconnect(session); sessions.delete(session.id);
       response.writeHead(204); response.end(); return;
     }
-    if (!match[2]) return json(response, 200, { session: meta(session) });
+    if (!match[2]) { calls.push({ id: session.id, method: "GET" }); return json(response, 200, { session: meta(session) }); }
     if (match[2] === "events") {
       session.subscriptions++;
       response.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" }); response.flushHeaders();
@@ -90,7 +92,13 @@ const server = createServer(async (request, response) => {
     calls.push({ id: session.id, command: body });
     let data;
     if (body.type === "get_state") data = { sessionId: session.nativeSessionId, sessionName: session.name, model: session.model, isStreaming: session.streaming, pendingMessageCount: session.queued.length };
-    else if (body.type === "get_messages") data = { messages: session.messages };
+    else if (body.type === "get_messages") {
+      if (session.holdInitialSnapshot && !session.initialSnapshotResponse) {
+        session.initialSnapshotResponse = response;
+        await new Promise((resolve) => { session.releaseSnapshot = resolve; });
+      }
+      data = { messages: session.messages };
+    }
     else if (body.type === "get_available_models") data = { models };
     else if (body.type === "set_model") { session.model = models.find((model) => model.id === body.modelId); data = session.model; }
     else if (body.type === "abort") { session.streaming = false; emit(session, { type: "agent_end" }); }
@@ -151,19 +159,76 @@ try {
     };
     watch(page);
     const openSidebar = async () => { if (label === "mobile") await page.locator("#open-drawer").click(); };
+    const drawerClosed = async () => assert.deepEqual(await page.evaluate(() => ({
+      open: document.querySelector("#sidebar").classList.contains("open"),
+      expanded: document.querySelector("#open-drawer").getAttribute("aria-expanded"),
+      shade: document.querySelector("#drawer-shade").hidden,
+      inert: document.querySelector(".main").inert,
+    })), { open: false, expanded: "false", shade: true, inert: false }, "selection closes drawer and restores composer interaction");
+    const creations = () => calls.filter((call) => call.method === "POST" && call.path === "/v1/sessions").length;
+    const traffic = (session) => ({
+      subscriptions: session.subscriptions,
+      metadata: calls.filter((call) => call.id === session.id && call.method === "GET").length,
+      rpc: calls.filter((call) => call.id === session.id && call.command).map((call) => call.command.type),
+      creations: creations(),
+    });
     try {
       await page.goto(origin); await login(page, "wrong-token");
       assert.equal(await page.locator("#token").inputValue(), "");
       await login(page); await noOverflow(page);
       await openSidebar(); await page.locator("#new-session").click();
-      await page.locator("#new-name").fill(`${label} coding session`);
+      const sessionName = `${label} coding session [slow snapshot]`;
+      await page.locator("#new-name").fill(sessionName);
       await page.locator("#create-session").click();
-      await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "session ready");
-      const session = [...sessions.values()].find((session) => session.name === `${label} coding session`);
+      await until(() => [...sessions.values()].some((session) => session.name === sessionName && session.releaseSnapshot), "initial get_messages reached fixture gate");
+      const session = [...sessions.values()].find((session) => session.name === sessionName);
       assert.ok(session);
+      await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_state") && calls.some((call) => call.id === session.id && call.command?.type === "get_available_models"), "other initial RPCs arrived");
+      const initialTraffic = traffic(session);
+      await page.locator("#prompt").fill("Draft while syncing");
+      for (let click = 0; click < 3; click++) {
+        await openSidebar(); await page.locator(".session-item").filter({ hasText: session.name }).click();
+        await drawerClosed();
+        assert.equal(await page.locator("#prompt").inputValue(), "Draft while syncing");
+      }
+      // Give accidental restarts time to reach the fixture before releasing the original read.
+      await page.waitForTimeout(250);
+      assert.deepEqual(traffic(session), initialTraffic, "same-session clicks during initial snapshot do not restart any requests");
+      assert.equal(session.initialSnapshotResponse.destroyed, false, "initial get_messages was not aborted");
+      assert.equal(session.subscriptions, 0, "SSE waits for the original snapshot");
+      assert.equal(await page.locator("#session-status").textContent(), "SYNCING");
+      session.releaseSnapshot();
+      await until(() => session.clients.size === 1 && page.locator("#connection-label").textContent().then((text) => text === "Connected"), "initial stream connected");
+      await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "session ready");
+      assert.equal(session.subscriptions, 1);
       await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-reasoning"]));
       await until(() => page.locator("#model").inputValue().then((value) => value.includes("pi-reasoning")), "model switched");
       await until(() => session.model.id === "pi-reasoning", "model RPC");
+
+      // Let the model-change snapshot settle before measuring click-only traffic.
+      await page.waitForTimeout(250);
+      const healthyTraffic = traffic(session), healthyStream = [...session.clients][0];
+      await page.locator("#prompt").fill("Keep this selected-session draft");
+      for (let click = 0; click < 3; click++) {
+        await openSidebar(); await page.locator(".session-item").filter({ hasText: session.name }).click();
+        await drawerClosed();
+        assert.equal(await page.locator("#model").inputValue(), JSON.stringify(["fixture", "pi-reasoning"]), "same-session click preserves model");
+        assert.equal(await page.locator("#prompt").inputValue(), "Keep this selected-session draft");
+        assert.equal(await page.locator("#session-status").textContent(), "READY");
+      }
+      await page.waitForTimeout(250);
+      assert.deepEqual(traffic(session), healthyTraffic, "healthy same-session clicks send no snapshot/model RPCs, metadata reads, SSE connections, or creation POSTs");
+      assert.deepEqual([...session.clients], [healthyStream], "same-session clicks keep the original stream open");
+
+      session.messages.push({ role: "user", content: [{ type: "text", text: "Snapshot-only fixture message" }], timestamp: ++tick });
+      await openSidebar(); await page.locator("#refresh-sessions").click();
+      await until(() => page.locator("#messages").textContent().then((text) => text.includes("Snapshot-only fixture message")), "healthy Refresh fetches new snapshot without an SSE event");
+      await page.waitForTimeout(250);
+      assert.deepEqual(traffic(session), { ...healthyTraffic, metadata: healthyTraffic.metadata + 1, rpc: [...healthyTraffic.rpc, "get_messages", "get_state"] }, "healthy Refresh fetches exactly one snapshot, not models or a new stream");
+      assert.deepEqual([...session.clients], [healthyStream], "Refresh keeps the original stream open");
+      assert.equal(await page.locator("#prompt").inputValue(), "Keep this selected-session draft");
+      assert.equal(await page.locator("#model").inputValue(), JSON.stringify(["fixture", "pi-reasoning"]));
+      if (label === "mobile") await page.locator("#close-drawer").click();
 
       // Paste a real raster File through the browser's clipboard event path.
       await page.locator("#prompt").evaluate((input) => {
@@ -277,9 +342,25 @@ try {
       await until(() => calls.some((call) => call.id !== resumed.id && call.command?.type === "get_state"), "other session snapshot");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
       assert.equal(await page.locator("#session-title").textContent(), `${label} other session`);
+      const other = [...sessions.values()].find((entry) => entry.name === `${label} other session`);
+      await until(() => other.clients.size === 1 && resumed.clients.size === 0, "creating another session closes prior stream");
+      const creationCount = creations(), runtimeIds = [...sessions.keys()].sort();
+      const resumedSubscriptions = resumed.subscriptions, otherSubscriptions = other.subscriptions;
       await openSidebar(); await page.locator(".session-item").filter({ hasText: session.name }).click();
+      await drawerClosed();
+      await until(() => resumed.clients.size === 1 && other.clients.size === 0, "switch subscribes to existing session and closes other stream");
+      assert.equal(resumed.subscriptions, resumedSubscriptions + 1);
+      assert.equal(other.subscriptions, otherSubscriptions);
+      assert.equal(creations(), creationCount, "switching to a running session sends no creation/resume POST");
+      assert.deepEqual([...sessions.keys()].sort(), runtimeIds, "switching does not create a duplicate runtime process");
       await until(() => page.locator("#prompt").inputValue().then((text) => text === ""), "accepted original draft cleared on return");
       await openSidebar(); await page.locator(".session-item").filter({ hasText: `${label} other session` }).click();
+      await drawerClosed();
+      await until(() => other.clients.size === 1 && resumed.clients.size === 0, "return switches subscription and closes prior stream");
+      assert.equal(other.subscriptions, otherSubscriptions + 1);
+      assert.equal(resumed.subscriptions, resumedSubscriptions + 1);
+      assert.equal(creations(), creationCount, "return sends no creation/resume POST");
+      assert.deepEqual([...sessions.keys()].sort(), runtimeIds, "return does not create a duplicate runtime process");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
       assert.deepEqual(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie })), { local: 0, session: 0, cookies: "" });
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
@@ -287,7 +368,7 @@ try {
       assert.equal(await page.locator("#prompt").inputValue(), "");
       assert.equal(await page.locator("#messages").textContent(), "");
       assert.deepEqual(errors, [], "No browser JS or CSP errors");
-      console.log(`${label}: PASS login, session, model, image paste, deltas, queue, tool, all approvals, reset/EOF, no retry, stop, DELETE/cancel, history, overflow, session-switch write race, logout`);
+      console.log(`${label}: PASS login, session, initial snapshot click race, same-session no-op/model/draft/drawer, healthy Refresh, model, image paste, deltas, queue, tool, all approvals, reset/EOF, no retry, stop, DELETE/cancel, history, overflow, session-switch write race, switch/return stream cleanup/no creation, logout`);
     } catch (error) {
       await page.screenshot({ path: join(output, `pi-workspace-${label}-failure.png`), fullPage: true }).catch(() => {});
       console.error("Browser errors:", errors); throw error;
