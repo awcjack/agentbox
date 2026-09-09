@@ -211,7 +211,15 @@ let
     port = cfg.settings.piRpcApi.port;
     executable = "/bin/pi";
     allowedOrigins = cfg.settings.piRpcApi.allowedOrigins;
-    auth.tokens = cfg.settings.piRpcApi.auth.tokens;
+    auth.tokens = map (
+      token:
+      {
+        inherit (token) scopes;
+      }
+      // (
+        if token.tokenEnv != null then { inherit (token) tokenEnv; } else { inherit (token) sha256Env; }
+      )
+    ) cfg.settings.piRpcApi.auth.tokens;
     allowedCommands = cfg.settings.piRpcApi.allowedCommands;
     profiles = lib.mapAttrs (
       _name: profile:
@@ -420,7 +428,7 @@ in
       }
       {
         assertion = !cfg.settings.piRpcApi.enable || cfg.environmentFile != null;
-        message = "services.agentbox.environmentFile must provide runtime token hashes when the Pi RPC API is enabled";
+        message = "services.agentbox.environmentFile must provide runtime tokens or token hashes when the Pi RPC API is enabled";
       }
       {
         assertion = !cfg.settings.piRpcApi.enable || cfg.settings.piRpcApi.profiles != { };

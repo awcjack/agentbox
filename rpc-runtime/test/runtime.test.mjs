@@ -190,6 +190,84 @@ test("configuration rejects unknown keys, scopes, and overlapping profile sessio
   assert.throws(() => normalizeConfig(config({ profiles: { default: { cwd: "/workspace", sessionDir: "/sessions/../other" } } })), /must be normalized/);
 });
 
+test("raw token environment references are hashed and cannot leak to Pi children", () => {
+  const cfg = config({ auth: { tokens: [{ tokenEnv: "WEB_PASSWORD", scopes: ALL_SCOPES }] } });
+  const normalized = normalizeConfig(cfg, { WEB_PASSWORD: TOKEN });
+  assert.equal(normalized.tokens[0].digest.toString("hex"), TOKEN_HASH);
+  assert.equal(JSON.stringify(normalized).includes(TOKEN), false);
+  assert.throws(() => normalizeConfig(cfg, {}), /requires a non-empty printable token/);
+  assert.throws(() => normalizeConfig(cfg, { WEB_PASSWORD: "has spaces" }), /without whitespace/);
+  cfg.piRpcApi.auth.tokens[0].sha256Env = "HASH";
+  assert.throws(() => normalizeConfig(cfg), /exactly one/);
+  delete cfg.piRpcApi.auth.tokens[0].sha256Env;
+  cfg.piRpcApi.profiles.default.envReferences = { LEAK: "WEB_PASSWORD" };
+  assert.throws(() => normalizeConfig(cfg, { WEB_PASSWORD: TOKEN }), /must not expose an RPC authentication variable/);
+});
+
+test("web assets are public and allowlisted without weakening API authentication or CSP", async (t) => {
+  const { baseUrl } = await fixture(t);
+  const page = await fetch(baseUrl);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-type"), /text\/html/);
+  assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
+  assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  assert.match(await page.text(), /Pi agent/);
+  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "styles.css", "icon.svg"]) {
+    const response = await fetch(`${baseUrl}/${asset}`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    await response.arrayBuffer();
+  }
+  const head = await fetch(baseUrl, { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
+  for (const path of ["/runtime.mjs", "/history.mjs", "/web/README.md", "/browser-smoke.mjs", "/%2e%2e%2fruntime.mjs"]) {
+    assert.equal((await request(baseUrl, path, { auth: false })).response.status, 404);
+  }
+  const api = await request(baseUrl, "/v1/sessions", { auth: false });
+  assert.equal(api.response.status, 401);
+  assert.equal(api.response.headers.get("content-security-policy"), "default-src 'none'; frame-ancestors 'none'");
+  const crossOrigin = await fetch(baseUrl, { headers: { Origin: "https://untrusted.example" } });
+  assert.equal(crossOrigin.status, 403);
+  await crossOrigin.arrayBuffer();
+});
+
+test("history is scoped and restricted to a configured profile", async (t) => {
+  const { baseUrl } = await fixture(t);
+  assert.equal((await request(baseUrl, "/v1/history?profile=default", { auth: false })).response.status, 401);
+  assert.equal((await request(baseUrl, "/v1/history?profile=../../etc")).response.status, 400);
+  const result = await request(baseUrl, "/v1/history?profile=default");
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.body, { sessions: [], truncated: false });
+  const limited = await fixture(t, config({ auth: { tokens: [{ sha256: TOKEN_HASH, scopes: ["sessions:write"] }] } }));
+  assert.equal((await request(limited.baseUrl, "/v1/history?profile=default")).response.status, 403);
+});
+
+test("new sessions own a native ID immediately and cannot be resumed concurrently", async (t) => {
+  const { baseUrl, spawns, children } = await fixture(t, config({ profiles: {
+    default: { cwd: "/workspace", sessionDir: "/sessions" },
+    other: { cwd: "/workspace", sessionDir: "/other-sessions" },
+  } }));
+  const id = await createSession(baseUrl, { profile: "default", name: "UI session" });
+  const meta = (await request(baseUrl, `/v1/sessions/${id}`)).body.session;
+  assert.equal(meta.nativeSessionId, id);
+  assert.equal(meta.name, "UI session");
+  assert.equal(meta.cwd, "/workspace");
+  assert.equal(meta.latestEventId, 1);
+  assert.ok(spawns[0].args.includes("--session-id"));
+  assert.equal(spawns[0].args[spawns[0].args.indexOf("--session-id") + 1], id);
+  const duplicate = await request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: id } });
+  assert.equal(duplicate.response.status, 409);
+  const crossProfile = await request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "other", resume: id } });
+  assert.equal(crossProfile.response.status, 409);
+  children[0].output({ type: "extension_ui_request", id: "confirm-1", method: "confirm", title: "Approve?" });
+  const answered = await request(baseUrl, `/v1/sessions/${id}/ui`, { method: "POST", body: { id: "confirm-1", confirmed: false } });
+  assert.equal(answered.response.status, 202);
+  const after = (await request(baseUrl, `/v1/sessions/${id}`)).body.session;
+  assert.equal(after.latestEventId, 3);
+  assert.deepEqual(after.pendingUi, []);
+});
+
 test("runtime resolves the configured executable to the immutable Nix store", () => {
   assert.throws(() => normalizeConfig(config({ executable: "pi" })), /absolute path/);
   assert.throws(() => createRuntime(config(), { spawn() {}, realpath: () => "/tmp/pi" }), /immutable Nix store path/);
@@ -236,7 +314,13 @@ test("scopes and browser origins are enforced", async (t) => {
 test("session creation uses an isolated environment and exact profile-owned resume IDs", async (t) => {
   process.env.RUNTIME_SECRET_LEAK = "must-not-reach-child";
   t.after(() => { delete process.env.RUNTIME_SECRET_LEAK; });
-  const { baseUrl, spawns } = await fixture(t);
+  const directory = await mkdtemp(join(tmpdir(), "pi-resume-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, `2026-09-09_${RESUME_ID}.jsonl`);
+  await writeFile(file, `${JSON.stringify({ type: "session", id: RESUME_ID, cwd: "/workspace" })}\n`);
+  const { baseUrl, spawns } = await fixture(t, config({ profiles: { default: {
+    cwd: "/workspace", sessionDir: directory, args: ["--approve"], env: { PROFILE_VALUE: "yes" },
+  } } }));
   const invalid = await request(baseUrl, "/v1/sessions", {
     method: "POST",
     body: { profile: "default", resume: "../../secret" },
@@ -255,7 +339,7 @@ test("session creation uses an isolated environment and exact profile-owned resu
   assert.equal(spawns.length, 1);
   assert.equal(spawns[0].file, "/nix/store/00000000000000000000000000000000-pi/bin/pi");
   assert.deepEqual(spawns[0].args, [
-    "--mode", "rpc", "--session-dir", "/sessions", "--session", RESUME_ID, "--name", "Review", "--approve",
+    "--mode", "rpc", "--session-dir", directory, "--session", file, "--name", "Review", "--approve",
   ]);
   assert.equal(spawns[0].options.cwd, "/workspace");
   assert.deepEqual(spawns[0].options.env, {
@@ -283,6 +367,120 @@ test("session creation uses an isolated environment and exact profile-owned resu
   });
   assert.equal(duplicate.response.status, 409);
   assert.equal(spawns.length, 1);
+});
+
+test("unknown resume IDs fail before spawning and concurrent resumes are reserved", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-resume-race-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { baseUrl, spawns } = await fixture(t, config({ profiles: { default: { cwd: "/workspace", sessionDir: directory } } }));
+  const options = { method: "POST", body: { profile: "default", resume: RESUME_ID } };
+  assert.equal((await request(baseUrl, "/v1/sessions", options)).response.status, 404);
+  assert.equal(spawns.length, 0);
+  await writeFile(join(directory, `${RESUME_ID}.jsonl`), `${JSON.stringify({ type: "session", id: RESUME_ID, cwd: "/workspace" })}\n`);
+  const results = await Promise.all([request(baseUrl, "/v1/sessions", options), request(baseUrl, "/v1/sessions", options)]);
+  assert.deepEqual(results.map((result) => result.response.status).sort(), [201, 409]);
+  assert.equal(spawns.length, 1);
+});
+
+test("large read snapshots stay out of SSE replay even when larger than the ring", async (t) => {
+  const { baseUrl, runtime, children } = await fixture(t, config({
+    allowedCommands: ["get_messages"], limits: { maxRecordBytes: 256 * 1024, maxEventBytes: 1024 },
+  }));
+  const id = await createSession(baseUrl);
+  const reading = request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type: "get_messages", id: "snapshot" } });
+  await waitForInput(children[0], /snapshot/);
+  children[0].output({ id: "snapshot", type: "response", command: "get_messages", success: true, data: { messages: [{ role: "user", content: "x".repeat(128 * 1024) }] } });
+  assert.equal((await reading).response.status, 200);
+  const session = runtime.sessions.get(id);
+  assert.equal(session.events.nextId, 2);
+  assert.equal(session.events.records.length, 1);
+  assert.equal(session.events.records[0].id, 1);
+});
+
+test("oversized correlated reads drain without killing Pi and subsequent RPC still works", async (t) => {
+  const { baseUrl, runtime, children } = await fixture(t, config({ allowedCommands: ["get_messages", "get_state"] }));
+  const id = await createSession(baseUrl);
+  const child = children[0];
+  const reading = request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type: "get_messages", id: "oversized" } });
+  await waitForInput(child, /oversized/);
+  child.stdout.write('{"id":"oversized","type":"response","command":"get_messages","success":true,"data":{"messages":["');
+  child.stdout.write("x".repeat(2048));
+  const result = await reading;
+  assert.equal(result.response.status, 413);
+  assert.equal(result.body.error.code, "snapshot_too_large");
+  child.stdout.write("x".repeat(8192));
+  child.stdout.write('"]}}\n');
+  assert.equal(runtime.sessions.get(id).status, "running");
+  assert.deepEqual(child.signals, []);
+  const state = request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type: "get_state", id: "after-large" } });
+  await waitForInput(child, /after-large/);
+  child.output({ id: "after-large", type: "response", command: "get_state", success: true, data: {} });
+  assert.equal((await state).response.status, 200);
+});
+
+test("timed-out oversized reads retain bounded correlation and do not kill Pi", async (t) => {
+  const { baseUrl, runtime, children } = await fixture(t, config({
+    allowedCommands: ["get_messages", "get_state", "abort"],
+    limits: { maxPendingCommands: 1, commandTimeoutMs: 30 },
+  }));
+  const id = await createSession(baseUrl), child = children[0];
+  const result = await request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type: "get_messages", id: "late" } });
+  assert.equal(result.response.status, 504);
+  assert.equal(runtime.sessions.get(id).lateReads.size, 1);
+  const more = await request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type: "get_state" } });
+  assert.equal(more.response.status, 429);
+  child.stdout.write(`{"id":"late","type":"response","command":"get_messages","success":true,"data":{"messages":["${"x".repeat(4096)}"]}}\n`);
+  assert.equal(runtime.sessions.get(id).status, "running");
+  assert.equal(runtime.sessions.get(id).lateReads.size, 0);
+  const state = request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type: "get_state", id: "recovered" } });
+  await waitForInput(child, /recovered/);
+  child.output({ id: "recovered", type: "response", command: "get_state", success: true, data: {} });
+  assert.equal((await state).response.status, 200);
+  assert.deepEqual(child.signals, []);
+});
+
+test("shutdown detaches backpressured streams before Pi emits its final events", async (t) => {
+  const { baseUrl, runtime } = await fixture(t);
+  const id = await createSession(baseUrl), session = runtime.sessions.get(id);
+  const client = new EventEmitter();
+  client.writableLength = 100;
+  client.writableEnded = false;
+  client.destroyed = false;
+  client.write = () => { assert.equal(client.writableEnded, false); return false; };
+  client.end = () => { client.writableEnded = true; client.emit("finish"); };
+  client.destroy = () => { client.destroyed = true; client.emit("close"); };
+  session.addSseClient(client, 0);
+  await runtime.close();
+  assert.equal(client.writableEnded, true);
+  assert.equal(session.clients.size, 0);
+  assert.equal(session.writeSse(client, ": cannot write after end\n\n"), false);
+});
+
+test("SSE tolerates ordinary write backpressure and bounds a stalled client's buffer", async (t) => {
+  const { baseUrl, runtime } = await fixture(t, config({ limits: { maxRecordBytes: 256 * 1024, maxEventBytes: 256 * 1024 } }));
+  const id = await createSession(baseUrl);
+  const session = runtime.sessions.get(id);
+  session.publish({ type: "message_end", message: { content: "x".repeat(128 * 1024) } });
+  const client = new EventEmitter();
+  client.writableLength = 0;
+  client.destroyed = false;
+  client.end = () => { throw new Error("backpressure must not end the stream"); };
+  client.destroy = () => { client.destroyed = true; client.emit("close"); };
+  const frames = [];
+  client.write = (data) => { frames.push(data); client.writableLength += Buffer.byteLength(data); return false; };
+  session.addSseClient(client, 0);
+  assert.equal(session.clients.has(client), true);
+  assert.equal(client.destroyed, false);
+  assert.equal(frames.length, 2);
+  // Model a drain, then verify live delivery remains connected.
+  client.writableLength = 0;
+  session.publish({ type: "agent_end" });
+  assert.equal(frames.length, 3);
+  assert.equal(client.destroyed, false);
+  client.writableLength = 512 * 1024;
+  session.publish({ type: "agent_start" });
+  assert.equal(client.destroyed, true);
+  assert.equal(session.clients.has(client), false);
 });
 
 test("resume is disabled without a profile-owned session directory", async (t) => {

@@ -1,8 +1,18 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
+import { listHistory, resolveHistorySession, NATIVE_SESSION_ID_RE } from "./history.mjs";
+
+const WEB_ASSETS = new Map([
+  ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/app.mjs", ["app.mjs", "text/javascript; charset=utf-8"]],
+  ["/transport.mjs", ["transport.mjs", "text/javascript; charset=utf-8"]],
+  ["/markdown.mjs", ["markdown.mjs", "text/javascript; charset=utf-8"]],
+  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+  ["/icon.svg", ["icon.svg", "image/svg+xml"]],
+].map(([path, [file, type]]) => [path, { type, data: readFileSync(new URL(`./web/${file}`, import.meta.url)) }]));
 
 const DEFAULT_ALLOWED_COMMANDS = [
   "abort",
@@ -177,9 +187,9 @@ export function normalizeConfig(runtimeConfig, environment = process.env) {
   const authEnvironmentNames = new Set();
   const tokens = auth.tokens.map((entry, index) => {
     const token = assertObject(entry, `piRpcApi.auth.tokens[${index}]`);
-    assertKnownKeys(token, new Set(["sha256", "sha256Env", "scopes"]), `piRpcApi.auth.tokens[${index}]`);
-    if (token.sha256 !== undefined && token.sha256Env !== undefined) {
-      throw new Error(`piRpcApi.auth.tokens[${index}] must set only one of sha256 or sha256Env`);
+    assertKnownKeys(token, new Set(["sha256", "sha256Env", "tokenEnv", "scopes"]), `piRpcApi.auth.tokens[${index}]`);
+    if ([token.sha256, token.sha256Env, token.tokenEnv].filter((value) => value !== undefined).length !== 1) {
+      throw new Error(`piRpcApi.auth.tokens[${index}] must set exactly one of sha256, sha256Env or tokenEnv`);
     }
     let hash = token.sha256;
     if (token.sha256Env !== undefined) {
@@ -191,6 +201,17 @@ export function normalizeConfig(runtimeConfig, environment = process.env) {
       if (hash === undefined) {
         throw new Error(`piRpcApi.auth.tokens[${index}] requires environment variable ${token.sha256Env}`);
       }
+    }
+    if (token.tokenEnv !== undefined) {
+      if (typeof token.tokenEnv !== "string" || !ENV_NAME_RE.test(token.tokenEnv)) {
+        throw new Error(`piRpcApi.auth.tokens[${index}].tokenEnv must name an environment variable`);
+      }
+      authEnvironmentNames.add(token.tokenEnv);
+      const secret = environment[token.tokenEnv];
+      if (typeof secret !== "string" || !/^[\x21-\x7e]+$/.test(secret)) {
+        throw new Error(`piRpcApi.auth.tokens[${index}] requires a non-empty printable token without whitespace in ${token.tokenEnv}`);
+      }
+      hash = createHash("sha256").update(secret, "utf8").digest("hex");
     }
     if (typeof hash !== "string" || !/^[0-9a-f]{64}$/i.test(hash)) {
       throw new Error(`piRpcApi.auth.tokens[${index}].sha256 must be a SHA-256 hex digest`);
@@ -372,9 +393,10 @@ class ByteRing {
   }
 }
 
-function attachLfJsonReader(stream, maxBytes, onRecord, onError) {
+function attachLfJsonReader(stream, maxBytes, onRecord, onError, onOversized) {
   let buffer = Buffer.alloc(0);
   let failed = false;
+  let discarding = false;
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const fail = (message) => {
     if (failed) return;
@@ -387,8 +409,18 @@ function attachLfJsonReader(stream, maxBytes, onRecord, onError) {
     buffer = Buffer.concat([buffer, input]);
     while (true) {
       const lf = buffer.indexOf(0x0a);
+      if (discarding) {
+        buffer = lf === -1 ? Buffer.alloc(0) : buffer.subarray(lf + 1);
+        if (lf === -1) return;
+        discarding = false;
+        continue;
+      }
       if (lf === -1) break;
-      if (lf > maxBytes) return fail("Pi RPC stdout record exceeded maxRecordBytes");
+      if (lf > maxBytes) {
+        if (!onOversized?.(buffer.subarray(0, maxBytes))) return fail("Pi RPC stdout record exceeded maxRecordBytes");
+        buffer = buffer.subarray(lf + 1);
+        continue;
+      }
       let line = buffer.subarray(0, lf);
       buffer = buffer.subarray(lf + 1);
       if (line.at(-1) === 0x0d) line = line.subarray(0, line.length - 1);
@@ -405,10 +437,14 @@ function attachLfJsonReader(stream, maxBytes, onRecord, onError) {
       onRecord(value);
       if (failed) return;
     }
-    if (buffer.length > maxBytes) fail("Pi RPC stdout unterminated record exceeded maxRecordBytes");
+    if (buffer.length > maxBytes) {
+      if (!onOversized?.(buffer.subarray(0, maxBytes))) return fail("Pi RPC stdout unterminated record exceeded maxRecordBytes");
+      buffer = Buffer.alloc(0);
+      discarding = true;
+    }
   });
   stream.on("end", () => {
-    if (!failed && buffer.length !== 0) fail("Pi RPC stdout ended without an LF delimiter");
+    if (!failed && (buffer.length !== 0 || discarding)) fail("Pi RPC stdout ended without an LF delimiter");
   });
   stream.on("error", (error) => fail(`Pi RPC stdout error: ${error.message}`));
 }
@@ -424,12 +460,14 @@ function safeWrite(stream, object) {
 }
 
 class Session extends EventEmitter {
-  constructor({ id, profileName, profile, resume, name, config, spawnProcess, signalProcessGroup, now, uuid }) {
+  constructor({ id, profileName, profile, resume, resumePath, name, config, spawnProcess, signalProcessGroup, now, uuid }) {
     super();
     this.id = id;
     this.profileName = profileName;
     this.profile = profile;
     this.resume = resume ?? null;
+    this.nativeSessionId = resume ?? id;
+    this.name = name ?? null;
     this.config = config;
     this.now = now;
     this.uuid = uuid;
@@ -439,6 +477,7 @@ class Session extends EventEmitter {
     this.status = "running";
     this.exit = null;
     this.pending = new Map();
+    this.lateReads = new Map();
     this.pendingUi = new Map();
     this.clients = new Set();
     this.events = new EventRing(config.limits.maxEvents, config.limits.maxEventBytes);
@@ -447,7 +486,8 @@ class Session extends EventEmitter {
 
     const args = ["--mode", "rpc"];
     if (profile.sessionDir) args.push("--session-dir", profile.sessionDir);
-    if (resume) args.push("--session", resume);
+    if (resume) args.push("--session", resumePath);
+    else args.push("--session-id", this.nativeSessionId);
     if (name) args.push("--name", name);
     args.push(...profile.args);
     this.child = spawnProcess(config.executable, args, {
@@ -468,6 +508,7 @@ class Session extends EventEmitter {
       config.limits.maxRecordBytes,
       (record) => this.onRecord(record),
       (error) => this.protocolFailure(error),
+      (prefix) => this.oversizedRead(prefix),
     );
     this.child.once("error", (error) => this.onExit(null, null, error));
     this.child.once("exit", (code, signal) => this.onExit(code, signal, null));
@@ -478,6 +519,10 @@ class Session extends EventEmitter {
     const result = {
       id: this.id,
       profile: this.profileName,
+      cwd: this.profile.cwd,
+      name: this.name,
+      nativeSessionId: this.nativeSessionId,
+      latestEventId: this.events.nextId - 1,
       status: this.status,
       createdAt: new Date(this.createdAt).toISOString(),
       lastActivityAt: new Date(this.lastActivityAt).toISOString(),
@@ -496,13 +541,49 @@ class Session extends EventEmitter {
     this.touch();
     const event = this.events.push(value);
     for (const client of this.clients) {
-      if (!client.write(`id: ${event.id}\nevent: pi\ndata: ${event.data}\n\n`)) client.end();
+      this.writeSse(client, `id: ${event.id}\nevent: pi\ndata: ${event.data}\n\n`);
     }
     return event;
   }
 
+  writeSse(client, data) {
+    // write(false) means buffered, not disconnected. Allow ordinary backpressure
+    // but bound each slow client's queue to one replay window plus one record.
+    if (client.destroyed || client.writableEnded || client.writableLength + Buffer.byteLength(data) > this.config.limits.maxEventBytes + this.config.limits.maxRecordBytes) {
+      client.destroy();
+      return false;
+    }
+    client.write(data);
+    return true;
+  }
+
+  oversizedRead(prefix) {
+    // Pi 0.84 serializes response metadata before data. Drain an oversized read
+    // without buffering its payload or killing an otherwise healthy agent.
+    const text = prefix.toString("utf8");
+    const end = text.indexOf(',"data":');
+    if (end === -1) return false;
+    let header;
+    try { header = JSON.parse(`${text.slice(0, end)}}`); } catch { return false; }
+    const key = String(header.id), pending = this.pending.get(key);
+    if (header.type !== "response" || header.success !== true || !READ_COMMANDS.has(header.command) || (pending?.command ?? this.lateReads.get(key)) !== header.command) return false;
+    this.lateReads.delete(key);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pending.delete(key);
+      pending.reject(new HttpError(413, "snapshot_too_large", "Pi history exceeds this runtime's record limit. The agent is still running; end this session and start a new one, or ask the administrator to raise maxRecordBytes."));
+    }
+    return true;
+  }
+
   onRecord(record) {
-    this.publish(record);
+    if (record.type === "response" && record.command === "get_state" && record.success && record.data) {
+      if (typeof record.data.sessionName === "string") this.name = record.data.sessionName;
+      if (NATIVE_SESSION_ID_RE.test(record.data.sessionId ?? "")) this.nativeSessionId = record.data.sessionId;
+    }
+    // Snapshot responses already travel over HTTP. Replaying them over SSE
+    // doubles transcripts and can evict the cursor used to request the snapshot.
+    if (record.type !== "response" || !READ_COMMANDS.has(record.command)) this.publish(record);
     if (record.type === "extension_ui_request" && DIALOG_METHODS.has(record.method)) {
       if (typeof record.id !== "string" || record.id.length === 0 || record.id.length > 256) {
         return this.protocolFailure(new Error("Pi emitted an invalid extension UI request id"));
@@ -526,7 +607,10 @@ class Session extends EventEmitter {
     if (record.type !== "response" || !("id" in record)) return;
     const key = String(record.id);
     const pending = this.pending.get(key);
-    if (!pending) return;
+    if (!pending) {
+      if (this.lateReads.get(key) === record.command) this.lateReads.delete(key);
+      return;
+    }
     if (record.command !== pending.command) {
       return this.protocolFailure(new Error("Pi RPC response command did not match its request"));
     }
@@ -564,6 +648,7 @@ class Session extends EventEmitter {
       pending.reject(new HttpError(502, "pi_exited", "Pi RPC process exited before responding"));
     }
     this.pending.clear();
+    this.lateReads.clear();
     for (const entry of this.pendingUi.values()) clearTimeout(entry.timer);
     this.pendingUi.clear();
     for (const client of this.clients) client.end();
@@ -583,18 +668,22 @@ class Session extends EventEmitter {
     if (this.pending.size >= this.config.limits.maxPendingCommands) {
       throw new HttpError(429, "too_many_commands", "too many RPC commands are pending");
     }
+    if (READ_COMMANDS.has(command.type) && this.pending.size + this.lateReads.size >= this.config.limits.maxPendingCommands) {
+      throw new HttpError(429, "too_many_commands", "waiting for outstanding Pi read responses");
+    }
     if (command.id !== undefined && !["string", "number"].includes(typeof command.id)) {
       throw new HttpError(400, "invalid_command", "RPC command id must be a string or number");
     }
     const generated = command.id === undefined;
     const id = generated ? `runtime-${this.uuid()}` : command.id;
     const key = String(id);
-    if (this.pending.has(key)) throw new HttpError(409, "duplicate_command_id", "RPC command id is already pending");
+    if (this.pending.has(key) || this.lateReads.has(key)) throw new HttpError(409, "duplicate_command_id", "RPC command id is already pending");
     const forwarded = generated ? { ...command, id } : command;
     this.touch();
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(key);
+        if (READ_COMMANDS.has(command.type)) this.lateReads.set(key, command.type);
         reject(new HttpError(504, "pi_timeout", "Pi RPC command timed out"));
       }, this.config.limits.commandTimeoutMs);
       timer.unref?.();
@@ -636,7 +725,7 @@ class Session extends EventEmitter {
     safeWrite(this.child.stdin, response);
     clearTimeout(entry.timer);
     this.pendingUi.delete(body.id);
-    this.touch();
+    this.publish({ type: "supervisor", event: "extension_ui_resolved", id: body.id });
   }
 
   addSseClient(response, afterId) {
@@ -645,13 +734,10 @@ class Session extends EventEmitter {
     }
     const oldest = this.events.records[0]?.id ?? this.events.nextId;
     if (afterId > 0 && afterId < oldest - 1) {
-      response.write(`event: reset\ndata: ${JSON.stringify({ oldestEventId: oldest })}\n\n`);
+      if (!this.writeSse(response, `event: reset\ndata: ${JSON.stringify({ oldestEventId: oldest })}\n\n`)) return;
     }
     for (const event of this.events.records) {
-      if (event.id > afterId && !response.write(`id: ${event.id}\nevent: pi\ndata: ${event.data}\n\n`)) {
-        response.end();
-        return;
-      }
+      if (event.id > afterId && !this.writeSse(response, `id: ${event.id}\nevent: pi\ndata: ${event.data}\n\n`)) return;
     }
     if (this.status !== "running") {
       response.end();
@@ -660,7 +746,7 @@ class Session extends EventEmitter {
     this.clients.add(response);
     this.touch();
     const heartbeat = setInterval(() => {
-      if (!response.write(": keepalive\n\n")) response.end();
+      this.writeSse(response, ": keepalive\n\n");
     }, this.config.limits.sseHeartbeatMs);
     heartbeat.unref?.();
     const remove = () => {
@@ -670,6 +756,7 @@ class Session extends EventEmitter {
     };
     response.once("close", remove);
     response.once("finish", remove);
+    response.once("error", remove);
   }
 
   stop() {
@@ -775,6 +862,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   const uuid = dependencies.randomUUID ?? randomUUID;
   const signalProcessGroup = dependencies.signalProcessGroup ?? ((pid, signal) => process.kill(-pid, signal));
   const sessions = new Map();
+  const creating = new Set();
   let shuttingDown = false;
   let closePromise = null;
 
@@ -790,6 +878,13 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         response.setHeader("Vary", "Origin");
       }
       const url = new URL(request.url, "http://runtime.invalid");
+      const asset = WEB_ASSETS.get(url.pathname);
+      if (asset && ["GET", "HEAD"].includes(request.method)) {
+        response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+        response.setHeader("Content-Type", asset.type);
+        response.setHeader("Content-Length", asset.data.length);
+        return response.end(request.method === "HEAD" ? undefined : asset.data);
+      }
       if (url.pathname === "/health/live" && request.method === "GET") {
         return json(response, 200, { status: "alive" });
       }
@@ -810,6 +905,12 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         authenticate(request, config, "profiles:read");
         return json(response, 200, { profiles: [...config.profiles.keys()] });
       }
+      if (url.pathname === "/v1/history" && request.method === "GET") {
+        authenticate(request, config, "sessions:read");
+        const profileName = url.searchParams.get("profile");
+        if (!config.profiles.has(profileName)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
+        return json(response, 200, await listHistory(config.profiles.get(profileName), profileName));
+      }
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
         authenticate(request, config, "sessions:read");
         return json(response, 200, { sessions: [...sessions.values()].map((session) => session.metadata()) });
@@ -821,29 +922,41 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         const keys = Object.keys(body);
         if (keys.some((key) => !["profile", "resume", "name"].includes(key))) throw new HttpError(400, "invalid_session", "session request contains an unknown field");
         if (typeof body.profile !== "string" || !config.profiles.has(body.profile)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
-        if (body.resume !== undefined && (typeof body.resume !== "string" || !SESSION_ID_RE.test(body.resume))) {
+        if (body.resume !== undefined && (typeof body.resume !== "string" || !NATIVE_SESSION_ID_RE.test(body.resume))) {
           throw new HttpError(400, "invalid_resume", "resume must be an exact UUID session ID");
         }
         const profile = config.profiles.get(body.profile);
         if (body.resume !== undefined && profile.sessionDir === undefined) {
           throw new HttpError(400, "invalid_resume", "resume requires a profile-owned session directory");
         }
-        if (body.resume !== undefined && [...sessions.values()].some((session) => session.resume === body.resume && ["running", "stopping"].includes(session.status))) {
+        if (body.resume !== undefined && [...sessions.values()].some((session) => session.nativeSessionId.toLowerCase() === body.resume.toLowerCase() && ["running", "stopping"].includes(session.status))) {
           throw new HttpError(409, "resume_in_use", "Pi session is already active");
         }
         if (body.name !== undefined && (typeof body.name !== "string" || body.name.length < 1 || body.name.length > 200 || /[\u0000-\u001f\u007f]/.test(body.name))) {
           throw new HttpError(400, "invalid_name", "name must be 1-200 characters without controls");
         }
-        const activeSessions = [...sessions.values()].filter((session) => session.exit === null).length;
+        // Native IDs are exclusive across profiles too, including canonical
+        // directory aliases and copied session files with the same ID.
+        const resumeKey = `resume:${body.resume?.toLowerCase()}`;
+        if (body.resume && creating.has(resumeKey)) throw new HttpError(409, "resume_in_use", "Pi session is already being resumed");
+        const activeSessions = creating.size + [...sessions.values()].filter((session) => session.exit === null).length;
         if (activeSessions >= config.limits.maxSessions) throw new HttpError(429, "session_limit", "maximum active session count reached");
         const id = uuid();
         let session;
+        const creationKey = body.resume ? resumeKey : id;
+        creating.add(creationKey);
         try {
-          session = new Session({ id, profileName: body.profile, profile, resume: body.resume, name: body.name, config, spawnProcess, signalProcessGroup, now, uuid });
+          const resumePath = body.resume ? await resolveHistorySession(profile, body.resume) : undefined;
+          if (body.resume && !resumePath) throw new HttpError(404, "resume_not_found", "an exact, unique Pi session for this profile was not found");
+          if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
+          session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, config, spawnProcess, signalProcessGroup, now, uuid });
+          sessions.set(id, session);
         } catch (error) {
+          if (error instanceof HttpError) throw error;
           throw new HttpError(502, "spawn_failed", `failed to start Pi RPC process: ${error.message}`);
+        } finally {
+          creating.delete(creationKey);
         }
-        sessions.set(id, session);
         return json(response, 201, { session: session.metadata() });
       }
 
@@ -940,13 +1053,18 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       shuttingDown = true;
       clearInterval(cleanupTimer);
       for (const session of sessions.values()) {
-        for (const client of session.clients) client.end();
+        const clients = [...session.clients];
+        session.clients.clear();
+        for (const client of clients) client.end();
       }
+      const forceClose = setTimeout(() => server.closeAllConnections(), config.limits.shutdownGraceMs + config.limits.killGraceMs + 1_000);
+      forceClose.unref?.();
       const closeServer = server.listening
         ? new Promise((resolve) => server.close(resolve))
         : Promise.resolve();
       await Promise.allSettled([...sessions.values()].map((session) => session.stop()));
       await closeServer;
+      clearTimeout(forceClose);
       sessions.clear();
     })();
     return closePromise;

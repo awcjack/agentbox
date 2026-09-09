@@ -6,7 +6,7 @@ It ships a full dev toolchain in an OCI container and runs **Claude Code**,
 
 - **`agentboxImage`** — a Nix-built OCI image (no Dockerfile, no Homebrew).
 - **`agentbox`** — a host-side CLI to drive the container (`status`, `shell`,
-  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `pi-rpc`, `claude`, on-demand services,
+  `logs`, `exec`, `opencode`, `pi`, `pi-web`, `pi-ui`, `pi-rpc`, `claude`, on-demand services,
   `pause`/`resume`, and `start`/`stop`/`restart`).
 - **`nixosModules.agentbox`** / **`darwinModules.agentbox`** — run it as a
   systemd `oci-containers` service (NixOS) or via manual management (macOS).
@@ -32,7 +32,8 @@ Codex, `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code).
 
 Codex and Pi are interactive CLIs, so `enableCodex` and `enablePi` control
 startup availability checks rather than removing their binaries from the image.
-`enablePiWeb` separately controls Pi's browser service.
+`enablePiWeb` separately controls Pi's ttyd browser TUI. For a native chat UI
+without SSH or a terminal, enable `piRpcApi` and use `agentbox pi-ui` instead.
 
 Pi also has a browser TUI at `http://localhost:4097`, enabled by
 `settings.enablePiWeb` (default: true). It runs the exact wrapped Pi CLI in a
@@ -136,10 +137,17 @@ a loopback endpoint. Identifier-shaped values cannot be distinguished from
 literals by the module schema, so MCP secret values belong in `environmentFile`.
 No MCP server is enabled by default.
 
-### Pi RPC API
+### Pi chat UI and RPC API
 
 The optional `settings.piRpcApi` service exposes authenticated HTTP/SSE
-supervision on port 4098. It is disabled by default and binds to `127.0.0.1` on
+supervision and a native static chat UI at `/` on the same port (default: 4098).
+The UI is bundled from `rpc-runtime/web` and always served when RPC is enabled;
+there is no separate UI service, port, or enable option. `agentbox pi-ui` shows
+the chat URL; `agentbox pi-rpc` continues to check `/health/ready`.
+`agentbox pi-web` still refers to the shipped ttyd TUI, not this chat UI. If
+moving RPC to port 4097, set `enablePiWeb = false` to avoid a port collision.
+
+RPC is disabled by default and binds to `127.0.0.1` on
 both NixOS and Darwin. Some Darwin Docker runtimes cannot route host requests to
 container loopback; `agentbox pi-rpc` still checks readiness inside the
 container. To make it host-accessible there, set `bindAddress = "0.0.0.0"` and
@@ -147,8 +155,14 @@ explicitly acknowledge plain-HTTP exposure with
 `allowInsecureRemoteAccess = true`, then restrict access with a trusted TLS
 reverse proxy or VPN.
 
-Only the environment variable name for a bearer-token hash is placed in managed
-JSON. Put the lowercase SHA-256 digest in the secret `environmentFile`:
+Only an environment variable name for a bearer token or its hash is placed in
+managed JSON. To reuse an existing runtime password, configure
+`auth.tokens = [ { tokenEnv = "OPENCODE_PASSWORD"; } ];`. The supervisor hashes
+that raw value at startup; it is not a Nix string containing the password.
+`tokenEnv` defaults to null. When set, the modules omit `sha256Env` entirely;
+otherwise the existing `sha256Env = "PI_RPC_TOKEN_SHA256"` default is unchanged.
+For the hash-based alternative, put the lowercase SHA-256 digest in the secret
+`environmentFile`:
 
 ```bash
 TOKEN="$(openssl rand -hex 32)"
@@ -164,14 +178,35 @@ services.agentbox.settings.piRpcApi = {
       scopes = [ "*" ];
     }
   ];
-  allowedOrigins = [ "https://agent.example.com" ];
+  allowedOrigins = [
+    "http://localhost:4098"
+    "http://127.0.0.1:4098"
+    "https://agent.example.com"
+  ];
   profiles.default = {
     cwd = "/workspace";
-    # Destination -> source variable in environmentFile.
-    env.PROVIDER_TOKEN = "PI_PROFILE_PROVIDER_TOKEN";
+    sessionDir = "/home/agent/.pi/agent/sessions";
+    # Optional git/gh access, only if GH_TOKEN exists in environmentFile.
+    env.GH_TOKEN = "GH_TOKEN";
   };
+  limits.maxBodyBytes = 8 * 1024 * 1024; # JSON includes base64 image overhead.
+  limits.maxRecordBytes = 16 * 1024 * 1024;
 };
 ```
+
+Open the UI directly in a browser, enter the raw bearer token/password (not its
+digest), and select an administrator-approved profile. The browser keeps the
+password in page memory, not localStorage or a URL; reload or log out to
+clear it. Allow the exact browser origin, including its scheme and port, even
+when the UI and API share an origin. Use TLS or a trusted VPN for remote access.
+
+Profiles fix the working directory and persistent Pi session directory on the
+server. The browser cannot choose arbitrary filesystem paths. Native Pi history
+is separate from OpenCode: there is no OpenCode conversation conversion or
+automatic credential migration. Existing Pi auth/settings under `~/.pi/agent`
+remain available. Provider environment credentials, if needed, must be explicitly
+mapped in the profile; a Claude Code token is not assumed to be a Pi provider key.
+RPC authentication secrets are excluded from the Pi child environment.
 
 `profiles`, command allowlists, token scopes, origins, and resource/time limits
 are typed. Session-switch/fork/clone/new-session, direct bash, HTML export, and
@@ -184,6 +219,13 @@ restart run; the API runtime separately supervises and bounds each
 Bearer authentication does not isolate same-UID code inside the container:
 agents with that trust level can inspect processes, credentials, and session
 files. Use separate containers and UIDs for mutually untrusted tenants.
+
+Alternatives considered: [agegr/pi-web](https://github.com/agegr/pi-web) and
+[jmfederico/pi-web](https://github.com/jmfederico/pi-web) are fuller applications
+with their own Pi SDK/session backends, not drop-in clients for Agentbox's
+authenticated RPC supervisor. The former upstream `packages/web-ui` was removed;
+this integration instead keeps Agentbox's pinned, wrapped `pi --mode rpc` path
+and managed policy boundary. See [upstream Pi](https://github.com/earendil-works/pi).
 
 ## What's in the image
 

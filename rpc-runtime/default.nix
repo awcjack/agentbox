@@ -26,7 +26,8 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/libexec/agentbox-pi-rpc-runtime $out/bin
-    cp main.mjs runtime.mjs package.json supervise.sh $out/libexec/agentbox-pi-rpc-runtime/
+    cp main.mjs runtime.mjs history.mjs package.json supervise.sh $out/libexec/agentbox-pi-rpc-runtime/
+    cp -r web $out/libexec/agentbox-pi-rpc-runtime/web
     makeWrapper ${nodejs_22}/bin/node $out/bin/pi-rpc-runtime \
       --add-flags $out/libexec/agentbox-pi-rpc-runtime/main.mjs
     ${lib.optionalString (pi-coding-agent != null) ''
@@ -41,7 +42,7 @@ stdenvNoCC.mkDerivation {
   '';
 
   meta = {
-    description = "Authenticated HTTP/SSE supervisor for Pi RPC sessions";
+    description = "Native browser chat UI and authenticated HTTP/SSE supervisor for Pi RPC sessions";
     license = lib.licenses.mit;
     mainProgram = "pi-rpc-runtime";
     platforms = lib.platforms.unix;

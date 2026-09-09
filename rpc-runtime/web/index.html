@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>Pi Agent | Agentbox</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <div class="workspace" id="workspace">
+    <button class="drawer-shade" id="drawer-shade" aria-label="Close sessions" hidden></button>
+    <aside class="sidebar" id="sidebar" aria-label="Session navigation">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">pi</span><span>Pi agent<span class="brand-sub">AGENTBOX</span></span><button id="close-drawer" class="icon-button mobile-only" aria-label="Close sessions">&times;</button></div>
+      <button id="new-session" class="new-session" disabled><span aria-hidden="true">+</span> New session <kbd>N</kbd></button>
+      <label class="section-label" for="profile-filter">PROFILE</label>
+      <select id="profile-filter" disabled aria-label="Filter sessions by profile"><option value="">All profiles</option></select>
+      <div class="section-heading"><span class="section-label">SESSIONS</span><button id="refresh-sessions" class="text-button" disabled>Refresh</button></div>
+      <div id="sessions" class="session-list"><p class="sidebar-empty">Connect to find your sessions.</p></div>
+      <div class="sidebar-footer"><span class="connection-dot" id="connection-dot"></span><span id="connection-label">Not connected</span><button class="text-button" id="logout" disabled>Log out</button></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <button id="open-drawer" class="icon-button mobile-only" aria-label="Open sessions" aria-expanded="false" aria-controls="sidebar">&#9776;</button>
+        <div class="session-heading"><h1 id="session-title">Pi coding workspace</h1><p id="session-subtitle">Code, tools, and persistent conversations.</p></div>
+        <span id="session-status" class="status-pill">WORKSPACE</span>
+        <button id="end-session" class="text-button" disabled>End session</button>
+      </header>
+      <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="Dismiss notification">&times;</button></div>
+      <div id="conversation" class="conversation" tabindex="0" aria-label="Conversation">
+        <div id="messages" class="messages"></div>
+        <div id="welcome" class="welcome">
+          <div class="eyebrow"><span class="tiny-mark">/</span> PI CODING AGENT</div>
+          <h2>Your codebase.<br><span>One conversation.</span></h2>
+          <p>Ask Pi to inspect code, make changes, and run tests.<br class="desktop-only"> Review tool calls and approvals as it works.</p>
+          <div class="starter-grid">
+            <button class="starter" data-prompt="Explore this codebase and explain its architecture."><span class="starter-icon" aria-hidden="true">[ ]</span><strong>Explore the code</strong><span>Find your way around</span></button>
+            <button class="starter" data-prompt="Review the current changes for bugs and missing tests."><span class="starter-icon" aria-hidden="true">/+</span><strong>Review changes</strong><span>Check for bugs and gaps</span></button>
+            <button class="starter" data-prompt="Help me plan a small, well-tested implementation for "><span class="starter-icon" aria-hidden="true">&gt;_</span><strong>Plan a change</strong><span>Implementation and tests</span></button>
+          </div>
+          <p class="welcome-foot" id="welcome-foot">Connect to your runtime to get started.</p>
+        </div>
+      </div>
+      <button id="jump-latest" class="jump-latest" hidden>Jump to latest &darr;</button>
+      <section class="compose-area" aria-label="Message composer">
+        <div id="approvals" class="approvals" aria-label="Agent requests"></div>
+        <div class="activity" aria-live="polite"><span id="activity-text">Ready when you are</span><span id="queue-count"></span></div>
+        <form id="composer" class="composer">
+          <div id="attachments" class="attachments"></div>
+          <label class="sr-only" for="prompt">Message the agent</label>
+          <textarea id="prompt" rows="3" placeholder="Ask anything, or describe what you'd like to build..." disabled></textarea>
+          <div class="composer-toolbar">
+            <div class="composer-options"><button type="button" id="attach" class="icon-button" aria-label="Attach images" title="Attach images (up to 5 MiB total)" disabled>+</button><input id="image-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden><label class="sr-only" for="model">Model</label><select id="model" disabled><option>No model selected</option></select></div>
+            <div class="send-options"><label class="sr-only" for="send-mode">While the agent is working</label><select id="send-mode" hidden><option value="steer">Steer now</option><option value="followUp">Follow up</option></select><button id="stop" class="stop-button" type="button" hidden>Stop</button><button id="send" class="send-button" type="submit" disabled>Send <span aria-hidden="true">&uarr;</span></button></div>
+          </div>
+        </form>
+        <div class="composer-foot"><span><kbd>Enter</kbd> send <span class="foot-divider">/</span> <kbd>Shift Enter</kbd> new line</span><span>Agentbox <span class="foot-divider">/</span> Pi runtime</span></div>
+      </section>
+    </main>
+  </div>
+  <dialog id="login-dialog" aria-labelledby="login-title">
+    <form id="login-form" class="dialog-body" autocomplete="off">
+      <span class="dialog-eyebrow">PI AGENT / AGENTBOX</span><h2 id="login-title">Connect to Pi<span class="accent">.</span></h2><p>Open your coding sessions, review agent activity, and continue work on your codebase.</p>
+      <label for="token">Bearer token / access password</label><input id="token" type="password" required autocomplete="off" spellcheck="false" autocapitalize="none" autofocus>
+      <p class="field-note">Used as a bearer token. Held only in this tab's memory, never saved. Use a trusted HTTPS or private VPN connection.</p>
+      <p id="login-error" class="form-error" role="alert" hidden></p>
+      <button id="login-submit" class="primary-button" type="submit">Open workspace <span aria-hidden="true">&rarr;</span></button>
+      <span class="dialog-bottom">Same-origin connection. No SSH. No stored credentials.</span>
+    </form>
+  </dialog>
+  <dialog id="new-dialog" aria-labelledby="new-title">
+    <form id="new-form" class="dialog-body">
+      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a workspace profile and give this conversation a name.</p>
+      <label for="new-profile">Profile</label><select id="new-profile" required></select>
+      <label for="new-name">Session name <span class="muted">(optional)</span></label><input id="new-name" maxlength="200" placeholder="What are we working on?" autocomplete="off">
+      <p id="new-error" class="form-error" role="alert" hidden></p><button id="create-session" class="primary-button" type="submit">Create session <span aria-hidden="true">&rarr;</span></button>
+    </form>
+  </dialog>
+  <dialog id="end-dialog" aria-labelledby="end-title">
+    <form id="end-form" class="dialog-body">
+      <span class="dialog-eyebrow">RELEASE RUNTIME CAPACITY</span><h2 id="end-title">End this session?</h2>
+      <p id="end-description"></p><p>This stops the Pi process and its tools. Persisted conversation history is not deleted and can be resumed. Unsent drafts are not part of that history.</p>
+      <button type="submit" class="primary-button">End session</button><button type="button" id="cancel-end" class="text-button">Keep session open</button>
+    </form>
+  </dialog>
+  <noscript>This workspace requires JavaScript. No build or browser extensions are needed.</noscript>
+</body>
+</html>

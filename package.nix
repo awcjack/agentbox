@@ -30,7 +30,8 @@ let
       exec        Execute a command in the container
       opencode    Start opencode in a tmux session
       pi          Start Pi in a tmux session
-      pi-web      Show the Pi browser interface URL
+      pi-web      Show the Pi ttyd browser TUI URL
+      pi-ui       Show the native Pi chat UI URL (no SSH)
       pi-rpc      Show and check the Pi RPC API endpoint
       claude      Attach to the Claude Code tmux session (starts it if needed)
       restart     Restart the container service
@@ -46,7 +47,8 @@ let
       agentbox logs -f                  # Follow container logs
       agentbox opencode                 # Start opencode in tmux
       agentbox pi                       # Start Pi in tmux
-      agentbox pi-web                   # Show Pi browser URL
+      agentbox pi-web                   # Show Pi ttyd browser URL
+      agentbox pi-ui                    # Show native Pi chat URL
       agentbox pi-rpc                   # Check Pi RPC API health
       agentbox claude                   # Attach to Claude Code in tmux
       agentbox service start my-service # Start a configured on-demand service
@@ -153,8 +155,20 @@ let
 
         cmd_pi_web() {
           ensure_running
-          echo "Pi web interface: http://localhost:4097"
+          echo "Pi ttyd browser TUI: http://localhost:4097"
           echo "Basic Auth username: pi"
+        }
+
+        cmd_pi_ui() {
+          ensure_running
+          if ! docker exec "$CONTAINER_NAME" bash -c '[ "''${ENABLE_PI_RPC_API:-false}" = true ]'; then
+            echo "Pi UI requires settings.piRpcApi.enable = true." >&2
+            return 1
+          fi
+          local port
+          port=$(docker exec "$CONTAINER_NAME" bash -c 'printf %s "''${PI_RPC_PORT:-4098}"')
+          echo "Pi chat UI: http://localhost:$port/"
+          echo "Enter the configured RPC bearer token in the browser; no SSH required."
         }
 
         cmd_pi_rpc() {
@@ -360,6 +374,7 @@ let
           opencode) cmd_opencode ;;
           pi)       cmd_pi ;;
           pi-web)   cmd_pi_web ;;
+          pi-ui)    cmd_pi_ui ;;
           pi-rpc)   cmd_pi_rpc ;;
           claude)   cmd_claude ;;
           restart)  cmd_restart ;;

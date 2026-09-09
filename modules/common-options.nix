@@ -239,7 +239,8 @@ in
         type = lib.types.bool;
         default = true;
         description = ''
-          Expose Pi's wrapped TUI in a browser on port 4097. The service uses a
+          Expose Pi's wrapped TUI through ttyd in a browser on port 4097, not the
+          native chat UI (which is served by piRpcApi). The service uses a
           persistent tmux session and the same ~/.pi state as the CLI. Set
           PI_WEB_PASSWORD (or OPENCODE_PASSWORD as a fallback) in environmentFile
           when the service is reachable beyond host loopback.
@@ -1461,7 +1462,7 @@ in
         enable = lib.mkOption {
           type = lib.types.bool;
           default = false;
-          description = "Enable the authenticated Pi RPC HTTP/SSE supervisor.";
+          description = "Enable the authenticated Pi RPC HTTP/SSE supervisor and its native browser chat UI at /.";
         };
         bindAddress = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
@@ -1487,10 +1488,16 @@ in
             type = lib.types.listOf (
               lib.types.submodule {
                 options = {
+                  tokenEnv = lib.mkOption {
+                    type = lib.types.nullOr (lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*");
+                    default = null;
+                    example = "OPENCODE_PASSWORD";
+                    description = "Environment variable containing the raw bearer token, hashed at runtime startup. When set, replaces sha256Env in the generated config; never put the token value here.";
+                  };
                   sha256Env = lib.mkOption {
                     type = lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*";
                     default = "PI_RPC_TOKEN_SHA256";
-                    description = "Environment variable containing the lowercase SHA-256 bearer-token digest.";
+                    description = "Environment variable containing the lowercase SHA-256 bearer-token digest. Used only when tokenEnv is null.";
                   };
                   scopes = lib.mkOption {
                     type = lib.types.nonEmptyListOf (
@@ -1509,7 +1516,7 @@ in
               }
             );
             default = [ { } ];
-            description = "Runtime bearer-token hash references. Hash values must be supplied by environmentFile and never enter the Nix store.";
+            description = "Runtime bearer-token or hash references. Secret values must be supplied by environmentFile and never enter the Nix store.";
           };
         };
         allowedCommands = lib.mkOption {

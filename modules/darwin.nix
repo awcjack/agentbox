@@ -208,7 +208,15 @@ let
     port = cfg.settings.piRpcApi.port;
     executable = "/bin/pi";
     allowedOrigins = cfg.settings.piRpcApi.allowedOrigins;
-    auth.tokens = cfg.settings.piRpcApi.auth.tokens;
+    auth.tokens = map (
+      token:
+      {
+        inherit (token) scopes;
+      }
+      // (
+        if token.tokenEnv != null then { inherit (token) tokenEnv; } else { inherit (token) sha256Env; }
+      )
+    ) cfg.settings.piRpcApi.auth.tokens;
     allowedCommands = cfg.settings.piRpcApi.allowedCommands;
     profiles = lib.mapAttrs (
       _name: profile:
@@ -601,8 +609,8 @@ let
       echo ""
       echo "Agentbox started!"
       echo "  OpenCode: http://localhost:4096"
-      ${lib.optionalString cfg.settings.enablePiWeb ''echo "  Pi:       http://localhost:4097"''}
-      ${lib.optionalString cfg.settings.piRpcApi.enable ''echo "  Pi RPC:   http://localhost:${toString cfg.settings.piRpcApi.port}"''}
+      ${lib.optionalString cfg.settings.enablePiWeb ''echo "  Pi ttyd:  http://localhost:4097"''}
+      ${lib.optionalString cfg.settings.piRpcApi.enable ''echo "  Pi UI:    http://localhost:${toString cfg.settings.piRpcApi.port}/"''}
       echo ""
       echo "Use 'agentbox shell' to access the container"
     }
@@ -699,8 +707,19 @@ let
     cmd_pi_web() {
       check_docker
       ensure_container_running
-      echo "Pi web interface: http://localhost:4097"
+      echo "Pi ttyd browser TUI: http://localhost:4097"
       echo "Basic Auth username: pi"
+    }
+
+    cmd_pi_ui() {
+      check_docker
+      ensure_container_running
+      if [ "${lib.boolToString cfg.settings.piRpcApi.enable}" != true ]; then
+        echo "Pi UI requires settings.piRpcApi.enable = true." >&2
+        return 1
+      fi
+      echo "Pi chat UI: http://localhost:${toString cfg.settings.piRpcApi.port}/"
+      echo "Enter the configured RPC bearer token in the browser; no SSH required."
     }
 
     cmd_pi_rpc() {
@@ -923,7 +942,8 @@ let
       shell       Open a shell in the container
       opencode    Start OpenCode in a tmux session
       pi          Start Pi in a tmux session
-      pi-web      Show the Pi browser interface URL
+      pi-web      Show the Pi ttyd browser TUI URL
+      pi-ui       Show the native Pi chat UI URL (no SSH)
       pi-rpc      Show and check the Pi RPC API endpoint
       claude      Attach to the Claude Code tmux session
       pause       Freeze container processes without losing tmux sessions
@@ -950,6 +970,7 @@ let
       opencode)   cmd_opencode ;;
       pi)         cmd_pi ;;
       pi-web)     cmd_pi_web ;;
+      pi-ui)      cmd_pi_ui ;;
       pi-rpc)     cmd_pi_rpc ;;
       claude)     cmd_claude ;;
       pause)      cmd_pause ;;
@@ -1041,7 +1062,7 @@ in
       }
       {
         assertion = !cfg.settings.piRpcApi.enable || cfg.environmentFile != null;
-        message = "services.agentbox.environmentFile must provide runtime token hashes when the Pi RPC API is enabled";
+        message = "services.agentbox.environmentFile must provide runtime tokens or token hashes when the Pi RPC API is enabled";
       }
       {
         assertion = !cfg.settings.piRpcApi.enable || cfg.settings.piRpcApi.profiles != { };

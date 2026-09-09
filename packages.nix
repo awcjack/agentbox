@@ -142,12 +142,18 @@ in
       testSource = pkgs.runCommand "pi-rpc-runtime-test-source" { } ''
         mkdir -p $out/test
         cp ${./rpc-runtime/runtime.mjs} $out/runtime.mjs
+        cp ${./rpc-runtime/history.mjs} $out/history.mjs
         cp ${./rpc-runtime/supervise.sh} $out/supervise.sh
-        cp ${./rpc-runtime/test/runtime.test.mjs} $out/test/runtime.test.mjs
+        cp ${./rpc-runtime/test}/*.test.mjs $out/test/
+        cp -r ${./rpc-runtime/web} $out/web
       '';
     in
     pkgs.runCommand "pi-rpc-runtime-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
-      TEST_BASH=${pkgs.bash}/bin/bash node --test ${testSource}/test/runtime.test.mjs
+      tests=(${testSource}/test/*.test.mjs)
+      for test in ${testSource}/web/*.test.mjs; do
+        [ ! -f "$test" ] || tests+=("$test")
+      done
+      TEST_BASH=${pkgs.bash}/bin/bash node --test "''${tests[@]}"
       touch $out
     '';
 }
