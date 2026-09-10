@@ -1,5 +1,9 @@
 import { ApiError, createTransport, eventCursor, messageKey, updatePartial, visibleMessages } from "./transport.mjs";
 import { element, imageSource, renderMarkdown } from "./markdown.mjs";
+import { renderSubagents } from "./subagents.mjs";
+import { initSidebarResize } from "./sidebar.mjs";
+
+initSidebarResize();
 
 const $ = (id) => document.getElementById(id);
 const api = createTransport(() => token);
@@ -48,6 +52,10 @@ function updateControls() {
   const ctx = current;
   const streaming = Boolean(ctx?.state.isStreaming);
   const draft = ctx?.record.draft;
+  const answering = Boolean(ctx?.meta?.pendingUi?.some((request) => dialogMethods.has(request.method)));
+  $("composer").hidden = answering;
+  document.querySelector(".activity").hidden = answering;
+  document.querySelector(".composer-foot").hidden = answering;
   $("new-session").disabled = !token || !profiles.length || createDenied || createBusy;
   $("refresh-sessions").disabled = !token;
   $("profile-filter").disabled = !token || !profiles.length;
@@ -160,6 +168,8 @@ function renderContent(parent, content) {
   }
 }
 function renderTool(call, result, key) {
+  const subagents = renderSubagents(call, result, key);
+  if (subagents) return subagents;
   const detail = element("details", `tool-detail${result?.isError ? " error" : ""}`);
   detail.dataset.detailKey = `tool:${key}`;
   const summary = element("summary", "", call.name || result?.toolName || "Tool");
@@ -201,6 +211,7 @@ function renderMessages() {
     for (let blockIndex = 0; blockIndex < content.length; blockIndex++) {
       const block = content[blockIndex];
       if (block.type === "thinking") {
+        if (!block.thinking?.trim()) continue;
         const detail = element("details", "thinking"); detail.dataset.detailKey = `thinking:${messageKey(message) || index}:${blockIndex}`;
         detail.append(element("summary", "", "Thinking"), renderMarkdown(block.thinking || "")); body.append(detail);
       } else if (block.type === "toolCall") {
@@ -248,6 +259,7 @@ function restoreDraft() {
 function renderApprovals(ctx) {
   if (!active(ctx)) return;
   const root = $("approvals");
+  const focusAnswer = root.contains(document.activeElement) || $("composer").contains(document.activeElement) || document.activeElement === document.body;
   const pending = new Map((ctx.meta.pendingUi || []).filter((request) => dialogMethods.has(request.method)).map((request) => [request.id, request]));
   for (const card of [...root.children]) if (!pending.has(card.dataset.id)) card.remove();
   for (const [id, request] of pending) {
@@ -263,6 +275,13 @@ function renderApprovals(ctx) {
       input.value = ctx.record.uiDrafts.get(id) ?? request.prefill ?? (request.method === "select" ? request.options?.[0] || "" : "");
       if (request.placeholder) input.placeholder = request.placeholder;
       input.addEventListener("input", () => ctx.record.uiDrafts.set(id, input.value)); card.append(input);
+      // The workflow tool follows this exact choice with an input request. Advance
+      // immediately so choosing Other opens its typing box, not another Submit step.
+      if (request.method === "select" && request.options?.at(-1) === `${request.options.length}. Other (type an answer)`) {
+        input.addEventListener("change", () => {
+          if (input.value === request.options.at(-1)) answer({ id, value: input.value });
+        });
+      }
     }
     const actions = element("div", "approval-actions");
     if (request.timeout) actions.append(element("span", "approval-expiry", "Time-limited request"));
@@ -274,6 +293,7 @@ function renderApprovals(ctx) {
     }
     const accept = element("button", "approve", request.method === "confirm" ? "Confirm" : "Submit"); accept.type = "submit"; actions.append(accept);
     card.append(actions); root.append(card);
+    if (focusAnswer && root.firstElementChild === card) (input || accept).focus();
     card.addEventListener("submit", (event) => { event.preventDefault(); answer(request.method === "confirm" ? { id, confirmed: true } : { id, value: input.value }); });
     async function answer(body) {
       if (!canWrite(ctx, "ui") || card.dataset.busy === "true") return;
@@ -493,7 +513,7 @@ function openNew() {
 $("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
   const ctx = current;
-  if (!canWrite(ctx) || ctx.record.sending || ctx.record.readingImages) return;
+  if (!canWrite(ctx) || $("composer").hidden || ctx.record.sending || ctx.record.readingImages) return;
   const draft = ctx.record.draft, text = draft.text.trim(), images = draft.images.slice(), version = draft.version, ownEpoch = epoch;
   if (!text && !images.length) return;
   if (images.length && ctx.state.model?.input && !ctx.state.model.input.includes("image")) { showNotice("The selected model does not accept images. Choose a vision-capable model or remove the attachments.", true); return; }
@@ -506,7 +526,7 @@ $("composer").addEventListener("submit", async (event) => {
     if (ownEpoch !== epoch) return;
     if (draft.version === version) { draft.text = ""; draft.images = []; draft.version++; }
     ctx.record.notice = null;
-    if (current?.record === ctx.record) { restoreDraft(); showNotice(current.state.isStreaming ? "Message accepted. The agent will pick it up according to your queue mode." : "Message accepted."); requestRefresh(current); }
+    if (current?.record === ctx.record) { restoreDraft(); showNotice(""); requestRefresh(current); }
   } catch (error) {
     if (ownEpoch !== epoch) return;
     if (current?.record === ctx.record) report(error, current, { write: true, command: "prompt", ambiguous: true });

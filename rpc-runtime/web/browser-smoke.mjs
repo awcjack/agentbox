@@ -44,7 +44,7 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -87,7 +87,9 @@ const server = createServer(async (request, response) => {
       session.clients.add(response); response.on("close", () => session.clients.delete(response)); return;
     }
     if (match[2] === "ui") {
+      const pending = session.pendingUi.find((request) => request.id === body.id);
       calls.push({ id: session.id, ui: body }); resolveUi(session, body.id);
+      if (pending?.method === "select" && body.value === "2. Other (type an answer)") requestUi(session, { method: "input", title: pending.title, placeholder: "Type your answer" });
       return json(response, 202, { accepted: true });
     }
     calls.push({ id: session.id, command: body });
@@ -179,6 +181,16 @@ try {
       await page.goto(origin); await login(page, "wrong-token");
       assert.equal(await page.locator("#token").inputValue(), "");
       await login(page); await noOverflow(page);
+      if (label === "desktop") {
+        const handle = page.locator("#sidebar-resizer"), box = await handle.boundingBox();
+        const before = await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width);
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2); await page.mouse.up();
+        assert.equal(await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width), before + 60);
+        await handle.press("ArrowLeft");
+        assert.equal(await handle.getAttribute("aria-valuenow"), String(before + 50));
+        await noOverflow(page);
+      } else assert.equal(await page.locator("#sidebar-resizer").isVisible(), false);
       await openSidebar(); await page.locator("#new-session").click();
       const sessionName = `${label} coding session [slow snapshot]`;
       await page.locator("#new-name").fill(sessionName);
@@ -246,6 +258,8 @@ try {
       assert.equal(await page.locator("#prompt").inputValue(), "Inspect the project\na");
       await page.locator("#prompt").press("Enter");
       await until(() => session.streaming, "prompt accepted");
+      await until(() => page.locator("#prompt").inputValue().then((value) => value === ""), "accepted draft cleared");
+      assert.equal(await page.locator("#notice").isVisible(), false, "successful prompts do not show an acceptance bar");
       assert.equal(calls.find((call) => call.id === session.id && call.command?.type === "prompt").command.images[0].mimeType, "image/png");
       update(session, { type: "text_delta", contentIndex: 0, delta: "Inspecting " });
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Inspecting")), "first streaming delta");
@@ -258,7 +272,11 @@ try {
       await page.locator("#prompt").fill("Then check tests"); await page.locator("#prompt").press("Enter");
       await until(() => session.queued.length === 1, "follow-up queued");
 
+      update(session, { type: "thinking_delta", contentIndex: 1, delta: "  " });
+      await page.waitForTimeout(100);
+      assert.equal(await page.locator(".thinking").count(), 0, "empty thinking is hidden");
       update(session, { type: "thinking_delta", contentIndex: 1, delta: "Check entry points and tests first." });
+      await page.locator(".thinking").waitFor();
       const tool = { type: "toolCall", id: `call-${label}`, name: "read", arguments: { path: "src/main.mjs" } };
       update(session, { type: "toolcall_start", contentIndex: 2, id: tool.id, toolName: tool.name });
       update(session, { type: "toolcall_end", contentIndex: 2, toolCall: tool });
@@ -266,6 +284,8 @@ try {
       emit(session, { type: "tool_execution_start", toolCallId: tool.id, toolName: tool.name, args: tool.arguments });
       const approvalId = requestUi(session, { method: "confirm", title: "Allow reading the entry point?", message: "Pi wants to inspect src/main.mjs", timeout: 60_000 });
       await page.locator(".approval").waitFor();
+      assert.equal(await page.locator("#composer").isVisible(), false);
+      assert.equal(await page.locator(".activity").isVisible(), false);
       await noOverflow(page);
       await page.screenshot({ path: join(output, `pi-workspace-${label}.png`), fullPage: true });
 
@@ -293,6 +313,32 @@ try {
         await card.locator(".approve").click(); await card.waitFor({ state: "hidden" });
         assert.ok(calls.some((call) => call.ui?.id === id && call.ui.value === value));
       }
+      await page.locator("#prompt").fill("Keep my chat draft");
+      const otherId = requestUi(session, { method: "select", title: "What next?", options: ["1. Review", "2. Other (type an answer)"] });
+      await page.locator(".approval select").selectOption("2. Other (type an answer)");
+      await page.locator('.approval input[placeholder="Type your answer"]').fill("Run the integration tests instead");
+      assert.equal(await page.locator("#composer").isVisible(), false);
+      await noOverflow(page);
+      await page.screenshot({ path: join(output, `pi-question-${label}.png`), fullPage: true });
+      await page.locator(".approval .approve").click();
+      await page.locator(".approval").waitFor({ state: "hidden" });
+      assert.ok(calls.some((call) => call.ui?.id === otherId && call.ui.value === "2. Other (type an answer)"));
+      assert.ok(calls.some((call) => call.id === session.id && call.ui?.value === "Run the integration tests instead"));
+      assert.equal(await page.locator("#prompt").inputValue(), "Keep my chat draft");
+      assert.equal(await page.locator("#composer").isVisible(), true);
+
+      const delegated = { type: "toolCall", id: `delegated-${label}`, name: "task", arguments: { jobs: [{ role: "explore", prompt: "Inspect sources" }, { role: "explore", prompt: "Inspect tests" }] } };
+      emit(session, { type: "tool_execution_start", toolCallId: delegated.id, toolName: "task", args: delegated.arguments });
+      emit(session, { type: "tool_execution_update", toolCallId: delegated.id, toolName: "task", partialResult: { details: { jobs: [
+        { role: "explore", prompt: "Inspect sources", status: "running", taskId: "child-one", steps: 1, output: "Reading sources" },
+        { role: "explore", prompt: "Inspect tests", status: "completed", taskId: "child-two", steps: 2, output: "Tests inspected" },
+      ] } } });
+      await until(() => page.locator(".subagents").textContent().then((text) => text.includes("Tests inspected")), "child progress inline");
+      assert.deepEqual(await page.locator(".subagents summary").allTextContents(), ["1. explorerunning", "2. explorecompleted"]);
+      await page.locator(".subagents summary").first().click();
+      await page.locator(".subagents summary").last().click();
+      assert.equal(await page.locator("#session-title").textContent(), session.name);
+      await noOverflow(page);
       const expired = requestUi(session, { method: "confirm", title: "Expiring request", timeout: 100 });
       await page.locator(".approval").waitFor(); resolveUi(session, expired, "extension_ui_expired");
       await page.locator(".approval").waitFor({ state: "hidden" });

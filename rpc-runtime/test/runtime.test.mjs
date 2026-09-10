@@ -212,7 +212,7 @@ test("web assets are public and allowlisted without weakening API authentication
   assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   assert.match(await page.text(), /Pi agent/);
-  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "styles.css", "icon.svg"]) {
+  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "styles.css", "icon.svg"]) {
     const response = await fetch(`${baseUrl}/${asset}`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");

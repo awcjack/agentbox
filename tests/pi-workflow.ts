@@ -180,6 +180,7 @@ const originalConfigPath = process.env.PI_WORKFLOW_CONFIG
 process.env.PI_WORKFLOW_CONFIG = "/managed/workflow.json"
 
 const task = tasks.tools.get("task")
+const updates: any[] = []
 const parallel = await task.execute("task-1", {
   jobs: [
     { role: "reviewer", prompt: "review one" },
@@ -187,7 +188,13 @@ const parallel = await task.execute("task-1", {
     { role: "scout", prompt: "scout three" },
   ],
   concurrency: 9,
-}, undefined, undefined, context())
+}, undefined, (update: any) => updates.push(update.details), context())
+assert.deepEqual(updates[0].jobs.map((job: any) => job.status), ["queued", "queued", "queued"])
+assert.ok(updates.some((update) => update.jobs[0].status === "running" && update.jobs[1].status === "running" && update.jobs[2].status === "queued"))
+assert.ok(updates.some((update) => update.jobs[0].status === "running" && update.jobs[0].steps === 1 && update.jobs[0].output === "result for review one"))
+assert.deepEqual(parallel.details.jobs.map((job: any) => job.status), ["completed", "completed", "completed"])
+assert.deepEqual(parallel.details.jobs.map((job: any) => job.prompt), ["review one", "scout two", "scout three"])
+assert.equal(updates[1].jobs[0].steps, 0) // Previously published snapshots must not mutate.
 assert.equal(parallel.details.concurrency, 2)
 assert.equal(peakActive, 2)
 assert.equal(parallel.details.results.length, 3)

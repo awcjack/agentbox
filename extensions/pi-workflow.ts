@@ -397,6 +397,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
       cwd: string,
       signal: AbortSignal | undefined,
       inherited: { provider?: string; model?: string; thinking?: string },
+      onProgress: (progress: { taskId: string; steps: number; output: string; outputTruncated: boolean }) => void,
     ): Promise<TaskResult> => {
       let taskId: string
       if (job.resume) {
@@ -548,6 +549,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               setAssistantOutput(event.message.errorMessage)
             }
             if (steps >= role.maxSteps && event.message.stopReason === "toolUse") terminate("step_limit")
+            onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
           } catch (error) {
             parserFailure = `Invalid JSON event from workflow child: ${error instanceof Error ? error.message : String(error)}`
             terminate("failed")
@@ -653,6 +655,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           terminate("failed")
         })
         proc.stdin.end(job.prompt)
+        onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
       })
     }
 
@@ -719,19 +722,27 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           thinking: typeof ctx.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
         }
         const results: TaskResult[] = new Array(jobs.length)
+        const progress = jobs.map((job) => ({ role: job.role, prompt: job.prompt, resumed: Boolean(job.resume), taskId: job.resume, status: "queued" } as Record<string, unknown>))
         let next = 0
         let completed = 0
+        const publish = () => onUpdate?.(textResult(`${completed}/${jobs.length} child jobs finished.`, {
+          configPath,
+          concurrency,
+          jobs: progress.map((job) => ({ ...job })),
+          results: results.filter(Boolean),
+        }) as any)
+        publish()
         const workers = Array.from({ length: concurrency }, async () => {
           while (true) {
             const index = next++
             if (index >= jobs.length) return
-            results[index] = await runJob(jobs[index], config, ctx.cwd, signal, inherited)
+            results[index] = await runJob(jobs[index], config, ctx.cwd, signal, inherited, (update) => {
+              progress[index] = { ...progress[index], ...update, status: "running" }
+              publish()
+            })
+            progress[index] = { ...progress[index], ...results[index] }
             completed++
-            onUpdate?.(textResult(`${completed}/${jobs.length} child jobs finished.`, {
-              configPath,
-              concurrency,
-              results: results.filter(Boolean),
-            }) as any)
+            publish()
           }
         })
         await Promise.all(workers)
@@ -752,6 +763,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         return textResult(`${jobs.length - failed}/${jobs.length} child jobs completed.\n\n${formatted}`, {
           configPath,
           concurrency,
+          jobs: progress,
           results,
         }, failed === results.length)
       },

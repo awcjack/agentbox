@@ -10,6 +10,8 @@ const WEB_ASSETS = new Map([
   ["/app.mjs", ["app.mjs", "text/javascript; charset=utf-8"]],
   ["/transport.mjs", ["transport.mjs", "text/javascript; charset=utf-8"]],
   ["/markdown.mjs", ["markdown.mjs", "text/javascript; charset=utf-8"]],
+  ["/subagents.mjs", ["subagents.mjs", "text/javascript; charset=utf-8"]],
+  ["/sidebar.mjs", ["sidebar.mjs", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/icon.svg", ["icon.svg", "image/svg+xml"]],
 ].map(([path, [file, type]]) => [path, { type, data: readFileSync(new URL(`./web/${file}`, import.meta.url)) }]));

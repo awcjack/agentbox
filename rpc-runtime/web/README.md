@@ -2,7 +2,7 @@
 
 Dependency-free frontend for the Pi RPC runtime. Serve this directory at `/`
 or a subdirectory such as `/web/`, with `/v1/*` routed to the runtime on the
-**same origin**. `index.html`, `styles.css`, `icon.svg`, and the three application
+**same origin**. `index.html`, `styles.css`, `icon.svg`, and the five application
 ES modules are the only deployed assets required. Serve `.mjs` as JavaScript.
 There is no package installation, build step, SSH client, or external resource.
 
@@ -16,6 +16,8 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 
 - Warm charcoal, responsive chat workspace with a mobile session drawer,
   profile filtering, named sessions, and persisted-history resume.
+- Drag the desktop sidebar's right edge to resize it. The focused separator also
+  supports Left/Right arrows, Shift for larger steps, and Home/End for limits.
 - Bearer token/password input, held only in memory and cleared on logout or
   page exit. No cookies, local/session storage, IndexedDB, or service worker.
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,
@@ -28,10 +30,16 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
   links, and fenced code with copy/select fallback. Raw HTML is never interpreted.
   Remote Markdown images are not fetched; only validated inline raster data is
-  displayed. Tool input/output/details and thinking are collapsible.
+  displayed. Tool input/output/details and nonempty thinking are collapsible.
 - Confirm, select, input, and editor approvals, including cancellation and
   supervisor-driven expiry/resolution across browsers. Approval edits and message
   drafts survive session switches within the current tab, not reload/logout.
+- Pending requests replace the chat composer without losing its draft. Choosing
+  the workflow question's "Other (type an answer)" opens its text input directly;
+  submitting that field answers the question, not the chat queue.
+- Subagent task cards show ordered child status and output inside the parent
+  conversation. Children keep isolated sessions; no session switch is needed.
+- Successful prompts clear the accepted draft without showing a success bar.
 - Visible network/auth/scope errors, disabled unavailable controls, bounded
   reconnect backoff, and snapshot reconciliation without prompt retries.
 
