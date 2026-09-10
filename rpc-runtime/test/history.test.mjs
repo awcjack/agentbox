@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
+import { createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
 
 const ID = "01991817-3dac-7000-8123-0123456789ab";
 const OLD_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
@@ -14,6 +14,56 @@ async function fixture(t) {
   return { root, profile: { sessionDir: root, cwd: "/workspace" } };
 }
 function header(id = ID, cwd = "/workspace") { return JSON.stringify({ type: "session", version: 3, id, cwd }); }
+
+test("conversation history publishes a private v3 child including compaction and metadata, never rewrites source", async (t) => {
+  const { root, profile } = await fixture(t);
+  const entries = [
+    { type: "model_change", id: "m", parentId: null, provider: "test", modelId: "test" },
+    { type: "message", id: "u", parentId: "m", message: { role: "user", content: "hello" } },
+    { type: "custom", id: "state", parentId: "u", customType: "workflow", data: { todos: [] } },
+    { type: "compaction", id: "c", parentId: "state", summary: "summary", firstKeptEntryId: "u", tokensBefore: 10 },
+    { type: "message", id: "target", parentId: "c", message: { role: "user", content: "edit me" } },
+  ];
+  const source = join(root, `${ID}.jsonl`), snapshot = { entries, leafId: "target" };
+  const original = [header(), ...entries.map((e) => JSON.stringify(e))].join("\n") + "\n";
+  await writeFile(source, original);
+  const path = await createConversationHistory(profile, ID, snapshot, entries.slice(0, -1), OLD_ID, 4096);
+  const child = (await readFile(path, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(child.slice(1), entries.slice(0, -1));
+  assert.equal(child[0].id, OLD_ID);
+  assert.equal(child[0].version, 3);
+  assert.equal(child[0].parentSession, await realpath(source));
+  assert.equal(child[0].cwd, profile.cwd);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.equal(await readFile(source, "utf8"), original);
+  assert.equal((await readdir(root)).some((file) => file.endsWith(".tmp")), false);
+  assert.equal(await resolveHistorySession(profile, OLD_ID), path);
+});
+
+test("conversation history fails closed on unpersisted, oversized, old-version, ambiguous and symlink sources", async (t) => {
+  const { root, profile } = await fixture(t);
+  const source = join(root, `${ID}.jsonl`);
+  const entries = [{ type: "message", id: "u", parentId: null, message: { role: "user", content: "hello" } }];
+  const snapshot = { entries, leafId: "u" };
+  const valid = `${header()}\n${JSON.stringify(entries[0])}\n`;
+  for (const text of [header(), valid + '{"incomplete":', valid.replace('"version":3', '"version":2'), valid.replace("hello", "other")]) {
+    await writeFile(source, text);
+    await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 4096));
+    assert.equal(await readFile(source, "utf8"), text);
+  }
+  await writeFile(source, valid);
+  await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 10));
+  const duplicate = join(root, `duplicate_${ID}.jsonl`);
+  await writeFile(duplicate, valid);
+  await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 4096));
+  await rm(source);
+  await symlink(duplicate, source);
+  // The only validated source is the direct regular duplicate; removing it
+  // leaves an untrusted symlink, not a usable history source.
+  await rm(duplicate);
+  await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 4096));
+  assert.equal(await resolveHistorySession(profile, OLD_ID), null);
+});
 
 test("history reads Pi UUIDv7 and legacy UUIDv4 sessions and bounded metadata", async (t) => {
   const { root, profile } = await fixture(t);

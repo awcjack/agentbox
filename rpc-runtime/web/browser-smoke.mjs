@@ -15,9 +15,19 @@ const models = [
   { provider: "fixture", id: "pi-reasoning", name: "Pi Reasoning", input: ["text", "image"] },
 ];
 const sessions = new Map(), saved = new Map(), calls = [], serverErrors = [];
+const entryIds = new WeakMap();
+function conversationSnapshot(session) {
+  let parentId = null;
+  const messages = session.messages.map((message) => {
+    if (!entryIds.has(message)) entryIds.set(message, randomUUID());
+    const entry = { entryId: entryIds.get(message), parentId, message };
+    parentId = entry.entryId; return entry;
+  });
+  return { nativeSessionId: session.nativeSessionId, leafId: parentId, messages };
+}
 let tick = Date.now();
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
-const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, profile: "default", cwd: "/workspace/project", status: "running", latestEventId: session.cursor, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
+const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", latestEventId: session.cursor, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
 function emit(session, event) {
   const frame = `id: ${++session.cursor}\nevent: pi\ndata: ${JSON.stringify(event)}\n\n`;
   session.events.push({ id: session.cursor, frame });
@@ -70,9 +80,45 @@ const server = createServer(async (request, response) => {
       sessions.set(session.id, session); saved.set(session.nativeSessionId, session);
       return json(response, 201, { session: meta(session) });
     }
-    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events))?$/.exec(url.pathname);
+    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation))?$/.exec(url.pathname);
     const session = match && sessions.get(match[1]);
     if (!session) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
+    if (match[2] === "conversation") {
+      const snapshot = conversationSnapshot(session);
+      calls.push({ id: session.id, conversation: request.method, body });
+      if (request.method === "GET") return json(response, 200, snapshot);
+      assert.equal(request.method, "POST");
+      assert.deepEqual(Object.keys(body).sort(), ["action", "entryId", "expectedLeafId", "expectedNativeSessionId"]);
+      if (body.expectedNativeSessionId !== snapshot.nativeSessionId || body.expectedLeafId !== snapshot.leafId) return json(response, 409, { error: { code: "conversation_stale", message: "Conversation changed; refresh before trying again." } });
+      if (session.streaming || session.queued.length || session.pendingUi.length || session.conversationReplacing) return json(response, 409, { error: { code: "conversation_locked", message: "Conversation is busy." } });
+      if (session.failConversation) return json(response, 503, { error: { code: "fixture_failure", message: "Fixture replacement failed." } });
+      const index = snapshot.messages.findIndex((entry) => entry.entryId === body.entryId && entry.message.role === "user");
+      assert.ok(index >= 0); assert.ok(["fork", "revert"].includes(body.action));
+      const content = snapshot.messages[index].message.content;
+      const draft = { text: typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n"), images: typeof content === "string" ? [] : content.filter((block) => block.type === "image") };
+      if (session.holdConversation) await new Promise((resolve) => { session.releaseConversation = resolve; });
+      let destination;
+      if (body.action === "fork") {
+        destination = { ...session, id: randomUUID(), nativeSessionId: randomUUID(), name: `${session.name} fork`, cursor: 0, events: [], clients: new Set(), subscriptions: 0, messages: structuredClone(session.messages.slice(0, index)), pendingUi: [], queued: [], holdConversation: false, releaseConversation: null };
+        sessions.set(destination.id, destination);
+      } else {
+        session.conversationReplacing = true;
+        emit(session, { type: "supervisor", event: "conversation_replacing" });
+        emit(session, { type: "supervisor", event: "conversation_source_exited" });
+        disconnect(session);
+        await new Promise((resolve) => { session.finishReplacement = resolve; });
+        saved.set(session.nativeSessionId, { ...session, messages: structuredClone(session.messages) });
+        session.nativeSessionId = randomUUID(); session.messages = session.messages.slice(0, index);
+        session.events = []; session.conversationReplacing = false;
+        emit(session, { type: "supervisor", event: "conversation_changed", nativeSessionId: session.nativeSessionId });
+        destination = session;
+      }
+      saved.set(destination.nativeSessionId, destination);
+      return json(response, 200, { session: meta(destination), draft });
+    }
+    if (request.method === "POST" && (match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models"].includes(body.type)))) {
+      assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "web writes carry the current native session ID");
+    }
     if (request.method === "DELETE") {
       calls.push({ id: session.id, method: "DELETE" });
       disconnect(session); sessions.delete(session.id);
@@ -411,6 +457,121 @@ try {
       assert.equal(creations(), creationCount, "return sends no creation/resume POST");
       assert.deepEqual([...sessions.keys()].sort(), runtimeIds, "return does not create a duplicate runtime process");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
+      // Exercise history actions separately from the original streaming/history fixtures.
+      const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=" };
+      const raw = "Raw **markdown** and `code`\n\n```js\nconst copied = true;\n```";
+      complete(other, { role: "user", content: "Retained prefix", timestamp: ++tick });
+      complete(other, { role: "assistant", model: "pi-reasoning", provider: "historical-provider", responseModel: "actual-response-model", content: [{ type: "text", text: raw }, { type: "thinking", thinking: "SECRET THINKING" }, { type: "toolCall", id: `copy-${label}`, name: "read", arguments: { path: "SECRET TOOL" } }], timestamp: ++tick });
+      complete(other, { role: "user", content: [{ type: "text", text: "Restore this **raw** draft" }, image], timestamp: ++tick });
+      complete(other, { role: "assistant", content: [{ type: "text", text: "Discarded old response" }], timestamp: ++tick });
+      const target = page.locator("article.user").filter({ hasText: "Restore this" });
+      const action = (kind) => target.locator(`[data-conversation-action="${kind}"]`);
+      const ready = async (tab = page) => until(async () => await tab.locator("#session-status").textContent() === "READY" && await tab.locator("#connection-label").textContent() === "Connected", "conversation ready");
+      const mutations = () => calls.filter((call) => call.id === other.id && call.conversation === "POST");
+      await target.waitFor(); await ready();
+      assert.equal(await page.locator(".message-model").textContent(), "pi-reasoning / historical-provider");
+      assert.equal(await page.locator(".message-model").getAttribute("title"), "Response model: actual-response-model");
+      assert.equal(await page.locator("#model").inputValue(), JSON.stringify(["fixture", "pi-fast"]), "historical label differs from selected model");
+      await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedText = text; } } }));
+      await page.getByRole("button", { name: "Copy response", exact: true }).first().click();
+      await until(() => page.evaluate(() => window.copiedText === undefined ? false : true), "clipboard write");
+      assert.equal(await page.evaluate(() => window.copiedText), raw, "copy contains raw markdown, not thinking or tools");
+      await target.getByRole("button", { name: "Copy message", exact: true }).click();
+      await until(() => page.evaluate(() => window.copiedText).then((text) => text === "Restore this **raw** draft"), "user text copied without image");
+      await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new Error("Clipboard denied"); } } }));
+      await page.getByRole("button", { name: "Copy response", exact: true }).first().click();
+      await page.locator("#copy-dialog").waitFor();
+      assert.equal(await page.locator("#copy-text").inputValue(), raw);
+      assert.equal(await page.locator("#copy-text").evaluate((node) => node.value.slice(node.selectionStart, node.selectionEnd)), raw);
+      await noOverflow(page); await page.locator("#close-copy").click();
+      for (const kind of ["fork", "revert"]) {
+        await action(kind).click(); await page.locator("#conversation-action-dialog").waitFor();
+        assert.equal(await page.locator("#conversation-action-preview").textContent(), "Restore this **raw** draft");
+        await page.locator("#cancel-conversation-action").click();
+        assert.equal(mutations().length, 0, "cancel never mutates");
+        assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
+      }
+      other.streaming = true; emit(other, { type: "agent_start" });
+      await until(() => action("fork").isDisabled(), "streaming disables history actions");
+      assert.equal(await action("revert").isDisabled(), true);
+      other.streaming = false; emit(other, { type: "agent_end" });
+      await until(() => action("fork").isEnabled(), "idle enables history actions");
+      await page.locator("#image-files").setInputFiles({ name: "draft.png", mimeType: "image/png", buffer: Buffer.from(image.data, "base64") });
+      await page.locator(".attachment img").waitFor();
+      const preservedDraft = async () => {
+        assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
+        assert.equal(await page.locator(".attachment img").getAttribute("src"), `data:image/png;base64,${image.data}`);
+      };
+      await action("fork").click(); await page.locator("#conversation-action-dialog").waitFor();
+      other.messages.push({ role: "assistant", content: "Concurrent leaf", timestamp: ++tick });
+      await page.locator("#confirm-conversation-action").click();
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Conversation changed")), "stale mutation rejected");
+      await ready(); await page.waitForTimeout(300);
+      assert.equal(mutations().length, 1, "stale mutations are never automatically retried");
+      await preservedDraft();
+      for (const kind of ["fork", "revert"]) {
+        other.failConversation = true;
+        await action(kind).click(); await page.locator("#confirm-conversation-action").click();
+        await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Fixture replacement failed")), `${kind} failure shown`);
+        await until(() => action(kind).isEnabled(), "failure releases busy controls");
+        await preservedDraft(); other.failConversation = false;
+        await page.locator("#dismiss-notice").click();
+      }
+      const originalNative = other.nativeSessionId, originalMessages = structuredClone(other.messages), originalCursor = other.cursor;
+      other.holdConversation = true;
+      await action("fork").click(); await page.locator("#confirm-conversation-action").click();
+      await until(() => Boolean(other.releaseConversation), "fork request gated");
+      assert.equal(await action("fork").isDisabled(), true); assert.equal(await action("revert").isDisabled(), true);
+      assert.equal(await page.locator("#send").isDisabled(), true);
+      other.releaseConversation(); other.holdConversation = false;
+      await until(() => page.locator("#session-title").textContent().then((text) => text === `${other.name} fork`), "fork selected");
+      await ready();
+      const fork = [...sessions.values()].find((entry) => entry.name === `${other.name} fork`);
+      assert.ok(fork && fork.id !== other.id && fork.nativeSessionId !== originalNative);
+      assert.equal(other.nativeSessionId, originalNative); assert.deepEqual(other.messages, originalMessages); assert.equal(other.cursor, originalCursor);
+      assert.deepEqual(fork.messages, originalMessages.slice(0, 2), "fork branches before selected user");
+      assert.equal(await page.locator("#prompt").inputValue(), "Restore this **raw** draft");
+      assert.equal(await page.locator(".attachment img").getAttribute("src"), `data:image/png;base64,${image.data}`);
+      await openSidebar();
+      assert.equal(await page.locator(".session-item.active").textContent().then((text) => text.includes(fork.name)), true);
+      await page.locator(".session-item").filter({ hasText: other.name }).filter({ hasNotText: " fork" }).click();
+      await ready(); await preservedDraft();
+      const replacementObserver = await context.newPage(); watch(replacementObserver);
+      await replacementObserver.goto(origin); await login(replacementObserver);
+      if (label === "mobile") await replacementObserver.locator("#open-drawer").click();
+      await replacementObserver.locator(".session-item").filter({ hasText: other.name }).filter({ hasNotText: " fork" }).click();
+      await ready(replacementObserver);
+      await until(() => other.clients.size === 2, "observer subscribed");
+      assert.ok((await replacementObserver.locator("#messages").textContent()).includes("Discarded old response"));
+      await replacementObserver.locator("#prompt").fill("Observer keeps its own draft");
+      const subscriptionsBeforeReplace = other.subscriptions;
+      await action("revert").click(); await page.locator("#confirm-conversation-action").click();
+      await until(() => Boolean(other.finishReplacement), "replacement source exited");
+      await until(() => replacementObserver.locator('[data-conversation-action="revert"]').first().isDisabled(), "observer locked during replacement");
+      await page.waitForTimeout(200);
+      assert.equal(other.conversationReplacing, true);
+      assert.equal(await page.locator("#send").isDisabled(), true);
+      other.finishReplacement();
+      await ready(); await ready(replacementObserver);
+      await until(() => other.subscriptions >= subscriptionsBeforeReplace + 2, "both browsers reconnect after replacement");
+      assert.ok(sessions.has(other.id)); assert.notEqual(other.nativeSessionId, originalNative);
+      assert.deepEqual(other.messages, originalMessages.slice(0, 2));
+      assert.equal(other.events.length, 1); assert.ok(other.events[0].id > originalCursor + 2, "new event ring retains monotonic cursor");
+      assert.equal(await page.locator("#session-title").textContent(), other.name);
+      assert.equal(await page.locator("#prompt").inputValue(), "Restore this **raw** draft");
+      assert.equal(await page.locator(".attachment img").getAttribute("src"), `data:image/png;base64,${image.data}`);
+      for (const tab of [page, replacementObserver]) {
+        await until(() => tab.locator("article.message").count().then((count) => count === 2), "replacement clears old transcript");
+        assert.equal((await tab.locator("#messages").textContent()).includes("Discarded old response"), false);
+        assert.equal((await tab.locator("#messages").textContent()).includes("Concurrent leaf"), false);
+        await noOverflow(tab);
+      }
+      assert.equal(await replacementObserver.locator("#prompt").inputValue(), "Observer keeps its own draft");
+      await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-reasoning"]));
+      await until(() => other.model.id === "pi-reasoning", "post-revert write uses replacement native ID");
+      await replacementObserver.close();
+      assert.equal(mutations().length, 5, "cancel, stale and failure paths never silently retry");
+      console.log(`${label}: PASS raw copy, clipboard fallback, historical model/title, action cancel, busy controls, stale/no retry, failure drafts, fork identity/draft/images, revert identity/draft/images, observer replacement reconnect`);
       assert.deepEqual(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie })), { local: 0, session: 0, cookies: "" });
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
       assert.equal(await page.locator("#token").inputValue(), "");

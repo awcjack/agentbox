@@ -1,12 +1,53 @@
 import { constants } from "node:fs";
-import { lstat, open, opendir, realpath } from "node:fs/promises";
+import { link, lstat, open, opendir, realpath, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 // Pi currently creates UUIDv7 IDs; older persisted conversations use UUIDv4.
 export const NATIVE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const WINDOW_BYTES = 64 * 1024;
 const MAX_ENTRIES = 10_000;
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+// Pi 0.84.2 SessionManager v3: parentId selects the branch; the last
+// serialized entry becomes the leaf on open. Never truncate the source file.
+export function conversationBranch(data) {
+  if (!data || !Array.isArray(data.entries) || !(data.leafId === null || typeof data.leafId === "string")) {
+    throw new Error("invalid Pi entries snapshot");
+  }
+  const byId = new Map();
+  for (const entry of data.entries) {
+    if (!entry || typeof entry.id !== "string" || !entry.id || byId.has(entry.id)
+      || typeof entry.type !== "string" || entry.type === "session"
+      || !(entry.parentId === null || typeof entry.parentId === "string")) {
+      throw new Error("invalid or duplicate Pi entry");
+    }
+    byId.set(entry.id, entry);
+  }
+  const branch = [], seen = new Set();
+  let id = data.leafId;
+  while (id !== null) {
+    const entry = byId.get(id);
+    if (!entry || seen.has(id)) throw new Error("broken Pi branch");
+    seen.add(id);
+    branch.push(entry);
+    id = entry.parentId;
+  }
+  return branch.reverse();
+}
+
+export function conversationDraft(message) {
+  if (typeof message.content === "string") return { text: message.content, images: [] };
+  if (!Array.isArray(message.content)) throw new Error("unsupported user message content");
+  const text = [], images = [];
+  for (const block of message.content) {
+    if (block?.type === "text" && typeof block.text === "string") text.push(block.text);
+    else if (block?.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
+      images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+    } else throw new Error("unsupported user message content");
+  }
+  return { text: text.join("\n"), images };
+}
 
 async function historyDirectory(profile) {
   if (typeof profile.sessionDir !== "string" || !profile.sessionDir) return null;
@@ -50,6 +91,45 @@ export async function resolveHistorySession(profile, id) {
     }
     return match;
   } catch { return null; }
+}
+
+// Read-only validation of the source. All writes go to an exclusively created
+// child file, published only when complete. No client-supplied paths are used.
+export async function createConversationHistory(profile, sourceId, snapshot, prefix, id, maxBytes) {
+  if (!NATIVE_SESSION_ID_RE.test(id) || id === sourceId) throw new Error("invalid child session ID");
+  const source = await resolveHistorySession(profile, sourceId);
+  if (!source) throw new Error("source history is not uniquely persisted");
+  const handle = await open(source, READ_FLAGS);
+  try {
+    const parsed = await readHeader(handle, sourceId, profile.cwd);
+    if (!parsed || parsed.header.version !== 3 || parsed.info.size > maxBytes) throw new Error("unsupported source history");
+    const buffer = Buffer.alloc(parsed.info.size + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const after = await handle.stat();
+    if (bytesRead !== parsed.info.size || after.size !== parsed.info.size || after.mtimeMs !== parsed.info.mtimeMs) {
+      throw new Error("source history changed");
+    }
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
+    const entries = text.trimEnd().split("\n").map((line) => JSON.parse(line));
+    if (!isDeepStrictEqual(entries.slice(1), snapshot.entries)) throw new Error("source history is not fully persisted");
+  } finally { await handle.close(); }
+  const root = await historyDirectory(profile);
+  if (!root || resolve(source, "..") !== root) throw new Error("source directory changed");
+  const timestamp = new Date().toISOString();
+  const path = join(root, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
+  const temporary = join(root, `.conversation-${id}.tmp`);
+  const header = { type: "session", version: 3, id, timestamp, cwd: profile.cwd, parentSession: source };
+  const output = [header, ...prefix].map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+  const child = await open(temporary, "wx", 0o600);
+  try {
+    await child.writeFile(output);
+    await child.sync();
+    await link(temporary, path); // Atomic publication without overwriting any history.
+  } finally {
+    await child.close();
+    await unlink(temporary);
+  }
+  return path;
 }
 
 export async function listHistory(profile, profileName) {

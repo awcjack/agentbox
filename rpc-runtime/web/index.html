@@ -89,5 +89,16 @@
     </form>
   </dialog>
   <noscript>This workspace requires JavaScript. No build or browser extensions are needed.</noscript>
+  <dialog id="conversation-action-dialog" aria-labelledby="conversation-action-title">
+    <form id="conversation-action-form" class="dialog-body">
+      <span class="dialog-eyebrow">CONVERSATION HISTORY</span><h2 id="conversation-action-title"></h2>
+      <p id="conversation-action-description"></p><pre id="conversation-action-preview"></pre>
+      <p>The selected message and its images become an unsent draft, replacing the destination's current draft. Files and tool side effects are not undone. This requires an idle agent and capacity for one additional process.</p>
+      <button id="confirm-conversation-action" class="primary-button" type="submit"></button><button id="cancel-conversation-action" class="text-button" type="button">Cancel</button>
+    </form>
+  </dialog>
+  <dialog id="copy-dialog" aria-labelledby="copy-title">
+    <div class="dialog-body"><h2 id="copy-title">Copy message</h2><p>Clipboard access is unavailable. Copy the selected text manually.</p><textarea id="copy-text" aria-label="Message text to copy" rows="8" readonly></textarea><button id="close-copy" class="text-button" type="button">Close</button></div>
+  </dialog>
 </body>
 </html>

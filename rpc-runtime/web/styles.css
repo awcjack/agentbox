@@ -13,6 +13,7 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 @media(max-width:410px){.composer-options{flex-basis:100%}.send-options{margin-left:auto}.welcome h2{font-size:37px}.status-pill{display:none}.composer-options select{max-width:none}.composer-toolbar{padding-top:0}.composer>textarea{min-height:60px}.jump-latest{bottom:245px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 .sidebar-resizer{display:none}
+.message-header{flex-wrap:wrap}.message-model{font-size:9px;color:var(--dim);overflow-wrap:anywhere;max-width:100%}.message-actions{display:flex;gap:4px;margin:10px 0 0 26px}.message-actions button{font-size:10px}.message-actions button:hover:not(:disabled){color:var(--accent)}#conversation-action-preview{max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:6px}#copy-text{width:100%;font:12px/1.6 var(--mono)}
 @media(min-width:721px){
   .workspace{--sidebar-default-width:260px;grid-template-columns:clamp(220px,var(--sidebar-width,var(--sidebar-default-width)),min(480px,calc(100vw - 420px))) minmax(0,1fr)}
   .sidebar{position:relative;min-width:0}

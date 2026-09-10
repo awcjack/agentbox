@@ -3,7 +3,8 @@ import { EventEmitter } from "node:events";
 import { readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { listHistory, resolveHistorySession, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { isDeepStrictEqual } from "node:util";
 
 const WEB_ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -79,6 +80,28 @@ const READ_COMMANDS = new Set([
   "get_state",
   "get_tree",
 ]);
+
+const RESTORE_SETTINGS = Symbol("restore conversation settings");
+const RESTORE_COMMANDS = new Set(["set_model", "set_thinking_level", "set_auto_compaction", "set_steering_mode", "set_follow_up_mode"]);
+
+function conversationSettings(state) {
+  if (typeof state.model?.provider !== "string" || typeof state.model?.id !== "string"
+    || typeof state.thinkingLevel !== "string" || typeof state.autoCompactionEnabled !== "boolean"
+    || !["all", "one-at-a-time"].includes(state.steeringMode) || !["all", "one-at-a-time"].includes(state.followUpMode)) {
+    throw new HttpError(409, "settings_unavailable", "Pi did not report restorable conversation settings");
+  }
+  return { model: { provider: state.model.provider, id: state.model.id }, thinkingLevel: state.thinkingLevel,
+    autoCompactionEnabled: state.autoCompactionEnabled, steeringMode: state.steeringMode, followUpMode: state.followUpMode };
+}
+
+function checkNativePrecondition(request, session, currentSession) {
+  const expected = request.headers["x-pi-session-id"];
+  if (expected === undefined) return; // Shipped clients did not send this header.
+  if (typeof expected !== "string" || !NATIVE_SESSION_ID_RE.test(expected)) throw new HttpError(400, "invalid_session_precondition", "X-Pi-Session-Id must be a native session UUID");
+  if (currentSession !== session || expected.toLowerCase() !== session.nativeSessionId.toLowerCase()) {
+    throw new HttpError(409, "conversation_stale", "native session changed; refresh before sending a write");
+  }
+}
 
 const SCOPES = new Set([
   "*",
@@ -485,6 +508,11 @@ class Session extends EventEmitter {
     this.events = new EventRing(config.limits.maxEvents, config.limits.maxEventBytes);
     this.stderr = new ByteRing(config.limits.maxStderrBytes);
     this.stopping = null;
+    this.conversationLocked = false;
+    this.conversationReplacing = false;
+    this.uncertainWrite = false;
+    this.agentBusy = false;
+    this.revision = 0;
 
     const args = ["--mode", "rpc"];
     if (profile.sessionDir) args.push("--session-dir", profile.sessionDir);
@@ -524,6 +552,7 @@ class Session extends EventEmitter {
       cwd: this.profile.cwd,
       name: this.name,
       nativeSessionId: this.nativeSessionId,
+      conversationReplacing: this.conversationReplacing,
       latestEventId: this.events.nextId - 1,
       status: this.status,
       createdAt: new Date(this.createdAt).toISOString(),
@@ -579,6 +608,9 @@ class Session extends EventEmitter {
   }
 
   onRecord(record) {
+    if (record.type !== "response") this.revision++;
+    if (["agent_start", "auto_retry_start", "auto_compaction_start"].includes(record.type)) this.agentBusy = true;
+    if (record.type === "agent_settled") this.agentBusy = false;
     if (record.type === "response" && record.command === "get_state" && record.success && record.data) {
       if (typeof record.data.sessionName === "string") this.name = record.data.sessionName;
       if (NATIVE_SESSION_ID_RE.test(record.data.sessionId ?? "")) this.nativeSessionId = record.data.sessionId;
@@ -644,7 +676,7 @@ class Session extends EventEmitter {
     if (this.exit) return;
     this.status = this.status === "failed" || error || (code !== 0 && code !== null) ? "failed" : "exited";
     this.exit = { code, signal, error: error?.message ?? null };
-    this.publish({ type: "supervisor", event: "child_exit", ...this.exit });
+    this.publish({ type: "supervisor", event: this.conversationReplacing ? "conversation_source_exited" : "child_exit", ...this.exit });
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(new HttpError(502, "pi_exited", "Pi RPC process exited before responding"));
@@ -658,13 +690,17 @@ class Session extends EventEmitter {
     this.emit("exit");
   }
 
-  sendCommand(command) {
+  sendCommand(command, conversationRead = false) {
+    const restoring = conversationRead === RESTORE_SETTINGS && this.conversationLocked && RESTORE_COMMANDS.has(command?.type);
     if (this.status !== "running") throw new HttpError(409, "session_not_running", "session is not running");
+    if (this.conversationLocked && !restoring && !(conversationRead === true && READ_COMMANDS.has(command?.type))) {
+      throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
+    }
     if (!command || typeof command !== "object" || Array.isArray(command)) {
       throw new HttpError(400, "invalid_command", "RPC command must be a JSON object");
     }
     if (typeof command.type !== "string") throw new HttpError(400, "invalid_command", "RPC command type is required");
-    if (HARD_FORBIDDEN_COMMANDS.has(command.type) || !this.profile.allowedCommands.has(command.type)) {
+    if (HARD_FORBIDDEN_COMMANDS.has(command.type) || (!restoring && !this.profile.allowedCommands.has(command.type))) {
       throw new HttpError(403, "command_forbidden", `RPC command ${command.type} is forbidden`);
     }
     if (this.pending.size >= this.config.limits.maxPendingCommands) {
@@ -686,6 +722,7 @@ class Session extends EventEmitter {
       const timer = setTimeout(() => {
         this.pending.delete(key);
         if (READ_COMMANDS.has(command.type)) this.lateReads.set(key, command.type);
+        else this.uncertainWrite = true;
         reject(new HttpError(504, "pi_timeout", "Pi RPC command timed out"));
       }, this.config.limits.commandTimeoutMs);
       timer.unref?.();
@@ -693,6 +730,7 @@ class Session extends EventEmitter {
       try {
         safeWrite(this.child.stdin, forwarded);
       } catch (error) {
+        if (!READ_COMMANDS.has(command.type)) this.uncertainWrite = true;
         clearTimeout(timer);
         this.pending.delete(key);
         reject(new HttpError(502, "pi_unavailable", error.message));
@@ -701,6 +739,7 @@ class Session extends EventEmitter {
   }
 
   respondUi(body) {
+    if (this.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
     if (this.status !== "running") throw new HttpError(409, "session_not_running", "session is not running");
     if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.id !== "string") {
       throw new HttpError(400, "invalid_ui_response", "extension UI response id is required");
@@ -867,6 +906,8 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   const signalProcessGroup = dependencies.signalProcessGroup ?? ((pid, signal) => process.kill(-pid, signal));
   const sessions = new Map();
   const creating = new Set();
+  const conversationSources = new Set();
+  const preparing = new Set();
   let shuttingDown = false;
   let closePromise = null;
 
@@ -898,7 +939,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       if (request.method === "OPTIONS") {
         if (origin === undefined) throw new HttpError(400, "origin_required", "Origin is required for preflight");
         response.statusCode = 204;
-        response.setHeader("Access-Control-Allow-Headers", "authorization, content-type, last-event-id");
+        response.setHeader("Access-Control-Allow-Headers", "authorization, content-type, last-event-id, x-pi-session-id");
         response.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         response.setHeader("Access-Control-Max-Age", "600");
         return response.end();
@@ -933,7 +974,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         if (body.resume !== undefined && profile.sessionDir === undefined) {
           throw new HttpError(400, "invalid_resume", "resume requires a profile-owned session directory");
         }
-        if (body.resume !== undefined && [...sessions.values()].some((session) => session.nativeSessionId.toLowerCase() === body.resume.toLowerCase() && ["running", "stopping"].includes(session.status))) {
+        if (body.resume !== undefined && [...sessions.values(), ...preparing].some((session) => session.nativeSessionId.toLowerCase() === body.resume.toLowerCase() && session.exit === null)) {
           throw new HttpError(409, "resume_in_use", "Pi session is already active");
         }
         if (body.name !== undefined && (typeof body.name !== "string" || body.name.length < 1 || body.name.length > 200 || /[\u0000-\u001f\u007f]/.test(body.name))) {
@@ -942,7 +983,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         // Native IDs are exclusive across profiles too, including canonical
         // directory aliases and copied session files with the same ID.
         const resumeKey = `resume:${body.resume?.toLowerCase()}`;
-        if (body.resume && creating.has(resumeKey)) throw new HttpError(409, "resume_in_use", "Pi session is already being resumed");
+        if (body.resume && (creating.has(resumeKey) || conversationSources.has(resumeKey))) throw new HttpError(409, "resume_in_use", "Pi session is already being resumed or switched");
         const activeSessions = creating.size + [...sessions.values()].filter((session) => session.exit === null).length;
         if (activeSessions >= config.limits.maxSessions) throw new HttpError(429, "session_limit", "maximum active session count reached");
         const id = uuid();
@@ -964,11 +1005,167 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
       const action = match[2];
+      if (action === "conversation" && ["GET", "POST"].includes(request.method)) {
+        authenticate(request, config, "sessions:read");
+        const mutate = request.method === "POST";
+        let body;
+        if (mutate) {
+          authenticate(request, config, "sessions:write");
+          body = await readJson(request, config.limits.maxBodyBytes);
+          if (!body || typeof body !== "object" || Array.isArray(body)
+            || Object.keys(body).some((key) => !["action", "entryId", "expectedNativeSessionId", "expectedLeafId"].includes(key))
+            || !["revert", "fork"].includes(body.action)
+            || typeof body.entryId !== "string" || !/^[A-Za-z0-9-]{1,128}$/.test(body.entryId)
+            || typeof body.expectedNativeSessionId !== "string" || !NATIVE_SESSION_ID_RE.test(body.expectedNativeSessionId)
+            || !(body.expectedLeafId === null || (typeof body.expectedLeafId === "string" && /^[A-Za-z0-9-]{1,128}$/.test(body.expectedLeafId)))) {
+            throw new HttpError(400, "invalid_conversation", "action, entryId, expectedNativeSessionId and expectedLeafId are required; paths are not accepted");
+          }
+          if (body.action === "fork") authenticate(request, config, "sessions:create");
+        }
+        for (const command of mutate ? ["get_state", "get_entries", "prompt"] : ["get_state", "get_entries"]) {
+          if (!session.profile.allowedCommands.has(command)) throw new HttpError(403, "command_forbidden", `conversation requires allowed command ${command}`);
+        }
+        if (mutate && !session.profile.sessionDir) throw new HttpError(409, "history_unavailable", "conversation changes require a profile-owned session directory");
+        if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
+        if (session.status !== "running" || sessions.get(session.id) !== session) throw new HttpError(409, "session_not_running", "session is not running");
+        if (session.pending.size || session.lateReads.size || session.pendingUi.size || session.uncertainWrite || session.agentBusy) {
+          throw new HttpError(409, "conversation_busy", "wait for Pi to settle and resolve pending commands or dialogs; uncertain writes require restarting the session");
+        }
+        session.conversationLocked = true;
+        let child, reservation, sourceReservation, committed = false;
+        const readSnapshot = async (target) => {
+          const state = await target.sendCommand({ type: "get_state" }, true);
+          if (!state.success || !NATIVE_SESSION_ID_RE.test(state.data?.sessionId ?? "")) throw new HttpError(502, "invalid_snapshot", "Pi did not return a valid session state");
+          if (state.data.isStreaming !== false || state.data.isCompacting !== false || state.data.pendingMessageCount !== 0
+            || target.pendingUi.size || target.agentBusy || target.uncertainWrite) {
+            throw new HttpError(409, "conversation_busy", "Pi must be idle with no queued messages or dialogs");
+          }
+          const entries = await target.sendCommand({ type: "get_entries" }, true);
+          let branch;
+          try {
+            if (!entries.success) throw new Error();
+            branch = conversationBranch(entries.data);
+          } catch { throw new HttpError(502, "invalid_snapshot", "Pi did not return a valid conversation tree"); }
+          return { nativeSessionId: state.data.sessionId, state: state.data, data: entries.data, branch };
+        };
+        try {
+          const revision = session.revision;
+          const snapshot = await readSnapshot(session);
+          if (revision !== session.revision || session.pendingUi.size || session.agentBusy) throw new HttpError(409, "conversation_busy", "conversation changed while reading");
+          if (!mutate) {
+            return json(response, 200, {
+              nativeSessionId: snapshot.nativeSessionId, leafId: snapshot.data.leafId,
+              messages: snapshot.branch.filter((entry) => entry.type === "message").map(({ id, parentId, message }) => ({ entryId: id, parentId, message })),
+            });
+          }
+          if (body.expectedNativeSessionId !== snapshot.nativeSessionId || body.expectedLeafId !== snapshot.data.leafId) {
+            throw new HttpError(409, "conversation_stale", "conversation identity or leaf changed; refresh before retrying");
+          }
+          const settings = conversationSettings(snapshot.state);
+          const index = snapshot.branch.findIndex((entry) => entry.id === body.entryId && entry.type === "message" && entry.message?.role === "user");
+          if (index < 0) throw new HttpError(400, "invalid_entry", "entryId must select a user message on the current branch");
+          let draft;
+          try { draft = conversationDraft(snapshot.branch[index].message); }
+          catch { throw new HttpError(409, "unsupported_message", "selected message cannot be restored losslessly as a draft"); }
+          if (creating.size + [...sessions.values()].filter((value) => value.exit === null).length >= config.limits.maxSessions) {
+            throw new HttpError(429, "session_limit", "conversation changes require capacity for one replacement child");
+          }
+          const nativeId = uuid();
+          reservation = `resume:${nativeId.toLowerCase()}`;
+          sourceReservation = `resume:${snapshot.nativeSessionId.toLowerCase()}`;
+          if (creating.has(sourceReservation) || conversationSources.has(sourceReservation) || [...sessions.values()].some((value) => value !== session && value.exit === null && value.nativeSessionId.toLowerCase() === snapshot.nativeSessionId.toLowerCase())) {
+            sourceReservation = null;
+            throw new HttpError(409, "resume_in_use", "source native session has another owner");
+          }
+          creating.add(reservation);
+          conversationSources.add(sourceReservation);
+          const prefix = snapshot.branch.slice(0, index);
+          let path;
+          try { path = await createConversationHistory(session.profile, snapshot.nativeSessionId, snapshot.data, prefix, nativeId, config.limits.maxRecordBytes); }
+          catch { throw new HttpError(409, "history_unavailable", "source must have complete, unique v3 persisted history within maxRecordBytes; no source files were changed"); }
+          if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
+          try {
+            child = new Session({ id: body.action === "fork" ? uuid() : session.id, profileName: session.profileName, profile: session.profile,
+              resume: nativeId, resumePath: path, config, spawnProcess, signalProcessGroup, now, uuid });
+          } catch { throw new HttpError(502, "spawn_failed", "failed to start conversation child; source is unchanged"); }
+          child.conversationLocked = true;
+          preparing.add(child);
+          // Retain ownership after a bounded stop timeout, then release it on
+          // the actual late exit rather than leaking capacity until restart.
+          child.once("exit", () => {
+            preparing.delete(child);
+            creating.delete(reservation);
+          });
+          const initial = await readSnapshot(child);
+          if (initial.nativeSessionId !== nativeId || !isDeepStrictEqual(initial.branch.slice(0, prefix.length), prefix)) {
+            throw new HttpError(409, "conversation_changed", "child did not load the requested conversation identity and prefix");
+          }
+          for (const command of [
+            { type: "set_model", provider: settings.model.provider, modelId: settings.model.id },
+            { type: "set_thinking_level", level: settings.thinkingLevel },
+            { type: "set_auto_compaction", enabled: settings.autoCompactionEnabled },
+            { type: "set_steering_mode", mode: settings.steeringMode },
+            { type: "set_follow_up_mode", mode: settings.followUpMode },
+          ]) {
+            const result = await child.sendCommand(command, RESTORE_SETTINGS);
+            if (!result.success) throw new HttpError(409, "settings_restore_failed", "Pi rejected restoring conversation settings; source was not stopped");
+          }
+          const loaded = await readSnapshot(child);
+          if (!isDeepStrictEqual(conversationSettings(loaded.state), settings)) throw new HttpError(409, "settings_restore_failed", "Pi did not preserve conversation settings; source was not stopped");
+          const childRevision = child.revision;
+          // Extensions may append startup metadata, but cannot replace or trim the prefix.
+          if (loaded.nativeSessionId !== nativeId || !isDeepStrictEqual(loaded.branch.slice(0, prefix.length), prefix)
+            || loaded.branch.slice(prefix.length).some((entry) => !["session_info", "model_change", "thinking_level_change", "custom", "label"].includes(entry.type))) {
+            throw new HttpError(409, "conversation_changed", "child did not load the requested conversation prefix");
+          }
+          const current = await readSnapshot(session);
+          if (shuttingDown || revision !== session.revision || current.nativeSessionId !== snapshot.nativeSessionId
+            || !isDeepStrictEqual(current.data, snapshot.data) || !isDeepStrictEqual(conversationSettings(current.state), settings)
+            || child.status !== "running" || child.pendingUi.size || child.agentBusy || child.revision !== childRevision) {
+            throw new HttpError(409, "conversation_changed", "source or child changed while preparing conversation");
+          }
+          if (body.action === "revert") {
+            session.conversationReplacing = true;
+            session.publish({ type: "supervisor", event: "conversation_replacing", sessionId: session.id,
+              previousNativeSessionId: snapshot.nativeSessionId, nativeSessionId: nativeId });
+            await session.stop();
+            if (!session.exit) throw new HttpError(502, "stop_failed", "source did not exit; replacement was not activated");
+            if (shuttingDown || child.status !== "running" || child.pendingUi.size || child.agentBusy || child.revision !== childRevision) throw new HttpError(409, "conversation_changed", "replacement is no longer ready; original history is retained");
+            const startupEvents = child.events.records.map((event) => JSON.parse(event.data));
+            // Keep cursors monotonic, but never replay the abandoned transcript
+            // or share a ring with stdout still draining from the old process.
+            child.events = new EventRing(config.limits.maxEvents, config.limits.maxEventBytes);
+            child.events.nextId = session.events.nextId;
+            child.createdAt = session.createdAt;
+            for (const event of startupEvents) child.publish(event);
+          }
+          child.conversationLocked = false;
+          sessions.set(child.id, child);
+          committed = true;
+          child.publish({ type: "supervisor", event: "conversation_changed", action: body.action,
+            sessionId: child.id, nativeSessionId: nativeId, previousNativeSessionId: snapshot.nativeSessionId, sourceSessionId: session.id });
+          return json(response, 200, { session: child.metadata(), draft });
+        } finally {
+          if (child && !committed) await child.stop();
+          // A child that has not actually exited still owns its native ID and
+          // capacity, even if the bounded shutdown wait expired.
+          if (!child || committed || child.exit) {
+            preparing.delete(child);
+            if (reservation) creating.delete(reservation);
+          }
+          if (sourceReservation) conversationSources.delete(sourceReservation);
+          if (session.conversationReplacing) {
+            session.conversationReplacing = false;
+            if (!committed) session.publish({ type: "supervisor", event: "conversation_replace_failed", sessionId: session.id, nativeSessionId: session.nativeSessionId });
+          }
+          session.conversationLocked = false;
+        }
+      }
       if (!action && request.method === "GET") {
         authenticate(request, config, "sessions:read");
         session.touch();
@@ -976,7 +1173,9 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       }
       if (!action && request.method === "DELETE") {
         authenticate(request, config, "sessions:delete");
+        if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
         await session.stop();
+        if (!session.exit) throw new HttpError(502, "stop_failed", "Pi has not exited; session ownership is retained");
         sessions.delete(session.id);
         response.statusCode = 204;
         return response.end();
@@ -987,12 +1186,14 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           ? "sessions:read"
           : "sessions:write";
         authenticate(request, config, requiredScope);
+        if (requiredScope === "sessions:write") checkNativePrecondition(request, session, sessions.get(session.id));
         const result = await session.sendCommand(command);
         return json(response, 200, result);
       }
       if (action === "ui" && request.method === "POST") {
         authenticate(request, config, "sessions:write");
         const body = await readJson(request, config.limits.maxBodyBytes);
+        checkNativePrecondition(request, session, sessions.get(session.id));
         session.respondUi(body);
         return json(response, 202, { accepted: true });
       }
@@ -1031,9 +1232,10 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   const cleanupTimer = setInterval(() => {
     const cutoff = now() - config.limits.idleTimeoutMs;
     for (const [id, session] of sessions) {
-      if (session.clients.size === 0 && session.pending.size === 0 && session.lastActivityAt < cutoff) {
-        sessions.delete(id);
-        session.stop().catch(() => {});
+      if (!session.conversationLocked && session.clients.size === 0 && session.pending.size === 0 && session.lastActivityAt < cutoff) {
+        session.stop().then(() => {
+          if (session.exit && sessions.get(id) === session && !session.conversationLocked) sessions.delete(id);
+        }).catch(() => {});
       }
     }
   }, config.limits.cleanupIntervalMs);
@@ -1066,7 +1268,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       const closeServer = server.listening
         ? new Promise((resolve) => server.close(resolve))
         : Promise.resolve();
-      await Promise.allSettled([...sessions.values()].map((session) => session.stop()));
+      await Promise.allSettled([...sessions.values(), ...preparing].map((session) => session.stop()));
       await closeServer;
       clearTimeout(forceClose);
       sessions.clear();

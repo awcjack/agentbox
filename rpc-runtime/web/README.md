@@ -40,6 +40,17 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Subagent task cards show ordered child status and output inside the parent
   conversation. Children keep isolated sessions; no session switch is needed.
 - Successful prompts clear the accepted draft without showing a success bar.
+- Each assistant reply shows its recorded model/provider, with a routed response
+  model in the tooltip when available. Historical replies never inherit the
+  currently selected model.
+- Copy message/response copies raw text and Markdown, not thinking, tools or image
+  payloads. A selectable text dialog is available if clipboard access fails.
+- Revert and Fork on user messages branch from before the selected message and
+  restore its text/images as an unsent draft after confirmation. Fork opens a
+  separate session; Revert replaces the current session's process/native history
+  while keeping its supervisor ID and original history available to resume.
+  Neither action undoes files or external side effects. Both require an idle
+  agent, persisted history, and capacity for an additional process during setup.
 - Visible network/auth/scope errors, disabled unavailable controls, bounded
   reconnect backoff, and snapshot reconciliation without prompt retries.
 
@@ -93,6 +104,13 @@ An ambiguous network failure preserves the draft and warns that acceptance is
 unknown. The application never retries writes, prompts, or creation requests.
 Browsers/proxies can transparently retry a connection failure before response
 headers arrive; strict at-most-once delivery requires server-side idempotency.
+
+Conversation actions obtain entry IDs and the current leaf from
+`GET /v1/sessions/:id/conversation` and refuse ambiguous message matches. The
+mutation endpoint validates both native identity and leaf. Browser RPC/UI writes
+also include `X-Pi-Session-Id` so an old tab cannot write into a replaced branch.
+Replacement events reconnect other tabs through metadata polling without
+replaying abandoned transcript events or discarding their unsent drafts.
 
 ## Verification
 

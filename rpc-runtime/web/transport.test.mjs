@@ -1,6 +1,35 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ApiError, createSSEParser, createTransport, eventCursor, messageKey, updatePartial, visibleMessages } from "./transport.mjs";
+import { ApiError, createSSEParser, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
+
+test("copy text preserves Markdown without exposing thinking, tools or image payloads", () => {
+  assert.equal(messageText({ content: "raw **Markdown**\nnext" }), "raw **Markdown**\nnext");
+  assert.equal(messageText({ content: [{ type: "thinking", thinking: "private" }, { type: "text", text: "one" }, { type: "image", data: "base64" }, { type: "toolCall", arguments: {} }, { type: "text", text: "two" }] }), "one\ntwo");
+  assert.equal(messageText({ content: [{ type: "image", data: "base64" }] }), "");
+});
+
+test("conversation targets require a unique complete user message match", () => {
+  const message = { role: "user", timestamp: 7, content: [{ type: "text", text: "same" }] };
+  const first = { entryId: "first", message }, second = { entryId: "second", message: { ...message, timestamp: 8 } };
+  assert.equal(messageEntry(message, [first, second]), "first");
+  assert.equal(messageEntry(message, [first, { ...first, entryId: "duplicate" }]), null);
+  assert.equal(messageEntry({ ...message, role: "assistant" }, [first]), null);
+  assert.equal(messageEntry({ ...message, content: "same" }, [first]), null);
+  assert.equal(messageEntry({ ...message, content: [{ type: "image", data: "a" }] }, [first]), null);
+});
+
+test("writes can bind to the displayed native conversation without overriding authentication", async () => {
+  let sent;
+  const api = createTransport(() => "test-token", async (path, options) => {
+    sent = options.headers;
+    return new Response(JSON.stringify({ success: true }));
+  });
+  await api.request("/v1/sessions/id/rpc", { body: { type: "prompt", message: "hello" }, nativeSessionId: "native-id" });
+  assert.equal(sent["X-Pi-Session-Id"], "native-id");
+  assert.equal(sent.Authorization, "Bearer test-token");
+  await api.request("/v1/sessions");
+  assert.equal(sent["X-Pi-Session-Id"], undefined);
+});
 
 test("SSE parses every chunk boundary, CRLF, comments, and multiline data", () => {
   const text = ': keepalive\r\nid: 42\r\nevent: pi\r\ndata: {"type":\r\ndata: "agent_start"}\r\n\r\n';

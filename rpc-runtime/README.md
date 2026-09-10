@@ -185,6 +185,56 @@ transcript support. Timed-out reads retain bounded correlation until Pi replies;
 further reads may return 429 while those replies are outstanding. Late oversized
 snapshots are also drained rather than killing the child.
 
+## Conversation actions
+
+`GET /v1/sessions/:id/conversation` requires `sessions:read` and returns
+`{nativeSessionId, leafId, messages: [{entryId, parentId, message}]}` along the
+active branch. It includes messages before compaction, unlike the current model
+context returned by `get_messages`.
+
+`POST /v1/sessions/:id/conversation` accepts exactly:
+
+```json
+{
+  "action": "fork",
+  "entryId": "user-entry-id",
+  "expectedNativeSessionId": "native-session-uuid",
+  "expectedLeafId": "current-leaf-id"
+}
+```
+
+`action` is `fork` or `revert`; the expected leaf may be `null`. The target must
+be a user message on the current branch. Both actions require read/write scopes,
+allowed `get_state`, `get_entries` and `prompt` commands, fully persisted Pi v3
+history in the profile-owned directory, and an idle agent with no queue or pending
+dialogs. Fork also requires `sessions:create`. Both need one spare `maxSessions`
+slot to verify the replacement before changing anything.
+
+The response is `{session, draft: {text, images}}`. History ends before the
+selected message; its text/images become an unsent draft. Fork creates a separate
+supervisor/native session and leaves the source running. Revert switches the
+existing supervisor slot to a new native history while retaining the original
+file for resume. Neither action undoes filesystem changes or tool side effects.
+The current model, thinking level, auto-compaction and queue delivery modes are
+restored and verified on the new child. Preparation failures can leave an unused
+child history file; the original file is never rewritten.
+
+Browser RPC/UI writes include `X-Pi-Session-Id` to bind mutations to the displayed
+native conversation. Stale writes return 409 `conversation_stale` without being
+forwarded. The header remains optional for existing API clients. Raw `fork` stays
+forbidden; this endpoint is the controlled history boundary.
+
+On revert, `supervisor` events `conversation_replacing` and
+`conversation_source_exited` precede closing the old stream. Clients must poll
+metadata while `conversationReplacing` is true, then refresh and reconnect even
+though the old child exited. Success emits `conversation_changed`; failure clears
+the flag and emits `conversation_replace_failed`. Event cursors remain monotonic,
+but abandoned transcript events are removed from replay. Do not automatically
+retry failed POSTs: an interrupted response can leave the outcome unknown.
+
+Run the optional offline contract check against the pinned Pi version with
+`PI_CONVERSATION_TEST_EXECUTABLE=/absolute/path/to/pi node --test test/conversation-pi.test.mjs`.
+
 ## Supervision and trust boundary
 
 `pi-rpc-runtime-supervise` uses exponential restart backoff, stops after five

@@ -1,4 +1,4 @@
-import { ApiError, createTransport, eventCursor, messageKey, updatePartial, visibleMessages } from "./transport.mjs";
+import { ApiError, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
 import { initSidebarResize } from "./sidebar.mjs";
@@ -10,6 +10,7 @@ const api = createTransport(() => token);
 let token = "", auth = new AbortController(), epoch = 0, selection = 0, listVersion = 0;
 let current = null, sessions = [], profiles = [], history = [], readOnly = false, createDenied = false, createBusy = false;
 let endTarget = null, deleteDenied = false;
+let conversationTarget = null;
 const records = new Map();
 const dialogMethods = new Set(["confirm", "select", "input", "editor"]);
 const conversation = $("conversation");
@@ -22,7 +23,7 @@ function record(id) {
 function active(ctx) { return current === ctx && !ctx.controller.signal.aborted && Boolean(token); }
 function path(ctx, suffix = "") { return `/v1/sessions/${encodeURIComponent(ctx.id)}${suffix}`; }
 async function rpc(ctx, command, write = false) {
-  const value = await api.request(path(ctx, "/rpc"), { body: command, signal: write ? auth.signal : ctx.controller.signal });
+  const value = await api.request(path(ctx, "/rpc"), { body: command, nativeSessionId: write ? ctx.state.sessionId || ctx.meta.nativeSessionId : undefined, signal: write ? auth.signal : ctx.controller.signal });
   return value.data;
 }
 function showNotice(message, error = false) {
@@ -35,6 +36,7 @@ function report(error, ctx, { write = false, command, ambiguous = false } = {}) 
   if (error.status === 401) { logout("Your access token was rejected. Log in again to reconnect."); return; }
   if (write && error.code === "insufficient_scope") readOnly = true;
   if (ctx && error.code === "command_forbidden" && command) ctx.record.forbidden.add(command);
+  if (ctx && error.code === "conversation_stale") { ctx.ready = false; ctx.reset = true; ctx.streamController?.abort(); requestRefresh(ctx); }
   const uncertain = ambiguous && (!error.status || error.status >= 500);
   const message = `${error.message || "Something went wrong."}${uncertain ? " It may already have been accepted. Nothing was retried; check the conversation and queue before sending again." : ""}${readOnly && write ? " This token is read-only; writing controls are disabled." : ""}`;
   if (ctx) ctx.record.notice = { message, error: true };
@@ -46,7 +48,10 @@ function setNetwork(status, label) {
   $("connection-label").textContent = label;
 }
 function canWrite(ctx, command = "prompt") {
-  return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running" && !ctx.record.ending && !readOnly && !ctx.record.forbidden.has(command));
+  return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running" && !ctx.record.ending && !ctx.record.conversationBusy && !ctx.replacing && !ctx.meta.conversationReplacing && !readOnly && !ctx.record.forbidden.has(command));
+}
+function canChangeConversation(ctx) {
+  return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.modelBusy;
 }
 function updateControls() {
   const ctx = current;
@@ -86,6 +91,7 @@ function updateControls() {
     const card = input.closest(".approval");
     input.disabled = !canWrite(ctx, "ui") || card.dataset.busy === "true";
   }
+  for (const button of $("messages").querySelectorAll("[data-conversation-action]")) button.disabled = !canChangeConversation(ctx);
 }
 
 function drawer(open) {
@@ -202,6 +208,11 @@ function renderMessages() {
     const article = element("article", `message ${message.role === "user" ? "user" : "assistant"}`);
     const header = element("div", "message-header");
     header.append(element("span", "avatar", message.role === "user" ? "u" : "pi"), element("span", "", message.role === "user" ? "You" : message.role === "assistant" ? "Pi agent" : message.role || "Context"));
+    if (message.role === "assistant" && message.model) {
+      const model = element("span", "message-model", `${message.model}${message.provider ? ` / ${message.provider}` : ""}`);
+      model.title = message.responseModel ? `Response model: ${message.responseModel}` : model.textContent;
+      header.append(model);
+    }
     if (message.timestamp) {
       const date = new Date(message.timestamp);
       if (!Number.isNaN(date.getTime())) { const time = element("time", "", date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })); time.dateTime = date.toISOString(); header.append(time); }
@@ -221,7 +232,34 @@ function renderMessages() {
     if (message.summary) body.append(renderMarkdown(message.summary));
     if (message.role === "bashExecution") body.append(element("pre", "", `${message.command || ""}\n${message.output || ""}`));
     if (message.errorMessage || ["error", "aborted"].includes(message.stopReason)) body.append(element("div", "message-error", message.errorMessage || (message.stopReason === "aborted" ? "Response stopped." : "The agent could not complete this response.")));
-    article.append(header, body); root.append(article);
+    article.append(header, body);
+    if (["user", "assistant"].includes(message.role)) {
+      const actions = element("div", "message-actions");
+      const text = messageText(message);
+      if (text) {
+        const copy = element("button", "text-button", "Copy"); copy.type = "button"; copy.setAttribute("aria-label", `Copy ${message.role === "user" ? "message" : "response"}`);
+        copy.addEventListener("click", async () => {
+          try {
+            if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+            await navigator.clipboard.writeText(text);
+            if (active(ctx)) showNotice("Copied to clipboard.");
+          } catch {
+            if (!active(ctx)) return;
+            $("copy-text").value = text; $("copy-dialog").showModal(); $("copy-text").focus(); $("copy-text").select();
+          }
+        });
+        actions.append(copy);
+      }
+      if (message.role === "user") for (const action of ["revert", "fork"]) {
+        const button = element("button", "text-button", action === "revert" ? "Revert" : "Fork");
+        button.type = "button"; button.dataset.conversationAction = action;
+        button.title = `${action === "revert" ? "Return" : "Branch"} to before this message. Files are not undone.`;
+        button.addEventListener("click", () => openConversationAction(ctx, message, action));
+        button.disabled = !canChangeConversation(ctx); actions.append(button);
+      }
+      if (actions.childElementCount) article.append(actions);
+    }
+    root.append(article);
   }
   for (const [id, result] of results) if (!shown.has(id)) root.append(renderTool({ name: result.toolName, arguments: result.args }, result, id));
   if (ctx.meta?.status !== "running" && ctx.meta?.stderr) {
@@ -299,7 +337,7 @@ function renderApprovals(ctx) {
       if (!canWrite(ctx, "ui") || card.dataset.busy === "true") return;
       card.dataset.busy = "true"; updateControls();
       try {
-        await api.request(path(ctx, "/ui"), { body, signal: auth.signal });
+        await api.request(path(ctx, "/ui"), { body, nativeSessionId: ctx.state.sessionId || ctx.meta.nativeSessionId, signal: auth.signal });
         if (!active(ctx)) return;
         ctx.uiRevision++;
         ctx.record.uiDrafts.delete(id);
@@ -314,6 +352,11 @@ function renderApprovals(ctx) {
 }
 
 function applyMeta(ctx, meta) {
+  if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
+    ctx.record.messages = []; ctx.partial = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
+    ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
+    renderMessages();
+  }
   ctx.meta = meta;
   const index = sessions.findIndex((session) => session.id === ctx.id);
   if (index >= 0) sessions[index] = meta;
@@ -322,8 +365,14 @@ function applyMeta(ctx, meta) {
 async function snapshot(ctx, initial = false) {
   // Capture the cursor BEFORE snapshot RPCs. Anything racing them is replayed.
   const uiRevision = ctx.uiRevision;
-  const { session: meta } = await api.request(path(ctx), { signal: ctx.controller.signal });
+  let { session: meta } = await api.request(path(ctx), { signal: ctx.controller.signal });
+  while (meta.conversationReplacing && active(ctx)) {
+    ctx.replacing = true; updateControls();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    ({ session: meta } = await api.request(path(ctx), { signal: ctx.controller.signal }));
+  }
   if (!active(ctx)) return null;
+  ctx.replacing = false;
   const cursor = eventCursor(meta.latestEventId);
   if (cursor === null) throw new ApiError("The runtime must expose latestEventId in session metadata for safe streaming.", 409, "missing_cursor");
   if (uiRevision !== ctx.uiRevision) {
@@ -334,7 +383,7 @@ async function snapshot(ctx, initial = false) {
   if (meta.status !== "running") { ctx.ready = true; ctx.state.isStreaming = false; renderMessages(); updateControls(); return cursor; }
   const revision = ctx.stateRevision;
   const [messages, state] = await Promise.all([rpc(ctx, { type: "get_messages" }), rpc(ctx, { type: "get_state" })]);
-  if (!active(ctx)) return null;
+  if (!active(ctx) || ctx.replacing) return null;
   ctx.record.messages = messages?.messages || [];
   if (initial || revision === ctx.stateRevision) ctx.state = state || {};
   if (ctx.partial && ctx.record.messages.some((message) => messageKey(message) && messageKey(message) === messageKey(ctx.partial))) ctx.partial = null;
@@ -346,14 +395,19 @@ async function snapshot(ctx, initial = false) {
 function requestRefresh(ctx) {
   if (!active(ctx)) return;
   ctx.refreshAgain = true;
+  if (ctx.record.conversationBusy) return;
   if (ctx.refreshTimer || ctx.refreshing || ctx.connecting) return;
   ctx.refreshTimer = setTimeout(async () => {
     ctx.refreshTimer = null;
     if (!active(ctx)) return;
+    if (ctx.record.conversationBusy) return;
     ctx.refreshAgain = false; ctx.refreshing = true;
     try { await snapshot(ctx); }
     catch (error) {
-      if (active(ctx)) { report(error, ctx); ctx.online = false; ctx.streamController?.abort(); }
+      if (active(ctx)) {
+        if (error.code === "conversation_locked") ctx.refreshAgain = true;
+        else { report(error, ctx); ctx.online = false; ctx.streamController?.abort(); }
+      }
     } finally {
       ctx.refreshing = false;
       if (ctx.refreshAgain && active(ctx)) requestRefresh(ctx);
@@ -396,7 +450,12 @@ function handleEvent(ctx, frame) {
     if (dialogMethods.has(event.method)) { ctx.uiRevision++; requestRefresh(ctx); }
     else if (event.method === "notify") showNotice(event.message || "Agent notification", event.notifyType === "error");
   } else if (type === "supervisor") {
-    if (["extension_ui_expired", "extension_ui_resolved"].includes(event.event)) {
+    if (["conversation_replacing", "conversation_source_exited"].includes(event.event)) {
+      ctx.replacing = true; ctx.ready = false; ctx.stateRevision++; ctx.uiRevision++;
+      ctx.reset = true; ctx.streamController.abort(); updateControls();
+    } else if (["conversation_changed", "conversation_replace_failed"].includes(event.event)) {
+      ctx.ready = false; ctx.reset = true; ctx.streamController.abort(); updateControls();
+    } else if (["extension_ui_expired", "extension_ui_resolved"].includes(event.event)) {
       ctx.uiRevision++;
       ctx.meta.pendingUi = (ctx.meta.pendingUi || []).filter((item) => item.id !== event.id);
       ctx.record.uiDrafts.delete(event.id); renderApprovals(ctx); requestRefresh(ctx);
@@ -445,6 +504,7 @@ async function runSession(ctx) {
       }
     } catch (error) {
       if (!active(ctx)) return;
+      if (error.code === "conversation_locked") { ctx.reset = true; await new Promise((resolve) => setTimeout(resolve, 150)); continue; }
       if ([401, 403, 404, 409, 413].includes(error.status)) {
         ctx.online = false; report(error, ctx); setNetwork("", "Access unavailable"); updateControls(); return;
       }
@@ -461,6 +521,63 @@ async function runSession(ctx) {
     });
   }
 }
+async function openConversationAction(ctx, message, action) {
+  if (!canChangeConversation(ctx)) return;
+  ctx.record.conversationBusy = true; updateControls();
+  try {
+    while (ctx.refreshing && active(ctx)) await new Promise((resolve) => setTimeout(resolve, 25));
+    if (!active(ctx)) return;
+    const snapshot = await api.request(path(ctx, "/conversation"), { signal: ctx.controller.signal });
+    if (!active(ctx)) return;
+    const entryId = messageEntry(message, snapshot.messages);
+    if (!entryId || snapshot.nativeSessionId !== ctx.meta.nativeSessionId) throw new ApiError("This message could not be matched safely. Refresh the conversation and try again.", 409, "conversation_stale");
+    conversationTarget = { ctx, action, entryId, expectedNativeSessionId: snapshot.nativeSessionId, expectedLeafId: snapshot.leafId };
+    $("conversation-action-title").textContent = action === "revert" ? "Revert to this message?" : "Fork from this message?";
+    $("conversation-action-description").textContent = action === "revert"
+      ? "Switch this session to the history before this message. The original history stays available to resume."
+      : "Create a separate session with the history before this message. The original session stays open.";
+    $("conversation-action-preview").textContent = messageText(message).slice(0, 1000) || "Image attachment";
+    $("confirm-conversation-action").textContent = action === "revert" ? "Revert conversation" : "Create fork";
+    $("conversation-action-dialog").showModal(); $("cancel-conversation-action").focus();
+  } catch (error) { report(error, ctx); }
+  finally { ctx.record.conversationBusy = false; if (active(ctx)) { updateControls(); requestRefresh(ctx); } }
+}
+
+$("cancel-conversation-action").addEventListener("click", () => { conversationTarget = null; $("conversation-action-dialog").close(); });
+$("conversation-action-dialog").addEventListener("cancel", () => { conversationTarget = null; });
+$("conversation-action-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const target = conversationTarget;
+  conversationTarget = null; $("conversation-action-dialog").close();
+  if (!target || !canChangeConversation(target.ctx)) return;
+  const { ctx, ...body } = target, ownEpoch = epoch, ownSelection = selection, version = ctx.record.draft.version;
+  ctx.record.conversationBusy = true; updateControls();
+  try {
+    while (ctx.refreshing && active(ctx)) await new Promise((resolve) => setTimeout(resolve, 25));
+    if (!active(ctx)) return;
+    const result = await api.request(path(ctx, "/conversation"), { body, signal: auth.signal });
+    if (ownEpoch !== epoch) return;
+    const destination = record(result.session.id);
+    destination.messages = []; destination.uiDrafts.clear(); destination.notice = null;
+    if (destination !== ctx.record || destination.draft.version === version) {
+      destination.draft = { text: result.draft.text, images: result.draft.images.map((image, index) => ({ ...image, name: `Restored image ${index + 1}` })), version: destination.draft.version + 1 };
+    }
+    const index = sessions.findIndex((session) => session.id === result.session.id);
+    if (index < 0) sessions.push(result.session); else sessions[index] = result.session;
+    if (selection === ownSelection && active(ctx)) activate(result.session, { reconnect: true });
+    refreshSessions();
+  } catch (error) {
+    if (ownEpoch !== epoch) return;
+    const uncertain = !error.status || error.status >= 500;
+    const message = `${error.message}${uncertain ? " The conversation change may have completed. Nothing was retried; refresh the session list and inspect history before trying again." : ""}`;
+    ctx.record.notice = { message, error: true };
+    report(new ApiError(message, error.status, error.code), ctx);
+  } finally {
+    ctx.record.conversationBusy = false;
+    if (current?.record === ctx.record) { updateControls(); requestRefresh(current); }
+  }
+});
+$("close-copy").addEventListener("click", () => $("copy-dialog").close());
 function activate(meta, { reconnect = false } = {}) {
   if (records.get(meta.id)?.ending) return;
   // Selecting the current conversation is navigation, not a reconnect request.
@@ -634,6 +751,8 @@ function logout(message = "") {
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   current = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
+  conversationTarget = null; $("conversation-action-dialog").close(); $("copy-dialog").close();
+  $("copy-text").value = ""; $("conversation-action-preview").textContent = "";
   $("create-session").disabled = false; $("end-description").textContent = "";
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
+import { readFileSync } from "node:fs";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -93,6 +94,7 @@ async function fixture(t, customConfig = config(), options = {}) {
     const child = new FakeChild();
     children.push(child);
     spawns.push({ file, args, options: spawnOptions });
+    options.onSpawn?.(child, args);
     return child;
   };
   const runtime = createRuntime(customConfig, {
@@ -140,6 +142,340 @@ function waitForInput(child, pattern) {
     child.stdin.on("data", listener);
   });
 }
+
+async function conversationFixture(t, overrides = {}, options = {}) {
+  const root = await mkdtemp(join(tmpdir(), "pi-conversation-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cfg = config({ allowedCommands: ["prompt", "get_state", "get_entries", "abort"],
+    profiles: { default: { cwd: "/workspace", sessionDir: root } }, limits: { maxRecordBytes: 64 * 1024 }, ...overrides });
+  const f = await fixture(t, cfg, { onSpawn(child, args) {
+    const path = args.includes("--session") ? args[args.indexOf("--session") + 1] : null;
+    const records = path ? readFileSync(path, "utf8").trim().split("\n").map(JSON.parse) : [];
+    child.nativeId = records[0]?.id ?? args[args.indexOf("--session-id") + 1];
+    child.entries = records.slice(1);
+    child.state = { isStreaming: false, isCompacting: false, pendingMessageCount: 0, model: { provider: "test", id: "model" },
+      thinkingLevel: "off", autoCompactionEnabled: true, steeringMode: "one-at-a-time", followUpMode: "one-at-a-time" };
+    child.stdin.on("data", (chunk) => {
+      for (const line of chunk.toString().trim().split("\n")) {
+        const command = JSON.parse(line);
+        if (["set_model", "set_thinking_level", "set_auto_compaction", "set_steering_mode", "set_follow_up_mode"].includes(command.type)) {
+          const values = { set_model: ["model", { provider: command.provider, id: command.modelId }], set_thinking_level: ["thinkingLevel", command.level],
+            set_auto_compaction: ["autoCompactionEnabled", command.enabled], set_steering_mode: ["steeringMode", command.mode], set_follow_up_mode: ["followUpMode", command.mode] };
+          const [key, value] = values[command.type];
+          if (!child.ignoreSettings) child.state[key] = value;
+          setImmediate(() => child.output({ type: "response", id: command.id, command: command.type, success: !child.rejectSettings }));
+          continue;
+        }
+        if (!["get_state", "get_entries"].includes(command.type)) continue;
+        const respond = () => {
+          options.beforeRead?.(child, command, f);
+          const data = command.type === "get_state" ? { sessionId: child.nativeId, ...child.state }
+            : { entries: child.entries, leafId: child.leafId === undefined ? child.entries.at(-1)?.id ?? null : child.leafId };
+          child.output({ id: command.id, type: "response", command: command.type, success: true, data });
+        };
+        if (child.holdReads) child.releaseRead = respond;
+        else setImmediate(respond);
+      }
+    });
+    options.onSpawn?.(child, args);
+  } });
+  const id = await createSession(f.baseUrl);
+  const source = f.children[0];
+  f.source = source;
+  const entry = (id, parentId, type, rest) => ({ id, parentId, type, timestamp: "2026-09-10T00:00:00.000Z", ...rest });
+  source.entries = [
+    entry("model", null, "model_change", { provider: "test", modelId: "model" }),
+    entry("u1", "model", "message", { message: { role: "user", content: "same", timestamp: 1 } }),
+    entry("a1", "u1", "message", { message: { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 2 } }),
+    entry("offbranch", "a1", "message", { message: { role: "user", content: "not active", timestamp: 3 } }),
+    entry("u2", "a1", "message", { message: { role: "user", content: [{ type: "text", text: "same" }, { type: "image", data: "YWJj", mimeType: "image/png" }], timestamp: 4 } }),
+    entry("a2", "u2", "message", { message: { role: "assistant", content: [], timestamp: 5 } }),
+  ];
+  const path = join(root, `source_${source.nativeId}.jsonl`);
+  const persist = () => writeFile(path, [JSON.stringify({ type: "session", version: 3, id: source.nativeId, cwd: "/workspace", timestamp: "2026-09-10T00:00:00.000Z" }), ...source.entries.map((e) => JSON.stringify(e))].join("\n") + "\n");
+  await persist();
+  const route = `/v1/sessions/${id}/conversation`;
+  const body = { action: "fork", entryId: "u2", expectedNativeSessionId: source.nativeId, expectedLeafId: "a2" };
+  return { ...f, id, source, root, path, persist, route, body,
+    act: (changes = {}, requestOptions = {}) => request(f.baseUrl, route, { method: "POST", body: { ...body, ...changes }, ...requestOptions }) };
+}
+
+test("conversation GET returns authoritative active-branch message IDs", async (t) => {
+  const f = await conversationFixture(t);
+  const result = await request(f.baseUrl, f.route);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.nativeSessionId, f.source.nativeId);
+  assert.equal(result.body.leafId, "a2");
+  assert.deepEqual(result.body.messages.map((m) => m.entryId), ["u1", "a1", "u2", "a2"]);
+  assert.equal(result.body.messages[2].parentId, "a1");
+  assert.deepEqual(result.body.messages[2].message, f.source.entries[4].message);
+});
+
+test("conversation restores current settings rather than prefix defaults, without exposing internal setters", async (t) => {
+  const f = await conversationFixture(t);
+  Object.assign(f.source.state, { model: { provider: "other", id: "current" }, thinkingLevel: "high", autoCompactionEnabled: false, steeringMode: "all", followUpMode: "all" });
+  const source = f.runtime.sessions.get(f.id), stop = source.stop;
+  source.stop = function () {
+    assert.deepEqual(f.children[1].state, f.source.state);
+    return stop.call(this);
+  };
+  assert.equal((await f.act({ action: "revert", entryId: "u1" })).response.status, 200);
+  assert.deepEqual(f.children[1].state, f.source.state);
+  for (const type of ["set_thinking_level", "fork"]) {
+    assert.equal((await request(f.baseUrl, `/v1/sessions/${f.id}/rpc`, { method: "POST", body: { type, level: "high" } })).response.status, 403);
+  }
+});
+
+test("settings restoration rejection or mismatch never stops the source", async (t) => {
+  for (const flag of ["rejectSettings", "ignoreSettings"]) {
+    const f = await conversationFixture(t, {}, { onSpawn(child) { child[flag] = true; } });
+    f.source.state.thinkingLevel = "high";
+    assert.equal((await f.act({ action: "revert" })).body.error.code, "settings_restore_failed");
+    assert.equal(f.source.exited, false);
+    assert.equal(f.children[1].exited, true);
+  }
+});
+
+test("native header rejects stale RPC/UI writes while preserving optional-header compatibility", async (t) => {
+  const f = await conversationFixture(t);
+  const reverted = await f.act({ action: "revert" });
+  const rpc = `/v1/sessions/${f.id}/rpc`, ui = `/v1/sessions/${f.id}/ui`;
+  const child = f.children[1];
+  child.output({ type: "extension_ui_request", id: "dialog", method: "confirm" });
+  const before = child.input;
+  for (const [path, body] of [[rpc, { type: "prompt", message: "stale" }], [ui, { id: "dialog", confirmed: true }]]) {
+    assert.equal((await request(f.baseUrl, path, { method: "POST", body, headers: { "X-Pi-Session-Id": f.source.nativeId } })).body.error.code, "conversation_stale");
+    assert.equal((await request(f.baseUrl, path, { method: "POST", body, headers: { "X-Pi-Session-Id": "invalid" } })).response.status, 400);
+  }
+  assert.equal(child.input, before);
+  assert.equal((await request(f.baseUrl, ui, { method: "POST", body: { id: "dialog", confirmed: true }, headers: { "X-Pi-Session-Id": reverted.body.session.nativeSessionId } })).response.status, 202);
+  for (const headers of [{}, { "X-Pi-Session-Id": reverted.body.session.nativeSessionId }]) {
+    const writing = request(f.baseUrl, rpc, { method: "POST", body: { type: "prompt", id: "write", message: "accepted" }, headers });
+    await new Promise((resolve) => {
+      child.stdin.once("data", () => { child.output({ type: "response", id: "write", command: "prompt", success: true }); resolve(); });
+    });
+    assert.equal((await writing).response.status, 200);
+  }
+  const preflight = await request(f.baseUrl, rpc, { method: "OPTIONS", headers: { Origin: "https://client.example" } });
+  assert.match(preflight.response.headers.get("access-control-allow-headers"), /x-pi-session-id/);
+});
+
+test("replacement announces a nonterminal source exit and exposes switching metadata until commit", async (t) => {
+  const f = await conversationFixture(t);
+  const session = f.runtime.sessions.get(f.id), events = [];
+  const publish = session.publish;
+  session.publish = function (event) { events.push(event); return publish.call(this, event); };
+  const stop = session.stop;
+  let release, stopping;
+  const stopped = new Promise((resolve) => { stopping = resolve; });
+  session.stop = async function () {
+    await stop.call(this);
+    stopping();
+    await new Promise((resolve) => { release = resolve; });
+  };
+  const stream = await fetch(`${f.baseUrl}/v1/sessions/${f.id}/events`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const streamText = stream.text();
+  const action = f.act({ action: "revert" });
+  await stopped;
+  const replay = await streamText;
+  assert.match(replay, /"event":"conversation_replacing"/);
+  assert.match(replay, /"event":"conversation_source_exited"/);
+  assert.doesNotMatch(replay, /"event":"child_exit"/);
+  const metadata = await request(f.baseUrl, `/v1/sessions/${f.id}`);
+  assert.equal(metadata.body.session.conversationReplacing, true);
+  assert.equal((await request(f.baseUrl, f.route)).body.error.code, "conversation_locked");
+  assert.ok(events.findIndex((e) => e.event === "conversation_replacing") < events.findIndex((e) => e.event === "conversation_source_exited"));
+  assert.equal(events.some((e) => e.event === "child_exit"), false);
+  release();
+  assert.equal((await action).body.session.conversationReplacing, false);
+});
+
+test("late abandoned child exit releases native reservation and capacity", async (t) => {
+  const f = await conversationFixture(t, { limits: { maxSessions: 2, maxRecordBytes: 64 * 1024 } }, { beforeRead(child, command, f) {
+    if (child !== f.source) {
+      child.ignoreSettings = true;
+      child.kill = () => true; // Simulate SIGKILL not yet confirmed by an exit event.
+    }
+  } });
+  f.source.state.thinkingLevel = "high";
+  assert.equal((await f.act()).body.error.code, "settings_restore_failed");
+  const abandoned = f.children[1];
+  const resume = () => request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: abandoned.nativeId } });
+  assert.equal((await resume()).body.error.code, "resume_in_use");
+  assert.equal((await f.act()).body.error.code, "session_limit");
+  abandoned.exited = true;
+  abandoned.emit("exit", null, "SIGKILL");
+  assert.equal((await resume()).response.status, 201);
+});
+
+test("fork creates a separate child with only the pre-target branch; source and files are unchanged", async (t) => {
+  const f = await conversationFixture(t);
+  const before = await readFile(f.path, "utf8");
+  const result = await f.act();
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.notEqual(result.body.session.id, f.id);
+  assert.notEqual(result.body.session.nativeSessionId, f.source.nativeId);
+  assert.deepEqual(result.body.draft, { text: "same", images: [{ type: "image", data: "YWJj", mimeType: "image/png" }] });
+  assert.deepEqual(f.children[1].entries.map((e) => e.id), ["model", "u1", "a1"]);
+  assert.equal(f.source.exited, false);
+  assert.equal(await readFile(f.path, "utf8"), before);
+  assert.equal(f.runtime.sessions.size, 2);
+  assert.equal(f.children.some((child) => /"type":"fork"/.test(child.input)), false);
+  const history = await request(f.baseUrl, "/v1/history?profile=default");
+  assert.equal(history.body.sessions.length, 2);
+});
+
+test("revert fork-and-switches the same supervisor slot and retains original native history", async (t) => {
+  const f = await conversationFixture(t);
+  const original = f.runtime.sessions.get(f.id);
+  const before = await readFile(f.path, "utf8");
+  const result = await f.act({ action: "revert", entryId: "u1" });
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.session.id, f.id);
+  assert.notEqual(result.body.session.nativeSessionId, f.source.nativeId);
+  assert.equal(f.source.exited, true);
+  assert.deepEqual(f.children[1].entries.map((e) => e.id), ["model"]);
+  assert.equal(f.runtime.sessions.size, 1);
+  assert.equal(await readFile(f.path, "utf8"), before);
+  const current = f.runtime.sessions.get(f.id);
+  assert.notEqual(current.events, original.events);
+  assert.ok(current.events.records[0].id >= original.events.nextId);
+  assert.equal(current.events.records.some((event) => JSON.parse(event.data).event === "child_exit"), false);
+  assert.equal(JSON.parse(current.events.records.at(-1).data).event, "conversation_changed");
+  assert.equal((await f.act()).body.error.code, "conversation_stale");
+  const resumed = await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: f.source.nativeId } });
+  assert.equal(resumed.response.status, 201);
+});
+
+test("conversation rejects stale identity, off-branch/non-user targets and client paths", async (t) => {
+  const f = await conversationFixture(t);
+  for (const [changes, code] of [
+    [{ expectedNativeSessionId: RESUME_ID }, "conversation_stale"], [{ expectedLeafId: "u1" }, "conversation_stale"],
+    [{ entryId: "offbranch" }, "invalid_entry"], [{ entryId: "a1" }, "invalid_entry"],
+    [{ entryId: "/etc/passwd" }, "invalid_conversation"], [{ sessionPath: f.path }, "invalid_conversation"],
+    [{ expectedLeafId: undefined }, "invalid_conversation"], [{ action: "delete" }, "invalid_conversation"],
+  ]) assert.equal((await f.act(changes)).body.error.code, code);
+  assert.equal(f.children.length, 1);
+});
+
+test("conversation requires read/write scopes, create only for fork, and allowed commands", async (t) => {
+  const f = await conversationFixture(t);
+  const token = f.runtime.config.tokens[0];
+  for (const scopes of [["sessions:write", "sessions:create"], ["sessions:read", "sessions:create"], ["sessions:read", "sessions:write"]]) {
+    token.scopes = new Set(scopes);
+    assert.equal((await f.act()).response.status, 403);
+  }
+  assert.equal((await f.act({ action: "revert" })).response.status, 200);
+  token.scopes = new Set(ALL_SCOPES);
+  const current = f.runtime.sessions.get(f.id);
+  current.profile.allowedCommands.delete("prompt");
+  assert.equal((await f.act()).body.error.code, "command_forbidden");
+  current.profile.allowedCommands.delete("get_entries");
+  assert.equal((await request(f.baseUrl, f.route)).response.status, 403);
+  assert.equal((await request(f.baseUrl, `/v1/sessions/${f.id}/rpc`, { method: "POST", body: { type: "fork", entryId: "u1" } })).response.status, 403);
+});
+
+test("conversation rejects streaming, compaction, queued messages, pending UI and uncertain writes", async (t) => {
+  const f = await conversationFixture(t);
+  for (const state of [{ isStreaming: true }, { isCompacting: true }, { pendingMessageCount: 1 }]) {
+    const previous = { ...f.source.state };
+    Object.assign(f.source.state, state);
+    assert.equal((await f.act()).body.error.code, "conversation_busy");
+    f.source.state = previous;
+  }
+  const session = f.runtime.sessions.get(f.id);
+  session.uncertainWrite = true;
+  assert.equal((await f.act()).body.error.code, "conversation_busy");
+  session.uncertainWrite = false;
+  f.source.output({ type: "extension_ui_request", id: "dialog", method: "confirm" });
+  assert.equal((await f.act()).body.error.code, "conversation_busy");
+  assert.equal(f.children.length, 1);
+});
+
+test("conversation lock rejects prompts, UI replies, delete, and competing actions while snapshot is pending", async (t) => {
+  const f = await conversationFixture(t);
+  f.source.holdReads = true;
+  const action = f.act();
+  await waitForInput(f.source, /"type":"get_state"/);
+  for (const [path, opts] of [
+    [f.route, { method: "POST", body: f.body }],
+    [`/v1/sessions/${f.id}/rpc`, { method: "POST", body: { type: "prompt", message: "racing" } }],
+    [`/v1/sessions/${f.id}/ui`, { method: "POST", body: { id: "dialog", cancelled: true } }],
+    [`/v1/sessions/${f.id}`, { method: "DELETE" }],
+  ]) assert.equal((await request(f.baseUrl, path, opts)).body.error.code, "conversation_locked");
+  f.source.holdReads = false;
+  f.source.releaseRead();
+  assert.equal((await action).response.status, 200);
+  assert.doesNotMatch(f.source.input, /racing/);
+});
+
+test("a pending write excludes conversation changes, including after write timeout", async (t) => {
+  const f = await conversationFixture(t, { limits: { maxRecordBytes: 64 * 1024, commandTimeoutMs: 50 } });
+  const prompt = request(f.baseUrl, `/v1/sessions/${f.id}/rpc`, { method: "POST", body: { type: "prompt", message: "hello" } });
+  await waitForInput(f.source, /"type":"prompt"/);
+  assert.equal((await f.act()).body.error.code, "conversation_busy");
+  assert.equal((await prompt).response.status, 504);
+  assert.equal((await f.act()).body.error.code, "conversation_busy");
+});
+
+test("unpersisted history and capacity limits fail without stopping the source", async (t) => {
+  const f = await conversationFixture(t);
+  await writeFile(f.path, "corrupt\n");
+  assert.equal((await f.act({ action: "revert" })).body.error.code, "history_unavailable");
+  await f.persist();
+  f.runtime.config.limits.maxSessions = 1;
+  assert.equal((await f.act({ action: "revert" })).body.error.code, "session_limit");
+  assert.equal(f.source.exited, false);
+  assert.equal(f.children.length, 1);
+});
+
+test("failed child verification keeps source active and releases the lock", async (t) => {
+  const f = await conversationFixture(t, {}, { beforeRead(child, command, f) {
+    if (child !== f.source && command.type === "get_state") child.nativeId = RESUME_ID;
+  } });
+  const result = await f.act({ action: "revert" });
+  assert.equal(result.body.error.code, "conversation_changed");
+  assert.equal(f.children[1].exited, true);
+  assert.equal(f.source.exited, false);
+  assert.equal(f.runtime.sessions.size, 1);
+  assert.equal(f.runtime.sessions.get(f.id).conversationLocked, false);
+});
+
+test("source changes during child preparation are detected before revert stops it", async (t) => {
+  const f = await conversationFixture(t, {}, { beforeRead(child, command, f) {
+    if (child !== f.source && command.type === "get_entries") f.source.entries[4].message.content = "changed";
+  } });
+  assert.equal((await f.act({ action: "revert" })).body.error.code, "conversation_changed");
+  assert.equal(f.source.exited, false);
+  assert.equal(f.children[1].exited, true);
+});
+
+test("revert requires confirmed source exit and keeps native ownership after a failed stop", async (t) => {
+  const f = await conversationFixture(t);
+  const source = f.runtime.sessions.get(f.id), stop = source.stop;
+  source.stop = async () => { source.status = "stopping"; };
+  try {
+    assert.equal((await f.act({ action: "revert" })).body.error.code, "stop_failed");
+    assert.equal(source.conversationReplacing, false);
+    assert.equal(JSON.parse(source.events.records.at(-1).data).event, "conversation_replace_failed");
+    assert.equal(f.runtime.sessions.get(f.id), source);
+    assert.equal(f.children[1].exited, true);
+    const resume = await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: f.source.nativeId } });
+    assert.equal(resume.body.error.code, "resume_in_use");
+    const removed = await request(f.baseUrl, `/v1/sessions/${f.id}`, { method: "DELETE" });
+    assert.equal(removed.body.error.code, "stop_failed");
+    assert.equal(f.runtime.sessions.get(f.id), source);
+  } finally { source.stop = stop; }
+});
+
+test("child startup dialogs reject revert without stopping the source", async (t) => {
+  const f = await conversationFixture(t, {}, { beforeRead(child, command, f) {
+    if (child !== f.source && command.type === "get_state") child.output({ type: "extension_ui_request", id: "startup", method: "confirm" });
+  } });
+  assert.equal((await f.act({ action: "revert" })).body.error.code, "conversation_busy");
+  assert.equal(f.source.exited, false);
+  assert.equal(f.children[1].exited, true);
+});
 
 test("configuration requires hashed tokens and prevents command/profile escape", () => {
   assert.throws(() => normalizeConfig({ piRpcApi: { auth: { tokens: [] }, profiles: {} } }), /non-empty array/);

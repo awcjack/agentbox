@@ -47,12 +47,13 @@ async function checkResponse(response) {
 }
 
 export function createTransport(getToken, fetcher = globalThis.fetch) {
-  async function connect(path, { body, signal, stream = false, method = body === undefined ? "GET" : "POST" } = {}) {
+  async function connect(path, { body, signal, nativeSessionId, stream = false, method = body === undefined ? "GET" : "POST" } = {}) {
     if (!path.startsWith("/v1/") || /[\r\n\\]/.test(path)) throw new Error("Only same-origin API paths are allowed.");
     const token = getToken();
     if (!token) throw new ApiError("Log in to connect to the runtime.", 401, "unauthorized");
     const headers = { Authorization: `Bearer ${token}`, Accept: stream ? "text/event-stream" : "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
+    if (nativeSessionId) headers["X-Pi-Session-Id"] = nativeSessionId;
     let response;
     try {
       response = await fetcher(path, {
@@ -133,6 +134,18 @@ export function messageKey(message) {
   if (message.role === "toolResult" && message.toolCallId) return `tool:${message.toolCallId}`;
   if (message.timestamp !== undefined) return `${message.role}:${message.timestamp}`;
   return null;
+}
+
+export function messageText(message) {
+  return typeof message.content === "string" ? message.content : (message.content || []).filter((block) => block.type === "text").map((block) => block.text || "").join("\n");
+}
+
+export function messageEntry(message, entries) {
+  // Timestamps alone are not entry IDs. Refuse ambiguous matches, including
+  // identical prompts on different branches; the server validates the leaf too.
+  const matches = entries.filter((entry) => entry.message?.role === "user" && message.role === "user"
+    && entry.message.timestamp === message.timestamp && JSON.stringify(entry.message.content) === JSON.stringify(message.content));
+  return matches.length === 1 ? matches[0].entryId : null;
 }
 
 export function visibleMessages(messages, partial) {
