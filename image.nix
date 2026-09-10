@@ -668,15 +668,12 @@ let
     mkdir -p $out
     cp ${./extensions/pi-agentbox.ts} $out/pi-agentbox.ts
     cp ${./extensions/lsp-client.ts} $out/lsp-client.ts
+    cp ${./extensions/pi-workflow.ts} $out/pi-workflow.ts
+    cp ${./extensions/pi-policy.ts} $out/pi-policy.ts
+    cp ${./extensions/pi-approval.ts} $out/pi-approval.ts
   '';
-  piWorkflowExtension = writeTextFile {
-    name = "pi-workflow.ts";
-    text = builtins.readFile ./extensions/pi-workflow.ts;
-  };
-  piPolicyExtension = writeTextFile {
-    name = "pi-policy.ts";
-    text = builtins.readFile ./extensions/pi-policy.ts;
-  };
+  piWorkflowExtension = "${piAgentboxExtensions}/pi-workflow.ts";
+  piPolicyExtension = "${piAgentboxExtensions}/pi-policy.ts";
   piMcpExtension = "${pi-agentbox-mcp-runtime}/lib/pi-agentbox-mcp-runtime/pi-mcp.mjs";
 
   # Disable extension discovery and force-load only immutable Agentbox code. The

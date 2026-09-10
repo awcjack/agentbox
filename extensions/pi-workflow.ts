@@ -3,6 +3,9 @@ import { spawn as nodeSpawn } from "node:child_process"
 import { existsSync, promises as fs } from "node:fs"
 import { randomUUID } from "node:crypto"
 import { isAbsolute } from "node:path"
+import { APPROVAL_ENV, APPROVAL_VERSION, createApprovalBroker } from "./pi-approval.ts"
+import type { ApprovalContext } from "./pi-approval.ts"
+import type { Readable, Writable } from "node:stream"
 
 const TODO_ENTRY = "pi-workflow.todos"
 const TASK_ENTRY = "pi-workflow.tasks"
@@ -205,6 +208,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
   const getPiInvocation = dependencies.getPiInvocation ?? currentPiInvocation
 
   return function piWorkflow(pi: ExtensionAPI) {
+    const approvals = createApprovalBroker()
     let todoState: TodoState = { version: 1, nextId: 1, items: [] }
     let taskRecords = new Map<string, TaskRecord>()
     let reservedTaskIds = new Set<string>()
@@ -397,7 +401,9 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
       cwd: string,
       signal: AbortSignal | undefined,
       inherited: { provider?: string; model?: string; thinking?: string },
-      onProgress: (progress: { taskId: string; steps: number; output: string; outputTruncated: boolean }) => void,
+      onProgress: (progress: { taskId: string; steps: number; output: string; outputTruncated: boolean; approvalClosed?: string }) => void,
+      approvalContext: ApprovalContext,
+      toolCallId: string,
     ): Promise<TaskResult> => {
       let taskId: string
       if (job.resume) {
@@ -519,6 +525,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         let abort = () => {}
         let terminate = (_reason: "cancelled" | "step_limit" | "failed") => {}
         let proc: ReturnType<Spawn>
+        let closeApprovals = () => {}
 
         const setAssistantOutput = (text: string) => {
           const bounded = new BoundedBytes(config.maxOutputBytes)
@@ -581,13 +588,13 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         const finish = (exitCode: number | null, spawnError?: Error) => {
           if (settled) return
           settled = true
+          closeApprovals()
           if (killTimer) clearTimeout(killTimer)
           signal?.removeEventListener("abort", abort)
           if (pendingEvent.length > 0 && !parserFailure) inspectEvent(pendingEvent)
           if (job.resume) activeResumeIds.delete(taskId)
           const stdoutText = stdout.text().trim()
-          const stderrText = stderr.text().trim()
-          const output = spawnError?.message || parserFailure || assistantOutput || stdoutText || stderrText || "(no output)"
+          let stderrText = stderr.text().trim()
           const status = cancelled || assistantStopReason === "aborted"
             ? "cancelled"
             : stepLimited
@@ -595,6 +602,13 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               : parserFailure || assistantStopReason === "error" || exitCode !== 0
                 ? "failed"
                 : "completed"
+          // Pi 0.84 emits this expected notice when --session-id creates a child.
+          // Keep all diagnostics on failures/resumes, and every unrelated warning.
+          if (!job.resume && !spawnError && status === "completed") {
+            const createdNotice = `Warning: No project session found with id '${taskId}'; creating a new session with that id.`
+            stderrText = stderrText.split(/\r?\n/).filter((line) => line !== createdNotice).join("\n").trim()
+          }
+          const output = spawnError?.message || parserFailure || assistantOutput || stdoutText || stderrText || "(no output)"
           resolve({
             taskId,
             role: job.role,
@@ -612,9 +626,9 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         try {
           proc = spawn(invocation.command, invocation.args, {
             cwd,
-            env: { ...process.env, PI_WORKFLOW_CHILD: "1" },
+            env: { ...process.env, PI_WORKFLOW_CHILD: "1", [APPROVAL_ENV]: APPROVAL_VERSION },
             shell: false,
-            stdio: ["pipe", "pipe", "pipe"],
+            stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
           })
         } catch (error) {
           finish(null, error instanceof Error ? error : new Error(String(error)))
@@ -623,6 +637,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
 
         terminate = (reason: "cancelled" | "step_limit" | "failed") => {
           if (settled || cancelled || stepLimited) return
+          closeApprovals()
           if (reason === "cancelled") cancelled = true
           else if (reason === "step_limit") stepLimited = true
           proc.kill("SIGTERM")
@@ -645,6 +660,13 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         }
         proc.once("error", (error) => finish(null, error))
         proc.once("close", (code) => finish(code))
+        if (proc.stdio?.[3] && proc.stdio?.[4]) {
+          closeApprovals = approvals.attach({ input: proc.stdio[3] as Readable, output: proc.stdio[4] as Writable },
+            approvalContext, { toolCallId, taskId, role: job.role }, signal, (approvalClosed) => {
+              onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated, approvalClosed })
+            })
+          if (settled || cancelled || stepLimited) closeApprovals()
+        }
         if (!proc.stdin) {
           parserFailure = "Failed to send workflow prompt: child stdin is unavailable"
           terminate("failed")
@@ -739,7 +761,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
             results[index] = await runJob(jobs[index], config, ctx.cwd, signal, inherited, (update) => {
               progress[index] = { ...progress[index], ...update, status: "running" }
               publish()
-            })
+            }, ctx, _toolCallId)
             progress[index] = { ...progress[index], ...results[index] }
             completed++
             publish()

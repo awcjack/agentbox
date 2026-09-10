@@ -88,13 +88,18 @@ in
   pi-workflow-extension-test =
     let
       testSource = pkgs.runCommand "pi-workflow-extension-test-source" { } ''
-        mkdir -p $out/tests $out/extensions
+        mkdir -p $out/tests/fixtures $out/extensions
         cp ${./tests/pi-workflow.ts} $out/tests/pi-workflow.ts
+        cp ${./tests/pi-approval.ts} $out/tests/pi-approval.ts
+        cp ${./tests/fixtures/pi-approval-child.ts} $out/tests/fixtures/pi-approval-child.ts
         cp ${./extensions/pi-workflow.ts} $out/extensions/pi-workflow.ts
+        cp ${./extensions/pi-policy.ts} $out/extensions/pi-policy.ts
+        cp ${./extensions/pi-approval.ts} $out/extensions/pi-approval.ts
       '';
     in
     pkgs.runCommand "pi-workflow-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
       node --experimental-strip-types ${testSource}/tests/pi-workflow.ts
+      node --experimental-strip-types ${testSource}/tests/pi-approval.ts
       touch $out
     '';
 
@@ -104,6 +109,7 @@ in
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-policy.ts} $out/tests/pi-policy.ts
         cp ${./extensions/pi-policy.ts} $out/extensions/pi-policy.ts
+        cp ${./extensions/pi-approval.ts} $out/extensions/pi-approval.ts
       '';
     in
     pkgs.runCommand "pi-policy-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''

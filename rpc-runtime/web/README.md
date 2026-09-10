@@ -39,6 +39,10 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   submitting that field answers the question, not the chat queue.
 - Subagent task cards show ordered child status and output inside the parent
   conversation. Children keep isolated sessions; no session switch is needed.
+- Subagent tools that require manual approval open an "Approve subagent" request
+  in the parent's composer area, identifying the role, child ID, and operation.
+  Allow once authorizes only that call. Denial, cancellation, timeout or a lost
+  connection to the parent blocks it. Parallel children queue their approval dialogs.
 - Successful prompts clear the accepted draft without showing a success bar.
 - Each assistant reply shows its recorded model/provider, with a routed response
   model in the tooltip when available. Historical replies never inherit the

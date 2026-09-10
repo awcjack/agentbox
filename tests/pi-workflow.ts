@@ -153,6 +153,11 @@ function successfulSpawn(command: string, args: string[], options: any) {
   active++
   peakActive = Math.max(peakActive, active)
   setTimeout(() => {
+    const taskId = args[args.indexOf(args.includes("--session-id") ? "--session-id" : "--session") + 1]
+    const notice = `Warning: No project session found with id '${taskId}'; creating a new session with that id.\r\n`
+    proc.stderr.emit("data", Buffer.from(notice.slice(0, 35)))
+    proc.stderr.emit("data", Buffer.from(notice.slice(35)))
+    if (call.stdin === "scout two") proc.stderr.emit("data", "Warning: unrelated diagnostic\n")
     proc.stdout.emit("data", Buffer.from(`${JSON.stringify({
       type: "message_end",
       message: { role: "assistant", content: [{ type: "text", text: `result for ${call.stdin}` }], stopReason: "stop" },
@@ -199,6 +204,8 @@ assert.equal(parallel.details.concurrency, 2)
 assert.equal(peakActive, 2)
 assert.equal(parallel.details.results.length, 3)
 assert.equal(parallel.details.results[0].status, "completed")
+assert.equal(parallel.details.results[0].stderr, "")
+assert.equal(parallel.details.results[1].stderr, "Warning: unrelated diagnostic")
 assert.match(parallel.content[0].text, /result for review one/)
 assert.equal(tasks.entries.at(-1).customType, "pi-workflow.tasks")
 
@@ -218,7 +225,8 @@ assert.equal(reviewerCall.stdin, "review one")
 assert.equal(reviewerCall.options.shell, false)
 assert.equal(reviewerCall.options.cwd, "/workspace/project")
 assert.equal(reviewerCall.options.env.PI_WORKFLOW_CHILD, "1")
-assert.deepEqual(reviewerCall.options.stdio, ["pipe", "pipe", "pipe"])
+assert.deepEqual(reviewerCall.options.stdio, ["pipe", "pipe", "pipe", "pipe", "pipe"])
+assert.equal(reviewerCall.options.env.PI_WORKFLOW_APPROVAL_VERSION, "1")
 
 const scoutCall = spawnCalls[1]
 assert.deepEqual(scoutCall.args.slice(-6), [
@@ -264,6 +272,7 @@ const resumed = await resumedHarness.tools.get("task").execute("task-2", {
   resume: resumeId,
 }, undefined, undefined, context([taskState]))
 assert.equal(resumed.details.results[0].resumed, true)
+assert.match(resumed.details.results[0].stderr, /No project session found/, "resume diagnostics must remain visible")
 assert.equal(resumed.details.results[0].taskId, resumeId)
 assert.deepEqual(spawnCalls.at(-1)!.args.slice(0, 7), ["--mode", "json", "-p", "--exclude-tools", "task", "--session", resumeId])
 assert.equal(spawnCalls.at(-1)!.stdin, "continue review")
@@ -390,6 +399,7 @@ assert.equal((await firstResume).details.results[0].status, "completed")
 
 async function terminalReason(stopReason: "error" | "aborted", errorMessage: string) {
   let killSignal = ""
+  const notice = `Warning: No project session found with id 'pi-workflow-reason-${stopReason}'; creating a new session with that id.`
   const reasonHarness = harness({
     readFile: async () => config,
     randomUUID: () => `reason-${stopReason}`,
@@ -401,6 +411,7 @@ async function terminalReason(stopReason: "error" | "aborted", errorMessage: str
       proc.stdin = new EventEmitter()
       proc.stdin.end = () => {
         queueMicrotask(() => {
+          proc.stderr.emit("data", `${notice}\n`)
           proc.stdout.emit("data", Buffer.from(`${JSON.stringify({
             type: "message_end",
             message: { role: "assistant", content: [], stopReason, errorMessage },
@@ -422,6 +433,7 @@ async function terminalReason(stopReason: "error" | "aborted", errorMessage: str
   )
   assert.equal(killSignal, "")
   assert.equal(result.details.results[0].output, errorMessage)
+  assert.equal(result.details.results[0].stderr, notice, "failed and cancelled jobs retain all diagnostics")
   return result.details.results[0].status
 }
 assert.equal(await terminalReason("error", "provider failed"), "failed")

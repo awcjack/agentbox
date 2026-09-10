@@ -185,6 +185,24 @@ transcript support. Timed-out reads retain bounded correlation until Pi replies;
 further reads may return 429 while those replies are outstanding. Late oversized
 snapshots are also drained rather than killing the child.
 
+## Forwarded child approvals
+
+Managed workflow children forward manual policy `ask` decisions through private
+stdio pipes to the parent extension, which opens the existing select UI. The
+child still evaluates immutable guards and managed rules; forwarding does not
+override denies, change auto-permission behavior, or grant blanket access.
+Requests use per-child IDs, bounded frames and deadlines that include queue time.
+Children without a working parent approval channel fail closed.
+
+The workflow extension tags forwarded select titles with a `Pi child approval `
+JSON identity line containing `version`, parent `toolCallId`, `taskId`, `role`,
+and `requestId`. The runtime renders a readable role/task/operation request.
+Workflow progress reports `details.jobs[].approvalClosed` when a request settles,
+allowing the runtime to expire the matching pending card immediately. Parent tool
+completion also expires remaining associated cards. Identity metadata only
+controls display and cleanup; it never authorizes tool execution. These pipes
+separate control traffic from model output, not from arbitrary same-UID code.
+
 ## Conversation actions
 
 `GET /v1/sessions/:id/conversation` requires `sessions:read` and returns

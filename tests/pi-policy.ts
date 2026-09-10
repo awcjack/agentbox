@@ -196,4 +196,20 @@ assert.match((await call(lexicalAliasPolicy.toolCall, "custom_tool", { path: "al
 assert.equal(await call(immutable.toolCall, "read", { path: ".env.example" }), undefined)
 assert.equal(await call(immutable.toolCall, "bash", { command: "npm test" }), undefined)
 
+let forwarded = 0
+const childPolicy = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {
+  env: { PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_APPROVAL_VERSION: "1" },
+  approvalClient: { close: () => {}, ask: async () => { forwarded++; return true } },
+})
+assert.equal(await call(childPolicy.toolCall, "read", { path: "README.md" }, context({ hasUI: false })), undefined)
+assert.equal((await call(childPolicy.toolCall, "bash", { command: "sudo true" })).block, true)
+assert.equal(forwarded, 1)
+for (const marker of [undefined, "invalid"]) {
+  const missingTransport = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {
+    env: { PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_APPROVAL_VERSION: marker },
+  })
+  assert.equal((await call(missingTransport.toolCall, "read", { path: "README.md" }, context({
+    ui: { select: () => { throw new Error("child must not use UI") } },
+  }))).block, true)
+}
 console.log("pi policy extension tests passed")

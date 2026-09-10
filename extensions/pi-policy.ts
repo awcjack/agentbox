@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { execFile as nodeExecFile } from "node:child_process"
 import { promises as fs } from "node:fs"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
+import { APPROVAL_ENV, openApprovalClient, selectApproval } from "./pi-approval.ts"
 
 const DEFAULT_CONFIG_PATH = "/etc/pi/agentbox-policy.json"
 const SIGNAL_PATH = "/home/agent/.local/bin/agent-signal.sh"
@@ -42,6 +43,7 @@ export interface PiPolicyDependencies {
   realpath?: (path: string) => Promise<string>
   signal?: (state: "waiting" | "working") => Promise<void> | void
   env?: NodeJS.ProcessEnv
+  approvalClient?: ReturnType<typeof openApprovalClient>
 }
 
 /** Input fields that identify the resource or operation governed by a tool call. */
@@ -472,26 +474,7 @@ function defaultSignal(state: "waiting" | "working") {
 }
 
 async function selectWithTimeout(ctx: any, title: string, timeout: number) {
-  const controller = new AbortController()
-  const signals = ctx.signal ? [ctx.signal, controller.signal] : [controller.signal]
-  const signal = signals.length === 1 ? signals[0] : AbortSignal.any(signals)
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<undefined>((resolveTimeout) => {
-    timer = setTimeout(() => {
-      controller.abort()
-      resolveTimeout(undefined)
-    }, timeout)
-  })
-  try {
-    return await Promise.race([
-      ctx.ui.select(title, ["Allow once", "Deny"], { signal }),
-      expired,
-    ])
-  } catch {
-    return undefined
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+  return await selectApproval(ctx, title, Date.now() + timeout, ctx.signal) ? "Allow once" : undefined
 }
 
 export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {}) {
@@ -501,6 +484,9 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
   const env = dependencies.env ?? process.env
 
   return function piPolicy(pi: ExtensionAPI) {
+    let approvalClient = dependencies.approvalClient
+    let transportOpened = false
+    pi.on("session_shutdown", async () => approvalClient?.close())
     pi.on("tool_call", async (event, ctx) => {
       const input = event.input as Record<string, unknown>
       const configPath = env.PI_POLICY_CONFIG || DEFAULT_CONFIG_PATH
@@ -522,6 +508,14 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       const decision = managedDecision(config, event.toolName, targetGroups)
       if (decision === "allow") return
       if (decision === "deny") return { block: true, reason: "Denied by managed Pi policy" }
+      if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) {
+        if (!transportOpened) {
+          transportOpened = true
+          approvalClient ??= openApprovalClient(env)
+        }
+        if (await approvalClient?.ask(boundedDisplay(event.toolName, targets), config.timeout, ctx.signal)) return
+        return { block: true, reason: "Managed Pi child approval denied, cancelled, timed out, or transport unavailable" }
+      }
       if (!ctx.hasUI) return { block: true, reason: "Managed Pi policy requires approval, but no UI is available" }
 
       try {

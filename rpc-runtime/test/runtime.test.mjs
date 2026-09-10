@@ -1014,6 +1014,42 @@ test("extension dialogs only accept method-correct, single-use responses", async
   assert.equal(expired.response.status, 404);
 });
 
+test("child approvals show parent-owned identity and route single-use responses", async (t) => {
+  const { baseUrl, children, runtime } = await fixture(t);
+  const id = await createSession(baseUrl);
+  const owner = { version: 1, toolCallId: "task-call", taskId: "pi-workflow-child", role: "scout", requestId: "approval-id" };
+  children[0].output({ type: "extension_ui_request", id: "child-dialog", method: "select", title: `Pi child approval ${JSON.stringify(owner)}\nread: README.md`, options: ["Allow once", "Deny"], timeout: 1000 });
+  const { body } = await request(baseUrl, `/v1/sessions/${id}`);
+  assert.equal(body.session.pendingUi[0].title, "Approve subagent scout?");
+  assert.equal(body.session.pendingUi[0].message, "pi-workflow-child\nread: README.md");
+  assert.equal(body.session.pendingUi[0].timeout, 1000);
+  const accepted = await request(baseUrl, `/v1/sessions/${id}/ui`, { method: "POST", body: { id: "child-dialog", value: "Allow once" } });
+  assert.equal(accepted.response.status, 202);
+  assert.match(children[0].input, /"id":"child-dialog","value":"Allow once"/);
+  assert.equal(runtime.sessions.get(id).pendingUi.size, 0);
+  assert.equal((await request(baseUrl, `/v1/sessions/${id}/ui`, { method: "POST", body: { id: "child-dialog", value: "Allow once" } })).response.status, 404);
+});
+
+test("child approval cancellation and task completion expire only matching dialogs", async (t) => {
+  const { baseUrl, children, runtime } = await fixture(t, config({ limits: { maxPendingUi: 4 } }));
+  const id = await createSession(baseUrl);
+  const session = runtime.sessions.get(id);
+  for (const [dialog, toolCallId, taskId] of [["a", "parent-a", "child-a"], ["b", "parent-a", "child-b"], ["c", "parent-b", "child-a"]]) {
+    const owner = { version: 1, toolCallId, taskId, role: "scout", requestId: `request-${dialog}` };
+    children[0].output({ type: "extension_ui_request", id: dialog, method: "select", title: `Pi child approval ${JSON.stringify(owner)}\nread: README.md`, options: ["Allow once", "Deny"], timeout: 60_000 });
+  }
+  children[0].output({ type: "extension_ui_request", id: "ordinary", method: "select", title: "Choose", options: ["Allow once", "Deny"] });
+  children[0].output({ type: "tool_execution_update", toolCallId: "parent-a", partialResult: { details: { jobs: [{ taskId: "child-a", approvalClosed: "request-c" }] } } });
+  assert.equal(session.pendingUi.size, 4, "a wrong request ID never cancels another child");
+  children[0].output({ type: "tool_execution_update", toolCallId: "parent-a", partialResult: { details: { jobs: [{ taskId: "child-a", approvalClosed: "request-a" }] } } });
+  assert.deepEqual([...session.pendingUi.keys()], ["b", "c", "ordinary"]);
+  assert.equal((await request(baseUrl, `/v1/sessions/${id}/ui`, { method: "POST", body: { id: "a", value: "Allow once" } })).response.status, 404);
+  children[0].output({ type: "tool_execution_end", toolCallId: "parent-a" });
+  assert.deepEqual([...session.pendingUi.keys()], ["c", "ordinary"]);
+  const expired = session.events.records.map((event) => JSON.parse(event.data)).filter((event) => event.event === "extension_ui_expired");
+  assert.deepEqual(expired.map((event) => event.id), ["a", "b"]);
+});
+
 test("body, session, pending-command, and timeout limits are enforced", async (t) => {
   const cfg = config({
     limits: { maxSessions: 1, maxBodyBytes: 1024, maxPendingCommands: 1, commandTimeoutMs: 30 },

@@ -615,6 +615,28 @@ class Session extends EventEmitter {
       if (typeof record.data.sessionName === "string") this.name = record.data.sessionName;
       if (NATIVE_SESSION_ID_RE.test(record.data.sessionId ?? "")) this.nativeSessionId = record.data.sessionId;
     }
+    let approvalOwner;
+    if (record.type === "extension_ui_request" && record.method === "select" && typeof record.title === "string" && record.title.startsWith("Pi child approval ")) {
+      const newline = record.title.indexOf("\n");
+      try {
+        const owner = JSON.parse(record.title.slice("Pi child approval ".length, newline));
+        if (newline > 0 && owner.version === 1 && ["toolCallId", "taskId", "role", "requestId"].every((key) => typeof owner[key] === "string" && owner[key].length > 0 && owner[key].length <= 256 && !/[\x00-\x1f\x7f]/.test(owner[key]))) {
+          approvalOwner = owner;
+          record = { ...record, title: `Approve subagent ${owner.role}?`, message: `${owner.taskId}\n${record.title.slice(newline + 1)}` };
+        }
+      } catch { /* Other extension dialogs remain unchanged. Metadata never grants permission. */ }
+    }
+    if (["tool_execution_update", "tool_execution_end"].includes(record.type)) {
+      const jobs = record.partialResult?.details?.jobs;
+      for (const [id, entry] of this.pendingUi) {
+        const owner = entry.approvalOwner;
+        if (!owner || owner.toolCallId !== record.toolCallId) continue;
+        if (record.type !== "tool_execution_end" && !(Array.isArray(jobs) && jobs.some((job) => job?.taskId === owner.taskId && job.approvalClosed === owner.requestId))) continue;
+        clearTimeout(entry.timer);
+        this.pendingUi.delete(id);
+        this.publish({ type: "supervisor", event: "extension_ui_expired", id });
+      }
+    }
     // Snapshot responses already travel over HTTP. Replaying them over SSE
     // doubles transcripts and can evict the cursor used to request the snapshot.
     if (record.type !== "response" || !READ_COMMANDS.has(record.command)) this.publish(record);
@@ -636,7 +658,7 @@ class Session extends EventEmitter {
         }, record.timeout);
         timer.unref?.();
       }
-      this.pendingUi.set(record.id, { request: record, timer });
+      this.pendingUi.set(record.id, { request: record, timer, approvalOwner });
     }
     if (record.type !== "response" || !("id" in record)) return;
     const key = String(record.id);
