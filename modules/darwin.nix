@@ -167,6 +167,7 @@ let
     version = 1;
     defaultDecision = cfg.settings.piConfig.permissions.defaultDecision;
     timeout = cfg.settings.piConfig.permissions.timeoutMs;
+    auto = cfg.settings.piConfig.permissions.auto;
     rules = cfg.settings.piConfig.permissions.rules;
   };
   piPolicyText = builtins.toJSON piPolicyValue;

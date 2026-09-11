@@ -1237,12 +1237,50 @@ in
               "deny"
             ];
             default = "ask";
-            description = "Default managed Pi tool decision.";
+            description = "Managed Pi decision for unmatched targets; default ask is auto eligible, unlike an effective explicit ask rule, which requires a human.";
           };
           timeoutMs = lib.mkOption {
             type = lib.types.ints.between 1 300000;
             default = 30000;
             description = "Timeout for interactive Pi tool approvals.";
+          };
+          auto = lib.mkOption {
+            type = lib.types.submodule {
+              options = {
+                enable = lib.mkEnableOption "automatic classification of unmatched Pi default ask decisions";
+                provider = lib.mkOption {
+                  type = lib.types.str;
+                  default = "";
+                  description = "Pi provider for the automatic permission classifier.";
+                };
+                model = lib.mkOption {
+                  type = lib.types.str;
+                  default = "";
+                  description = "Explicit Pi model ID for the automatic permission classifier.";
+                };
+                timeout = lib.mkOption {
+                  type = lib.types.ints.between 1 300000;
+                  default = 30000;
+                  description = "Automatic permission classifier timeout in milliseconds; failures count toward a human recovery checkpoint at 3 consecutive or 20 total denials.";
+                };
+              };
+            };
+            default = { };
+            description = ''
+              Opt-in, fail-closed classifier for unmatched default ask decisions;
+              effective explicit ask rules still require a human. Three consecutive
+              or 20 total classifier denials/errors latch a human checkpoint for
+              the threshold-triggering and subsequent auto-eligible calls. Any allowed call resets only the
+              consecutive count, not the total or latched pause. Successful human
+              recovery approval resets both counts and resumes auto; denied,
+              cancelled, timed-out, or unavailable approval leaves it paused.
+              Headless calls block while paused. Explicit asks and recovery use
+              the same local UI or existing child approval transport; neither
+              overrides rule denials. Session start/switch/fork/tree/shutdown
+              cancels stale checks and resets per-instance state, which is neither
+              shared between parent and child nor persisted across process restarts.
+              This classifier is not a sandbox.
+            '';
           };
           rules = lib.mkOption {
             type = lib.types.listOf (
@@ -1308,6 +1346,10 @@ in
                 patterns = [ "*" ];
                 decision = "allow";
               }
+            ]
+            # Let default ask remain auto eligible; retain explicit asks for
+            # these tools when the user changes the default to allow or deny.
+            ++ lib.optionals (cfg.settings.piConfig.permissions.defaultDecision != "ask") [
               {
                 tools = [
                   "bash"
@@ -1324,6 +1366,8 @@ in
               and managed-write denials run first. Among configured rules, any
               matching deny wins; otherwise the last matching allow or ask wins
               per target, and every target in a tool call must avoid denial.
+              An effective explicit ask requires human approval even with auto
+              enabled; only unmatched default ask decisions are auto eligible.
             '';
           };
         };

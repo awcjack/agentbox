@@ -61,7 +61,11 @@ destruction are also immutable denials. These run before configurable rules. Any
 matching configured `deny` wins; otherwise the last matching `allow` or `ask`
 wins per target. A multi-target call is denied if any target is denied, or asks
 if none is denied but any target asks. The defaults allow workspace file work
-plus todo/questions and ask for shell, web, MCP, and delegated tasks. Task prompts
+plus todo/questions. Shell, web, MCP, and delegated tasks fall through to the
+default `ask`, making them auto eligible when auto is enabled. The broad default
+`ask` rule for `bash`, `web_*`, `mcp__*`, and `task` is included only when
+`defaultDecision != "ask"`, preserving their explicit asks if the default is
+changed to `allow` or `deny`. Task prompts
 and bounded string arguments from MCP/custom tools are policy targets. The
 policy, workflow, and shared runtime JSON files are generated declaratively,
 mounted read-only, and cannot be replaced by Pi or project configuration.
@@ -136,6 +140,80 @@ public HTTPS unless `transport.allowInsecureLoopback = true` explicitly enables
 a loopback endpoint. Identifier-shaped values cannot be distinguished from
 literals by the module schema, so MCP secret values belong in `environmentFile`.
 No MCP server is enabled by default.
+
+### Pi auto permissions
+
+Automatic permission classification is opt-in and disabled by default. Configure
+an explicit classifier provider and model, for example `openai-codex/gpt-5.3-codex-spark`:
+
+```nix
+services.agentbox.settings.piConfig.permissions = {
+  defaultDecision = "ask";
+  auto = {
+    enable = true;
+    provider = "openai-codex";
+    model = "gpt-5.3-codex-spark";
+    timeout = 30000; # milliseconds, allowed range 1..300000
+  };
+};
+```
+
+The `openai-codex` provider uses Pi's ChatGPT/Codex login. For an OpenAI API key,
+use the `openai` provider and an available model such as `gpt-4.1-mini` instead.
+Model catalog presence does not guarantee account access; verify a live request
+before deployment, since unsupported models fail classification and eventually
+pause auto mode for human recovery.
+The `auto` defaults are `enable = false`, `provider = ""`, `model = ""`, and
+`timeout = 30000`; select a provider/model available in your Pi model registry.
+
+Only unmatched `defaultDecision = "ask"` decisions are auto eligible. An effective
+explicit matching `ask` requires a human even when auto is enabled. The last
+matching `allow` or `ask` still wins per target, and any matching `deny` always
+wins. A multi-target call with an effective explicit ask requires a human unless
+any target is denied. Existing allows and denials remain unchanged, including
+immutable sensitive-path and managed-write denials; neither auto nor human
+approval can override denials. Rules that resolve to `allow` bypass classification.
+With auto disabled, default asks also require human approval. The public decision
+schema remains `allow` / `ask` / `deny`.
+
+Classification uses a direct, tool-free `ctx.modelRegistry.complete` call with
+existing Pi authentication, not a delegated agent or separate auth setup. Evidence
+shared with the classifier provider includes all user text and up to 32 recent
+prior tool calls across the active session branch, plus the current tool call.
+The history cutoff uses `toolCallId` to exclude the pending current call and any
+siblings after it. Assistant prose/thinking and tool results are excluded.
+Prior tool-call history has a 12000-character subbudget within the fixed
+32000-character evidence maximum. Whole oldest calls are omitted to fit, and a
+history-omitted flag discloses omissions to the classifier. User text and the
+current call are never truncated; evidence that cannot fit fails closed.
+Transcript tool calls are untrusted proposals, not proof of execution or
+authorization.
+
+The classifier requests a 128-output-token `maxTokens` limit.
+Pi's Codex provider ignores that token limit; Codex requests use low reasoning
+effort instead. The timeout still applies, and verdict text over 256 characters
+is rejected after completion, not stopped during generation. Failure, timeout,
+malformed output, oversized input or output, and missing context all fail
+classification. Caller cancellation blocks without consuming the denial budget.
+
+Repeated automatic classifier denials/errors count toward a recovery checkpoint:
+3 consecutive or 20 total latch a pause and request human approval for that same
+call. Subsequent auto-eligible calls require human approval instead of
+classification until recovery succeeds. Any allowed call
+resets the consecutive counter, but not the total counter or an already latched
+pause. Successful recovery human approval resets both counters, clears the pause,
+and resumes auto for later calls. Denied, cancelled, timed-out, or unavailable
+human approval leaves the pause in place; headless calls block while paused.
+Explicit asks and recovery checkpoints use the same local approval UI or existing
+delegated-child approval transport. Rule denials are never overridden.
+
+Session start, switch, fork, tree navigation, and shutdown cancel stale checks
+and reset the per-instance counters and pause. This state is not shared between
+parent and child instances and is not persisted across process restarts.
+
+This is not a sandbox and does not provide a security guarantee equivalent to
+Claude mode. MCP retains its independent per-server approval checks even when
+the Pi policy classifier allows a call.
 
 ### Pi chat UI and RPC API
 

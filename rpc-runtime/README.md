@@ -187,12 +187,26 @@ snapshots are also drained rather than killing the child.
 
 ## Forwarded child approvals
 
-Managed workflow children forward manual policy `ask` decisions through private
-stdio pipes to the parent extension, which opens the existing select UI. The
+Managed workflow children forward human-required policy approvals through private
+stdio pipes to the parent extension, which opens the existing select UI. This
+includes effective explicit `ask` rules even with auto enabled, default asks
+when auto is disabled, and recovery checkpoints after repeated auto classifier
+denials/errors. All use the same existing transport and public decision schema. The
 child still evaluates immutable guards and managed rules; forwarding does not
 override denies, change auto-permission behavior, or grant blanket access.
 Requests use per-child IDs, bounded frames and deadlines that include queue time.
 Children without a working parent approval channel fail closed.
+
+At 3 consecutive or 20 total classifier denials/errors, the threshold-triggering
+and subsequent auto-eligible calls require a human recovery checkpoint. Any allowed call resets
+only the consecutive count, not the total or latched pause. Successful recovery
+approval resets both counts and resumes auto; denied, cancelled, timed-out, or
+unavailable approval leaves the pause in place, so headless calls block while
+paused. Counters and pauses belong to each policy instance, are not shared by
+parent and child, and do not survive process restarts. Session start/switch/fork/
+tree/shutdown cancels stale checks and resets that state. No approval overrides
+rule denials. See the main README's Pi auto permissions section for classifier
+history evidence and trust limits.
 
 The workflow extension tags forwarded select titles with a `Pi child approval `
 JSON identity line containing `version`, parent `toolCallId`, `taskId`, `role`,
