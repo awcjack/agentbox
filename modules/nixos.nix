@@ -274,6 +274,7 @@ let
     PI_WEB_BIND_ADDRESS = "127.0.0.1";
     PI_WEB_PORT = "4097";
     ENABLE_PI_RPC_API = lib.boolToString cfg.settings.piRpcApi.enable;
+    PI_RPC_API_AUTO_START = lib.boolToString cfg.settings.piRpcApi.autoStart;
     PI_RPC_PORT = toString cfg.settings.piRpcApi.port;
     PI_AGENTBOX_RUNTIME_CONFIG = "/etc/agentbox/pi-runtime.json";
     PI_WORKFLOW_CONFIG = "/etc/agentbox/pi-workflow.json";

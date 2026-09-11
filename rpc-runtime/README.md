@@ -6,11 +6,29 @@ provide a WebSocket endpoint.
 
 ## Browser UI
 
-The supervisor serves the bundled static `web/` chat UI at `/` whenever it is
-enabled. UI and API share the existing `piRpcApi` listener; no separate service,
+The running supervisor serves the bundled static `web/` chat UI at `/`.
+UI and API share the existing `piRpcApi` listener; no separate service,
 build-time frontend dependency, or UI enable option is needed. `agentbox pi-ui`
 shows that root URL, while `agentbox pi-rpc` checks readiness. The existing
 `agentbox pi-web` command is still the separate ttyd terminal UI.
+
+For manual startup instead of starting the server at container boot, configure:
+
+```nix
+services.agentbox.settings.piRpcApi = {
+  enable = true;
+  autoStart = false;
+  # Keep the existing auth, profiles, port and allowedOrigins settings.
+};
+```
+
+Then use `agentbox service start pi-rpc`, `agentbox service status pi-rpc`, and
+`agentbox service stop pi-rpc`. The container stays available while on-demand
+services are stopped. Visiting the URL does not start the server. `pi-ui` and
+`pi-rpc` show a start hint if it is stopped. `autoStart` defaults to true for
+existing users and does not affect authentication or profile configuration.
+This is separate from `services.agentbox.autoStart`, which controls container
+startup at host boot, and from `agentbox pi`, the on-demand interactive CLI.
 
 Open the root URL without SSH, enter the raw bearer token/password, and select
 an approved profile. The password stays in page memory, not localStorage,

@@ -1508,6 +1508,16 @@ in
           default = false;
           description = "Enable the authenticated Pi RPC HTTP/SSE supervisor and its native browser chat UI at /.";
         };
+        autoStart = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = ''
+            Start the Pi RPC API at container boot when enabled. If false, keep
+            its configuration and authentication enabled but register pi-rpc as
+            an on-demand service. Use `agentbox service start pi-rpc` and
+            `agentbox service stop pi-rpc` to manage it. Has no effect when enable is false.
+          '';
+        };
         bindAddress = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -1992,6 +2002,15 @@ in
   # platforms because the platform config bodies already fold extraVolumes /
   # extraActivation into the container.
   config = lib.mkMerge [
+    (lib.mkIf (cfg.settings.piRpcApi.enable && !cfg.settings.piRpcApi.autoStart) {
+      services.agentbox.onDemandScripts.pi-rpc = ''
+        export HOME=/home/agent
+        export XDG_CONFIG_HOME=/home/agent/.config
+        export PI_AGENTBOX_RUNTIME_CONFIG=/etc/agentbox/pi-runtime.json
+        export PI_RPC_LOG_FILE=/home/agent/.agentbox-logs/pi-rpc-runtime.log
+        exec /bin/pi-rpc-runtime-supervise
+      '';
+    })
     (lib.mkIf (cfg.bootScripts != { }) {
       services.agentbox.extraVolumes = [
         "${cfg.dataDir}/boot.d:/home/agent/.agentbox/boot.d:ro"

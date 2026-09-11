@@ -280,6 +280,7 @@ let
         PI_WEB_BIND_ADDRESS = "0.0.0.0";
         PI_WEB_PORT = "4097";
         ENABLE_PI_RPC_API = lib.boolToString cfg.settings.piRpcApi.enable;
+        PI_RPC_API_AUTO_START = lib.boolToString cfg.settings.piRpcApi.autoStart;
         PI_RPC_PORT = toString cfg.settings.piRpcApi.port;
         PI_AGENTBOX_RUNTIME_CONFIG = "/etc/agentbox/pi-runtime.json";
         PI_WORKFLOW_CONFIG = "/etc/agentbox/pi-workflow.json";
@@ -401,7 +402,7 @@ let
     [ "true" ]
     ++ lib.optional cfg.settings.enableOpencode ''(curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health >/dev/null)''
     ++ lib.optional cfg.settings.enablePiWeb ''(password="$PI_WEB_PASSWORD"; [ -n "$password" ] || password="$OPENCODE_PASSWORD"; curl -fsS -u "pi:$password" http://127.0.0.1:4097/ >/dev/null)''
-    ++ lib.optional cfg.settings.piRpcApi.enable "(curl -fsS http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready >/dev/null)"
+    ++ lib.optional (cfg.settings.piRpcApi.enable && cfg.settings.piRpcApi.autoStart) "(curl -fsS http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready >/dev/null)"
   );
 
   # Click-to-jump handler — runs ONLY when you click an Agentbox notification
@@ -712,6 +713,14 @@ let
       echo "Basic Auth username: pi"
     }
 
+    check_pi_rpc_started() {
+      if [ "${lib.boolToString (cfg.settings.piRpcApi.enable && !cfg.settings.piRpcApi.autoStart)}" = true ] &&
+        ! docker exec -u agent "$CONTAINER_NAME" tmux has-session -t service-pi-rpc 2>/dev/null; then
+        echo "Pi RPC API is stopped (configured on-demand). Start it with: agentbox service start pi-rpc" >&2
+        return 1
+      fi
+    }
+
     cmd_pi_ui() {
       check_docker
       ensure_container_running
@@ -719,6 +728,7 @@ let
         echo "Pi UI requires settings.piRpcApi.enable = true." >&2
         return 1
       fi
+      check_pi_rpc_started || return 1
       echo "Pi chat UI: http://localhost:${toString cfg.settings.piRpcApi.port}/"
       echo "Enter the configured RPC bearer token in the browser; no SSH required."
     }
@@ -726,6 +736,7 @@ let
     cmd_pi_rpc() {
       check_docker
       ensure_container_running
+      check_pi_rpc_started || return 1
       echo "Pi RPC API: http://localhost:${toString cfg.settings.piRpcApi.port}"
       if ! docker exec "$CONTAINER_NAME" curl -fsS "http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready"; then
         echo "Pi RPC API is not healthy (settings.piRpcApi.enable=${lib.boolToString cfg.settings.piRpcApi.enable})." >&2

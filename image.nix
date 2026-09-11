@@ -1719,7 +1719,8 @@ let
     # store wrapper. Configuration and token hashes are resolved at runtime from
     # the read-only managed config and secret environment file.
     PI_RPC_STARTED=false
-    if [ "''${ENABLE_PI_RPC_API:-false}" = "true" ]; then
+    if [ "''${ENABLE_PI_RPC_API:-false}" = "true" ] && \
+       [ "''${PI_RPC_API_AUTO_START:-true}" = "true" ]; then
       if [ -x ${agentbox-pi-rpc-runtime}/bin/pi-rpc-runtime-supervise ]; then
         echo "Starting Pi RPC API..."
         setpriv --reuid=agent --regid=agent --init-groups -- \
@@ -1804,6 +1805,20 @@ let
     # Execute command or default to bash
     # Use setpriv to drop privileges (su requires PAM/setuid which doesn't work in Nix containers)
     cd /home/agent
+
+    # Detached tmux services are not shell jobs. Keep an idle container available
+    # for them even before the first start and after the last stop.
+    if [ $# -eq 0 ]; then
+      for _service in "$AGENT_HOME"/.agentbox/on-demand.d/*.sh; do
+        [ -f "$_service" ] && [ -x "$_service" ] || continue
+        echo "Container running in on-demand service mode."
+        sleep infinity &
+        IDLE_PID=$!
+        trap 'kill "$IDLE_PID" 2>/dev/null || true; exit 0' TERM INT
+        wait "$IDLE_PID"
+        exit $?
+      done
+    fi
 
     # If services were started in background, wait for them instead of starting a shell
     # This keeps the container alive when running as a systemd service
@@ -2374,7 +2389,8 @@ in
 
   config = {
     Entrypoint = [ "${entrypointScript}/bin/entrypoint" ];
-    Cmd = [ "bash" ];
+    # Let the entrypoint distinguish default startup from an explicit command.
+    Cmd = [ ];
     WorkingDir = "/workspace";
     ExposedPorts = {
       "22/tcp" = { }; # SSH

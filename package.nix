@@ -159,6 +159,14 @@ let
           echo "Basic Auth username: pi"
         }
 
+        check_pi_rpc_started() {
+          if docker exec "$CONTAINER_NAME" bash -c '[ "''${ENABLE_PI_RPC_API:-false}" = true ] && [ "''${PI_RPC_API_AUTO_START:-true}" = false ]' &&
+            ! docker exec -u agent "$CONTAINER_NAME" tmux has-session -t service-pi-rpc 2>/dev/null; then
+            echo "Pi RPC API is stopped (configured on-demand). Start it with: agentbox service start pi-rpc" >&2
+            return 1
+          fi
+        }
+
         cmd_pi_ui() {
           ensure_running
           if ! docker exec "$CONTAINER_NAME" bash -c '[ "''${ENABLE_PI_RPC_API:-false}" = true ]'; then
@@ -167,12 +175,14 @@ let
           fi
           local port
           port=$(docker exec "$CONTAINER_NAME" bash -c 'printf %s "''${PI_RPC_PORT:-4098}"')
+          check_pi_rpc_started || return 1
           echo "Pi chat UI: http://localhost:$port/"
           echo "Enter the configured RPC bearer token in the browser; no SSH required."
         }
 
         cmd_pi_rpc() {
           ensure_running
+          check_pi_rpc_started || return 1
           local port
           port=$(docker exec "$CONTAINER_NAME" bash -c 'printf %s "''${PI_RPC_PORT:-4098}"')
           echo "Pi RPC API: http://localhost:$port"
