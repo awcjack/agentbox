@@ -48,7 +48,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   model in the tooltip when available. Historical replies never inherit the
   currently selected model.
 - Copy message/response copies raw text and Markdown, not thinking, tools or image
-  payloads. A selectable text dialog is available if clipboard access fails.
+  payloads. Message and code copying try synchronous `execCommand("copy")` first
+  for HTTP compatibility, then the modern Clipboard API. Manual selection is
+  available if both automatic methods fail.
 - Revert and Fork on user messages branch from before the selected message and
   restore its text/images as an unsent draft after confirmation. Fork opens a
   separate session; Revert replaces the current session's process/native history
@@ -160,7 +162,8 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
 
 - Requires native ES modules, fetch/ReadableStream, AbortController, and HTML
   dialogs. HTTP on Tailscale works without `crypto.randomUUID` or secure-context
-  clipboard APIs; copying code falls back to text selection on such origins.
+  clipboard APIs. Copy buttons use the legacy click-triggered copy method on
+  these origins; browsers that block both copy methods fall back to selection.
 - Oversized snapshot responses (HTTP 413) stop automatic reconnect attempts;
   the session can still be ended. Transcript pagination is not provided by Pi's
   `get_messages` command. Read snapshots are not duplicated in SSE replay.

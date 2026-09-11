@@ -1,5 +1,5 @@
 import { ApiError, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
-import { element, imageSource, renderMarkdown } from "./markdown.mjs";
+import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
 import { initSidebarResize } from "./sidebar.mjs";
 
@@ -239,11 +239,9 @@ function renderMessages() {
       if (text) {
         const copy = element("button", "text-button", "Copy"); copy.type = "button"; copy.setAttribute("aria-label", `Copy ${message.role === "user" ? "message" : "response"}`);
         copy.addEventListener("click", async () => {
-          try {
-            if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-            await navigator.clipboard.writeText(text);
+          if (await copyText(text)) {
             if (active(ctx)) showNotice("Copied to clipboard.");
-          } catch {
+          } else {
             if (!active(ctx)) return;
             $("copy-text").value = text; $("copy-dialog").showModal(); $("copy-text").focus(); $("copy-text").select();
           }

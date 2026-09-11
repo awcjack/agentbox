@@ -472,18 +472,51 @@ try {
       assert.equal(await page.locator(".message-model").textContent(), "pi-reasoning / historical-provider");
       assert.equal(await page.locator(".message-model").getAttribute("title"), "Response model: actual-response-model");
       assert.equal(await page.locator("#model").inputValue(), JSON.stringify(["fixture", "pi-fast"]), "historical label differs from selected model");
-      await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedText = text; } } }));
+      // Actual legacy copy with the secure-context Clipboard API unavailable.
+      await page.evaluate(() => {
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+        const exec = document.execCommand.bind(document);
+        document.execCommand = (command) => {
+          const input = document.activeElement;
+          const text = input.value.slice(input.selectionStart, input.selectionEnd);
+          const copied = exec(command);
+          if (copied) window.legacyCopied = text;
+          return copied;
+        };
+      });
+      const responseCopy = page.getByRole("button", { name: "Copy response", exact: true }).first();
+      await responseCopy.click();
+      await until(() => page.evaluate(() => window.legacyCopied).then((text) => text === raw), "message copied without Clipboard API");
+      assert.equal(await page.locator("#copy-dialog").isVisible(), false);
+      assert.equal(await responseCopy.evaluate((button) => document.activeElement === button), true, "copy restores focus");
+      assert.equal(await page.locator(".clipboard-copy").count(), 0, "temporary text is removed");
+      const codeCopy = page.locator(".code-heading button").first();
+      await codeCopy.click();
+      await until(() => page.evaluate(() => window.legacyCopied).then((text) => text === "const copied = true;"), "code copied without Clipboard API");
+      await page.evaluate(() => {
+        document.execCommand = () => false;
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text) => { window.copiedText = text; } } });
+      });
       await page.getByRole("button", { name: "Copy response", exact: true }).first().click();
       await until(() => page.evaluate(() => window.copiedText === undefined ? false : true), "clipboard write");
       assert.equal(await page.evaluate(() => window.copiedText), raw, "copy contains raw markdown, not thinking or tools");
       await target.getByRole("button", { name: "Copy message", exact: true }).click();
       await until(() => page.evaluate(() => window.copiedText).then((text) => text === "Restore this **raw** draft"), "user text copied without image");
-      await page.evaluate(() => Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new Error("Clipboard denied"); } } }));
+      await codeCopy.click();
+      await until(() => page.evaluate(() => window.copiedText).then((text) => text === "const copied = true;"), "modern code copy fallback");
+      await page.evaluate(() => {
+        document.execCommand = () => { throw new Error("Legacy copy unavailable"); };
+        Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async () => { throw new Error("Clipboard denied"); } } });
+      });
       await page.getByRole("button", { name: "Copy response", exact: true }).first().click();
       await page.locator("#copy-dialog").waitFor();
       assert.equal(await page.locator("#copy-text").inputValue(), raw);
       assert.equal(await page.locator("#copy-text").evaluate((node) => node.value.slice(node.selectionStart, node.selectionEnd)), raw);
       await noOverflow(page); await page.locator("#close-copy").click();
+      await codeCopy.click();
+      await until(() => codeCopy.textContent().then((text) => text === "Selected: copy manually"), "manual code copy fallback");
+      assert.equal(await page.evaluate(() => window.getSelection().toString()), "const copied = true;");
+      assert.equal(await page.locator(".clipboard-copy").count(), 0);
       for (const kind of ["fork", "revert"]) {
         await action(kind).click(); await page.locator("#conversation-action-dialog").waitFor();
         assert.equal(await page.locator("#conversation-action-preview").textContent(), "Restore this **raw** draft");

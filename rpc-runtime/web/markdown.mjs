@@ -73,6 +73,29 @@ export function element(tag, className, text) {
   return node;
 }
 
+export async function copyText(text) {
+  const focused = document.activeElement;
+  const selection = window.getSelection();
+  const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : [];
+  const textarea = element("textarea", "clipboard-copy");
+  textarea.value = text; textarea.readOnly = true; textarea.tabIndex = -1;
+  try {
+    // Run synchronously in the click gesture: this also works on plain HTTP.
+    document.body.append(textarea); textarea.focus({ preventScroll: true }); textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    if (document.execCommand("copy")) return true;
+  } catch { /* Try the modern API when legacy copying is unavailable. */ }
+  finally {
+    textarea.remove();
+    if (focused?.isConnected) focused.focus({ preventScroll: true });
+    if (selection) { selection.removeAllRanges(); for (const range of ranges) selection.addRange(range); }
+  }
+  try {
+    if (!navigator.clipboard?.writeText) return false;
+    await navigator.clipboard.writeText(text); return true;
+  } catch { return false; }
+}
+
 export function renderMarkdown(source) {
   const root = element("div", "markdown");
   function inline(parent, text) {
@@ -91,10 +114,8 @@ export function renderMarkdown(source) {
       const copy = element("button", "text-button", "Copy");
       copy.type = "button";
       copy.addEventListener("click", async () => {
-        try {
-          if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
-          await navigator.clipboard.writeText(block.text); copy.textContent = "Copied";
-        } catch {
+        if (await copyText(block.text)) copy.textContent = "Copied";
+        else {
           const range = document.createRange(); range.selectNodeContents(code);
           const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
           copy.textContent = "Selected: copy manually";
