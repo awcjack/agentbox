@@ -429,6 +429,114 @@ boundary: code running inside Agentbox can forge or delete inbox files, just as
 it can alter its local transcript. A collector must derive host and trust-domain
 identity from host configuration rather than trusting request fields.
 
+## On-demand desktop
+
+An optional virtual desktop bundles Xvfb, Openbox, Chromium, fonts, D-Bus,
+`xdotool`, `scrot`, x11vnc, and noVNC. It controls applications inside the
+container, not applications on the host desktop. Nothing starts at boot.
+
+```nix
+services.agentbox.settings.desktop = {
+  enable = true;
+  # Defaults; override if these ports are already in use.
+  webPort = 6080;
+  vncPort = 5900;
+  resolution = "1440x900x24";
+  shmSize = "1g";
+};
+```
+
+The NixOS module includes the desktop in its default image. If you supply a
+custom image, build it with `agentboxImage.override { withDesktop = true; }`.
+Darwin also requires a prebuilt Linux image with that flag. Rebuild and recreate
+the container after changing image or container settings; service start alone
+does not install packages. Consumers pinned to an older Agentbox revision must
+update that input before enabling the option.
+
+```bash
+agentbox service start desktop
+agentbox service status desktop
+agentbox service restart desktop
+agentbox service stop desktop
+```
+
+Service status reports the tmux session, not desktop readiness. The launcher
+prints `agentbox-desktop: ready` after X, D-Bus, VNC, and noVNC are reachable;
+inspect its output inside the container with
+`tmux capture-pane -pt service-desktop`. Stop tears down the supervised desktop
+process groups; restart waits for cleanup. Browser windows close when their X
+display disappears, but independently launched applications are not supervised
+by this service and may retain background processes.
+
+On NixOS, open `http://127.0.0.1:6080/vnc.html` on the host, or forward it from
+your own machine:
+
+```bash
+ssh -N -L 6080:127.0.0.1:6080 your-nixos-host
+```
+
+**Access trusts local users.** VNC and noVNC have no password and bind only to
+IPv4 loopback; X11 uses a private authentication cookie and disables TCP.
+Agentbox uses host networking, so other local host processes can access these
+ports. Never publish them publicly or forward them through an unauthenticated
+proxy. On macOS, loopback belongs to the Docker runtime's Linux network context;
+reach that context through the runtime's supported forwarding mechanism.
+
+The module exports `DISPLAY=:10`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS`
+in the container environment. Pi RPC profiles deliberately do not inherit that
+environment; explicitly grant desktop access to each desired profile:
+
+```nix
+services.agentbox.settings.piRpcApi.profiles.default.env = {
+  DISPLAY = "DISPLAY";
+  XAUTHORITY = "XAUTHORITY";
+  DBUS_SESSION_BUS_ADDRESS = "DBUS_SESSION_BUS_ADDRESS";
+};
+```
+
+From an Agentbox shell, for example:
+
+```bash
+chromium --user-data-dir=/workspace/.browser-profile http://127.0.0.1:3000
+xdotool getactivewindow
+scrot /workspace/desktop.png
+```
+
+Keep browser profiles out of version control; they may contain authentication
+data. Chromium is not automatically launched. Headless tests do not require
+starting the desktop; Playwright can use `executablePath: "/bin/chromium"`.
+The existing frontend smoke test accepts `CHROMIUM_EXECUTABLE=/bin/chromium`.
+Install Playwright separately and verify compatibility with packaged Chromium;
+this option does not supply Playwright, Firefox, or WebKit. In Playwright, set
+`chromiumSandbox: true` to retain sandboxing (its default is false).
+
+**Chromium requires working unprivileged user namespaces.** The wrapper disables
+only the unavailable Nix-store setuid-helper fallback, not Chromium's namespace
+or seccomp-BPF sandbox. Check `unshare -Ur true` as the agent user in the actual
+container. If the host kernel, Docker seccomp profile, or other security policy
+denies namespace creation, Chromium will fail with `No usable sandbox!`.
+This option does not relax those policies, add privileged mode, or pass
+`--no-sandbox`. Review a narrowly scoped browser-compatible policy on your host,
+or use a separate sandbox-capable browser container. The bundled desktop tools
+can still operate without Chromium.
+
+noVNC is a human viewer, not an LLM tool integration. Agents can run browser
+scripts or the bundled screenshot/input commands; structured browser MCP or
+pixel-based computer-use tools must be configured separately. Browsing untrusted
+sites in a container that also holds agent credentials is less isolated than a
+dedicated browser container.
+
+Runtime verification (the desktop smoke test needs an unused display `:10`):
+
+```bash
+nix build .#agentbox-desktop
+bash tests/desktop.sh
+bash tests/desktop.sh --real ./result
+bash tests/desktop.sh --sandbox ./result
+```
+
+The sandbox check reports a rendering skip when user namespaces are unavailable.
+
 ## Advanced: baking extra agents in
 
 Beyond the four bundled agents, this standalone ships no others. To add your own

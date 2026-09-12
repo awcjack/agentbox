@@ -27,10 +27,11 @@ function conversationSnapshot(session) {
 }
 let tick = Date.now();
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
-const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", latestEventId: session.cursor, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
+const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
 function emit(session, event) {
   const frame = `id: ${++session.cursor}\nevent: pi\ndata: ${JSON.stringify(event)}\n\n`;
   session.events.push({ id: session.cursor, frame });
+  if (event.type === "agent_settled") session.settledEventId = session.cursor;
   for (const response of session.clients) response.write(frame);
 }
 function complete(session, message) {
@@ -54,7 +55,7 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -330,6 +331,8 @@ try {
       emit(session, { type: "tool_execution_start", toolCallId: tool.id, toolName: tool.name, args: tool.arguments });
       const approvalId = requestUi(session, { method: "confirm", title: "Allow reading the entry point?", message: "Pi wants to inspect src/main.mjs", timeout: 60_000 });
       await page.locator(".approval").waitFor();
+      assert.equal(await page.locator(".tool-preview").first().textContent(), "src/main.mjs");
+      assert.equal(await page.locator(".tool-detail").first().getAttribute("open"), null, "path is visible without expanding");
       assert.equal(await page.locator("#composer").isVisible(), false);
       assert.equal(await page.locator(".activity").isVisible(), false);
       await noOverflow(page);
@@ -415,7 +418,14 @@ try {
       await until(() => !sessions.has(session.id), "DELETE frees runtime session");
       await until(() => page.locator("#session-title").textContent().then((text) => text === "Pi coding workspace"), "ended selection cleared");
       await openSidebar();
-      const historical = page.locator(".session-item").filter({ hasText: session.name }); await historical.waitFor();
+      const historical = page.locator(".session-item").filter({ hasText: session.name });
+      await page.locator("#refresh-sessions").click();
+      await new Promise((resolve) => setTimeout(resolve, 1700));
+      assert.equal(await historical.count(), 0, "ended session stays removed after history refresh and polling");
+      assert.ok(saved.has(session.nativeSessionId), "ending does not delete saved history");
+      await page.locator("#logout").click();
+      await page.locator("#token").fill("smoke-token"); await page.locator("#login-submit").click();
+      await openSidebar(); await historical.waitFor();
       await historical.click();
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "history resumed");
       const resumed = [...sessions.values()].find((entry) => entry.nativeSessionId === session.nativeSessionId);
@@ -433,6 +443,23 @@ try {
       await page.locator("#new-name").fill(`${label} other session`); await page.locator("#create-session").click();
       await until(() => page.locator("#session-title").textContent().then((text) => text === `${label} other session`), "other session selected");
       await page.locator("#prompt").fill("Keep this other draft");
+      await openSidebar();
+      const backgroundRow = page.locator(".session-item").filter({ hasText: resumed.name });
+      resumed.streaming = true;
+      await until(() => backgroundRow.textContent().then((text) => text.includes("Running")), "background running status");
+      const backgroundUi = requestUi(resumed, { method: "input", title: "Background question" });
+      await until(() => backgroundRow.textContent().then((text) => text.includes("Waiting for user reply")), "background reply status");
+      assert.equal(await page.title(), "1! | Pi Agent | Agentbox", "text questions count as required user action");
+      resolveUi(resumed, backgroundUi);
+      const backgroundApproval = requestUi(resumed, { method: "confirm", title: "Background approval" });
+      await until(() => backgroundRow.textContent().then((text) => text.includes("Waiting for user action")), "background action status");
+      assert.equal(await page.title(), "1! | Pi Agent | Agentbox");
+      resolveUi(resumed, backgroundApproval); resumed.streaming = false;
+      emit(resumed, { type: "agent_settled" });
+      await until(() => backgroundRow.textContent().then((text) => text.includes("Idle (finished)")), "background finished status");
+      assert.equal(await page.title(), "1 | Pi Agent | Agentbox", "unread background completion updates the tab");
+      assert.equal(resumed.clients.size, 0, "background progress does not consume SSE connections");
+      if (label === "mobile") await page.locator("#close-drawer").click();
       resumed.releasePrompt();
       await until(() => calls.some((call) => call.id !== resumed.id && call.command?.type === "get_state"), "other session snapshot");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
@@ -445,6 +472,7 @@ try {
       await drawerClosed();
       await until(() => resumed.clients.size === 1 && other.clients.size === 0, "switch subscribes to existing session and closes other stream");
       assert.equal(resumed.subscriptions, resumedSubscriptions + 1);
+      assert.equal(await page.title(), "Pi Agent | Agentbox", "entering a session clears its counter");
       assert.equal(other.subscriptions, otherSubscriptions);
       assert.equal(creations(), creationCount, "switching to a running session sends no creation/resume POST");
       assert.deepEqual([...sessions.keys()].sort(), runtimeIds, "switching does not create a duplicate runtime process");
@@ -605,9 +633,36 @@ try {
       await replacementObserver.close();
       assert.equal(mutations().length, 5, "cancel, stale and failure paths never silently retry");
       console.log(`${label}: PASS raw copy, clipboard fallback, historical model/title, action cancel, busy controls, stale/no retry, failure drafts, fork identity/draft/images, revert identity/draft/images, observer replacement reconnect`);
+      // Consecutive action-only messages share one header, with useful collapsed inputs.
+      const commands = [
+        ["read", { path: "src/config.mjs" }, "src/config.mjs"],
+        ["bash", { command: "npm test\n && echo '<script>unsafe</script>' " + "x".repeat(200) }, "npm test"],
+        ["write", { path: "src/output.mjs", content: "hidden file body" }, "src/output.mjs"],
+        ["edit", { path: "src/output.mjs", edits: [] }, "src/output.mjs"],
+      ];
+      for (const [index, [name, args]] of commands.entries()) {
+        const id = `compact-${label}-${index}`;
+        complete(other, { role: "assistant", model: "pi-fast", provider: "fixture", content: [{ type: "thinking", thinking: "Plan this operation" }, { type: "toolCall", id, name, arguments: args }], timestamp: ++tick });
+        complete(other, { role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: "Done" }], timestamp: ++tick });
+      }
+      emit(other, { type: "agent_end" });
+      const group = page.locator(".action-group");
+      await until(() => group.locator(".tool-detail").count().then((count) => count === 4), "compact action group");
+      assert.equal(await group.locator(".message-header").count(), 1);
+      for (const [index, [, , preview]] of commands.entries()) assert.ok((await group.locator(".tool-preview").nth(index).textContent()).startsWith(preview));
+      assert.ok((await group.locator(".tool-preview").nth(1).textContent()).endsWith("…"));
+      assert.equal(await group.locator("script").count(), 0, "command previews are text, never HTML");
+      await group.locator(".tool-summary").nth(1).click();
+      assert.ok((await group.locator(".tool-detail[open] pre").first().textContent()).includes("x".repeat(200)), "expanded input retains the full command");
+      await noOverflow(page);
+      await openSidebar(); await page.locator("#refresh-sessions").click();
+      if (label === "mobile") await page.locator("#close-drawer").click();
+      await drawerClosed();
+      await until(() => group.locator(".tool-detail[open]").count().then((count) => count === 1), "expanded action survives refresh");
       assert.deepEqual(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie })), { local: 0, session: 0, cookies: "" });
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
       assert.equal(await page.locator("#token").inputValue(), "");
+      assert.equal(await page.title(), "Pi Agent | Agentbox", "logout clears tab counters");
       assert.equal(await page.locator("#prompt").inputValue(), "");
       assert.equal(await page.locator("#messages").textContent(), "");
       assert.deepEqual(errors, [], "No browser JS or CSP errors");

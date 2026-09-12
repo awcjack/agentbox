@@ -26,6 +26,8 @@ in
   # Host-side CLI that drives the container (status / shell / logs / …).
   agentbox = pkgs.callPackage ./package.nix { };
 
+  agentbox-desktop = if isLinux then pkgs.callPackage ./desktop.nix { } else null;
+
   inherit
     agentbox-neovim
     agentbox-pi-rpc-runtime

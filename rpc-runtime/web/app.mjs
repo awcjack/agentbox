@@ -2,6 +2,8 @@ import { ApiError, createTransport, eventCursor, messageKey, messageText, messag
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
 import { initSidebarResize } from "./sidebar.mjs";
+import { attentionTitle, createAttentionTracker } from "./attention.mjs";
+import { canGroupActions, toolPreview } from "./tool-display.mjs";
 
 initSidebarResize();
 
@@ -12,6 +14,12 @@ let current = null, sessions = [], profiles = [], history = [], readOnly = false
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null;
 const records = new Map();
+const baseTitle = document.title;
+const attention = createAttentionTracker();
+// Ending a runtime must not immediately resurrect its saved history as a row.
+// History stays on disk and becomes visible again after logging in/reloading.
+const endedHistory = new Set();
+let sessionPoll = null;
 const dialogMethods = new Set(["confirm", "select", "input", "editor"]);
 const conversation = $("conversation");
 let followBottom = true, renderPending = false;
@@ -81,7 +89,7 @@ function updateControls() {
   $("session-subtitle").textContent = ctx ? `${ctx.meta?.profile || "workspace"} / ${ctx.meta?.cwd || ctx.state.sessionId || ctx.id}` : "Code, tools, and persistent conversations.";
   $("session-status").textContent = !ctx ? "WORKSPACE" : !ctx.ready ? "SYNCING" : readOnly ? "READ ONLY" : ctx.meta?.status !== "running" ? (ctx.meta?.status || "OFFLINE").toUpperCase() : !ctx.online ? "OFFLINE" : streaming ? "WORKING" : "READY";
   $("session-status").classList.toggle("working", streaming);
-  $("activity-text").textContent = !ctx ? "Choose a session to start" : readOnly ? "Read-only access" : ctx.meta?.status !== "running" ? "This process has ended. Resume from history to continue." : !ctx.online ? "Reconnecting safely. Your draft stays here." : ctx.stopping ? "Waiting for the agent to stop..." : ctx.state.isCompacting ? "Compacting conversation..." : streaming ? "Agent is working. You can steer or queue a follow-up." : "Ready when you are";
+  $("activity-text").textContent = !ctx ? "Choose a session to start" : readOnly ? "Read-only access" : ctx.meta?.status !== "running" ? "This process has ended. Resume from history to continue." : !ctx.online ? (ctx.meta.activity === "starting" ? "Starting Pi and initializing extensions. Your draft stays here." : "Synchronizing safely. Your draft stays here.") : ctx.stopping ? "Waiting for the agent to stop..." : ctx.state.isCompacting ? "Compacting conversation..." : streaming ? "Agent is working. You can steer or queue a follow-up." : "Ready when you are";
   document.querySelector(".activity").classList.toggle("busy", streaming && ctx?.online);
   const pending = ctx?.state.pendingMessageCount || 0;
   $("queue-count").textContent = pending ? `${pending} queued` : "";
@@ -101,12 +109,20 @@ function drawer(open) {
   document.querySelector(".main").inert = open;
   if (open) $("close-drawer").focus();
 }
+function updateTabTitle(viewedId = document.visibilityState === "visible" && document.hasFocus() ? current?.id : null) {
+  document.title = attentionTitle(attention.update(sessions.filter((session) => !records.get(session.id)?.ending), viewedId), baseTitle);
+}
 function renderSessions() {
-  const root = $("sessions"); root.replaceChildren();
+  updateTabTitle();
+  const root = $("sessions");
+  const focusedKey = root.contains(document.activeElement) ? document.activeElement.dataset.sessionKey : null;
+  root.replaceChildren();
   const filter = $("profile-filter").value;
   const live = sessions.filter((session) => !filter || session.profile === filter);
   function row(session, historical) {
     const button = element("button", `session-item${!historical && current?.id === session.id ? " active" : ""}`);
+    button.dataset.sessionKey = `${historical ? session.profile : "runtime"}:${session.id}`;
+    button.dataset.activity = historical ? "history" : session.activity || session.status;
     if (!historical && current?.id === session.id) button.setAttribute("aria-current", "page");
     button.title = historical ? `Resume ${session.name || session.id}\n${session.cwd || session.profile}` : `${session.name || session.id}\n${session.profile}`;
     button.append(element("span", "session-symbol", historical ? "/" : ">"));
@@ -115,19 +131,41 @@ function renderSessions() {
     const date = session.modifiedAt || session.lastActivityAt || session.createdAt;
     const parsed = new Date(date);
     const when = Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    copy.append(element("small", "", `${session.profile} / ${historical ? "resume" : session.status}${when ? ` / ${when}` : ""}`));
+    copy.append(element("small", "", `${session.profile} / ${historical ? "resume" : activityLabel(session)}${when ? ` / ${when}` : ""}`));
     button.append(copy);
     button.addEventListener("click", () => historical ? resume(session) : activate(session));
     button.disabled = historical ? createDenied || createBusy : Boolean(records.get(session.id)?.ending);
     root.append(button);
+    if (focusedKey === button.dataset.sessionKey) button.focus({ preventScroll: true });
   }
   if (live.length) root.append(element("div", "list-heading", "IN THIS RUNTIME"));
   for (const session of live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt)))) row(session, false);
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
-  const past = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
+  const past = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`) && !endedHistory.has(`${session.profile}:${session.id}`));
   if (past.length) root.append(element("div", "list-heading", "PICK UP WHERE YOU LEFT OFF"));
   for (const session of past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))) row(session, true);
   if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "A clean slate. Create a session to start building." : "Connect to find your sessions."));
+}
+function activityLabel(session) {
+  return ({ starting: "Starting agent", running: "Running", waiting_reply: "Waiting for user reply", waiting_action: "Waiting for user action", idle: "Idle (finished)", stopping: "Stopping", exited: "Ended" })[session.activity] || session.status;
+}
+// One lightweight list request updates every session, not one SSE connection or
+// expensive transcript/history scan per sidebar row. Do not overlap polls.
+function scheduleSessionPoll() {
+  clearTimeout(sessionPoll);
+  if (!token) return;
+  sessionPoll = setTimeout(async () => {
+    const ownEpoch = epoch, version = listVersion;
+    try {
+      const result = await api.request("/v1/sessions", { signal: auth.signal });
+      if (ownEpoch === epoch && version === listVersion) {
+        sessions = (result.sessions || []).filter((session) => !records.get(session.id)?.ending);
+        renderSessions();
+      }
+    } catch (error) {
+      if (ownEpoch === epoch && error.status === 401) report(error);
+    } finally { if (ownEpoch === epoch) scheduleSessionPoll(); }
+  }, 1500);
 }
 async function refreshSessions() {
   const version = ++listVersion, ownEpoch = epoch;
@@ -178,7 +216,10 @@ function renderTool(call, result, key) {
   if (subagents) return subagents;
   const detail = element("details", `tool-detail${result?.isError ? " error" : ""}`);
   detail.dataset.detailKey = `tool:${key}`;
-  const summary = element("summary", "", call.name || result?.toolName || "Tool");
+  const summary = element("summary", "tool-summary");
+  summary.append(element("span", "tool-name", call.name || result?.toolName || "Tool"));
+  const preview = toolPreview(call, result);
+  if (preview) summary.append(element("span", "tool-preview", preview));
   summary.append(element("span", "tool-state", result ? result.running ? "running" : result.isError ? "error" : "complete" : "requested"));
   detail.append(summary);
   if (call.arguments !== undefined) detail.append(element("div", "tool-label", "INPUT"), element("pre", "", typeof call.arguments === "string" ? call.arguments : JSON.stringify(call.arguments, null, 2)));
@@ -202,6 +243,7 @@ function renderMessages() {
   const results = new Map(ctx.tools);
   for (const message of messages) if (message.role === "toolResult") results.set(message.toolCallId, message);
   const shown = new Set();
+  let previousMessage = null, previousArticle = null;
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
     if (message.role === "toolResult") continue;
@@ -232,6 +274,13 @@ function renderMessages() {
     if (message.summary) body.append(renderMarkdown(message.summary));
     if (message.role === "bashExecution") body.append(element("pre", "", `${message.command || ""}\n${message.output || ""}`));
     if (message.errorMessage || ["error", "aborted"].includes(message.stopReason)) body.append(element("div", "message-error", message.errorMessage || (message.stopReason === "aborted" ? "Response stopped." : "The agent could not complete this response.")));
+    if (message.role === "assistant" && !body.childElementCount) continue;
+    if (previousArticle && canGroupActions(previousMessage, message)) {
+      previousArticle.classList.add("action-group");
+      previousArticle.querySelector(".message-content").append(...body.childNodes);
+      previousMessage = message;
+      continue;
+    }
     article.append(header, body);
     if (["user", "assistant"].includes(message.role)) {
       const actions = element("div", "message-actions");
@@ -258,6 +307,7 @@ function renderMessages() {
       if (actions.childElementCount) article.append(actions);
     }
     root.append(article);
+    previousArticle = article; previousMessage = message;
   }
   for (const [id, result] of results) if (!shown.has(id)) root.append(renderTool({ name: result.toolName, arguments: result.args }, result, id));
   if (ctx.meta?.status !== "running" && ctx.meta?.stderr) {
@@ -378,6 +428,7 @@ async function snapshot(ctx, initial = false) {
     ctx.refreshAgain = true;
   }
   applyMeta(ctx, meta);
+  if (initial && meta.status === "running") setNetwork("reconnecting", meta.activity === "starting" ? "Starting agent" : "Syncing conversation");
   if (meta.status !== "running") { ctx.ready = true; ctx.state.isStreaming = false; renderMessages(); updateControls(); return cursor; }
   const revision = ctx.stateRevision;
   const [messages, state] = await Promise.all([rpc(ctx, { type: "get_messages" }), rpc(ctx, { type: "get_state" })]);
@@ -578,6 +629,7 @@ $("conversation-action-form").addEventListener("submit", async (event) => {
 $("close-copy").addEventListener("click", () => $("copy-dialog").close());
 function activate(meta, { reconnect = false } = {}) {
   if (records.get(meta.id)?.ending) return;
+  updateTabTitle(meta.id);
   // Selecting the current conversation is navigation, not a reconnect request.
   if (!reconnect && current?.id === meta.id && active(current)) { drawer(false); return; }
   selection++;
@@ -600,10 +652,12 @@ async function createSession(body) {
   try {
     const { session } = await api.request("/v1/sessions", { body, signal: auth.signal });
     if (ownEpoch !== epoch) return;
-    sessions.push(session); $("new-dialog").close();
+    listVersion++;
+    sessions = [...sessions.filter((item) => item.id !== session.id), session]; $("new-dialog").close();
     if (ownSelection === selection) activate(session);
     else renderSessions();
-    refreshSessions();
+    // The new row is already available. Avoid scanning native history while
+    // Pi is loading the same directory during its cold start.
   } catch (error) {
     if (ownEpoch !== epoch) return;
     if (error.code === "insufficient_scope") createDenied = true;
@@ -693,13 +747,16 @@ $("end-form").addEventListener("submit", async (event) => {
     try { await api.request(path(ctx), { method: "DELETE", signal: auth.signal }); }
     catch (error) { if (error.code !== "session_not_found") throw error; }
     if (ownEpoch !== epoch) return;
+    listVersion++; // Invalidate list/history requests started before DELETE.
+    endedHistory.add(`${ctx.meta.profile}:${ctx.meta.nativeSessionId}`);
     sessions = sessions.filter((session) => session.id !== ctx.id);
     if (current?.id === ctx.id) {
       selection++; current = null; $("approvals").replaceChildren();
       $("model").replaceChildren(element("option", "", "No model selected"));
       restoreDraft(); renderMessages(); setNetwork("online", "Connected");
     }
-    showNotice("Session ended. Runtime capacity released; saved conversations remain in history.");
+    renderSessions(); updateControls();
+    showNotice("Session ended and removed from the sidebar. Saved history is retained; reload to browse it again.");
     await refreshSessions();
   } catch (error) {
     if (ownEpoch !== epoch) return;
@@ -746,6 +803,8 @@ async function attachImages(files) {
 function logout(message = "") {
   epoch++; selection++; listVersion++;
   token = ""; auth.abort(); auth = new AbortController();
+  clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
+  attention.clear(); document.title = baseTitle;
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   current = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
@@ -776,7 +835,7 @@ $("login-form").addEventListener("submit", async (event) => {
       const option = element("option", "", profile); option.value = profile;
       $("profile-filter").append(option); $("new-profile").append(option.cloneNode(true));
     }
-    $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshSessions();
+    $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshSessions(); scheduleSessionPoll();
   } catch (error) { if (ownEpoch === epoch) logout(error.message); }
   finally { if (ownEpoch === epoch) $("login-submit").disabled = false; }
 });
@@ -811,6 +870,8 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key.toLowerCase() === "n" && !event.ctrlKey && !event.altKey && !event.metaKey && !event.target.closest("input, textarea, select, [contenteditable], dialog")) openNew();
 });
+window.addEventListener("focus", () => updateTabTitle());
+document.addEventListener("visibilitychange", () => updateTabTitle());
 window.addEventListener("offline", () => { if (current) { current.online = false; current.streamController?.abort(); updateControls(); } setNetwork("reconnecting", "Offline"); });
 window.addEventListener("online", () => { if (token) { if (current) activate(current.meta, { reconnect: true }); else setNetwork("online", "Connected"); refreshSessions(); } });
 window.addEventListener("pagehide", () => logout());

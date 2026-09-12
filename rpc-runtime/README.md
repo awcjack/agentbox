@@ -176,7 +176,34 @@ are `{"id":"...","confirmed":true}`, `{"id":"...","value":"..."}`, or
 `{"id":"...","cancelled":true}`. Select values must match an offered option.
 
 Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and
-pending UI requests. Accepted answers publish `extension_ui_resolved` supervisor
+pending UI requests. `activity` distinguishes `starting`, `running`,
+`waiting_reply` (text input/editor), `waiting_action` (confirmation/selection),
+and `idle`; stopped processes retain their process status. Idle is reported only
+after `agent_settled`, not a low-level `agent_end` that may still retry or continue.
+The browser polls the lightweight session list every 1.5 seconds to update all
+sidebar rows, without opening an SSE stream or reading transcripts for each one.
+Ending a session removes its runtime and history rows for the current login;
+saved files are not deleted, and reload/login makes history available again.
+
+The tab title shows unread session counts, e.g. `1! 2 | Pi Agent | Agentbox`
+means one session needs input/approval and two have finished. Entering a session
+acknowledges its current requests/completion; subsequent requests and completions
+can notify again. The selected session is acknowledged while the tab is visible
+and focused, including when returning to the tab. Counters are page-memory only
+and clear on logout. Fresh idle sessions do not count as finished. Metadata's
+`settledEventId` retains the most recent `agent_settled` event ID even after replay
+ring eviction, so a run completed between sidebar polls is not missed.
+
+Collapsed tool rows include shortened commands, paths, or queries. Consecutive
+thinking/tool-only assistant messages from the same model share one header and
+compact, wrapping rows; opening a row reveals the full original input/output.
+User turns, prose, errors and model changes remain separate.
+
+New-session creation no longer immediately rescans history while Pi is loading
+that same directory. The connection label distinguishes agent startup and
+conversation synchronization from opening the event stream. Each session still
+starts a fresh Pi process: extension/MCP initialization can take time before
+snapshot RPCs return, so this does not promise instant cold starts. Accepted answers publish `extension_ui_resolved` supervisor
 events so other browser tabs remove the same request.
 
 SSE records use monotonically increasing IDs.

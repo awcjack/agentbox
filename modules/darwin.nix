@@ -308,8 +308,11 @@ let
         AGENT_HISTORY_PRODUCER_ID = cfg.settings.historyArchive.hostId;
         AGENT_HISTORY_REQUEST_TTL_SECONDS = toString cfg.settings.historyArchive.requestTtlSeconds;
       }
-      # Env contributed via the generic extension surface
-      # (services.agentbox.extraEnvironment) — used by any add-on module.
+      // lib.optionalAttrs cfg.settings.desktop.enable {
+        XAUTHORITY = "/tmp/agentbox-desktop-$(id -u)/Xauthority";
+        DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/agentbox-desktop-$(id -u)/bus";
+      }
+      # Env contributed via the generic extension surface.
       // cfg.extraEnvironment
       # Point Application Default Credentials at the bind-mounted service-account
       # key (path is not secret; the file is mounted read-only). Enables gcloud
@@ -589,6 +592,7 @@ let
         --cpus=${toString cfg.settings.cpuLimits}
         --memory=${cfg.settings.memoryLimits}
         --pids-limit=${toString cfg.settings.pidsLimit}
+        ${lib.optionalString cfg.settings.desktop.enable "--shm-size=${cfg.settings.desktop.shmSize}"}
         ${containerEnvArgs}
         ${volumeArgs}
         --health-cmd ${lib.escapeShellArg healthCommand}

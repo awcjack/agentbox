@@ -194,6 +194,34 @@ in
     };
 
     settings = {
+      desktop = {
+        enable = lib.mkEnableOption "the on-demand virtual desktop (Chromium, Xvfb, Openbox, and noVNC)";
+
+        vncPort = lib.mkOption {
+          type = lib.types.port;
+          default = 5900;
+          description = "Loopback-only VNC port. Local users are trusted; use an authenticated tunnel for remote access.";
+        };
+
+        webPort = lib.mkOption {
+          type = lib.types.port;
+          default = 6080;
+          description = "Loopback-only noVNC HTTP/WebSocket port. No authentication is provided; do not expose it publicly.";
+        };
+
+        resolution = lib.mkOption {
+          type = lib.types.strMatching "[1-9][0-9]{0,4}x[1-9][0-9]{0,4}x(16|24|32)";
+          default = "1440x900x24";
+          description = "Virtual screen WIDTHxHEIGHTxDEPTH.";
+        };
+
+        shmSize = lib.mkOption {
+          type = lib.types.strMatching "[1-9][0-9]*[kmg]?";
+          default = "1g";
+          description = "Private container /dev/shm size for browser rendering (Docker --shm-size).";
+        };
+      };
+
       timezone = lib.mkOption {
         type = lib.types.str;
         default = "UTC";
@@ -2010,6 +2038,14 @@ in
         export PI_RPC_LOG_FILE=/home/agent/.agentbox-logs/pi-rpc-runtime.log
         exec /bin/pi-rpc-runtime-supervise
       '';
+    })
+    (lib.mkIf cfg.settings.desktop.enable {
+      services.agentbox.onDemandScripts.desktop = "exec agentbox-desktop";
+      services.agentbox.extraEnvironment = {
+        AGENTBOX_DESKTOP_VNC_PORT = toString cfg.settings.desktop.vncPort;
+        AGENTBOX_DESKTOP_WEB_PORT = toString cfg.settings.desktop.webPort;
+        AGENTBOX_DESKTOP_RESOLUTION = cfg.settings.desktop.resolution;
+      };
     })
     (lib.mkIf (cfg.bootScripts != { }) {
       services.agentbox.extraVolumes = [

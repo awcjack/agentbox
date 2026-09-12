@@ -13,6 +13,8 @@ const WEB_ASSETS = new Map([
   ["/markdown.mjs", ["markdown.mjs", "text/javascript; charset=utf-8"]],
   ["/subagents.mjs", ["subagents.mjs", "text/javascript; charset=utf-8"]],
   ["/sidebar.mjs", ["sidebar.mjs", "text/javascript; charset=utf-8"]],
+  ["/attention.mjs", ["attention.mjs", "text/javascript; charset=utf-8"]],
+  ["/tool-display.mjs", ["tool-display.mjs", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/icon.svg", ["icon.svg", "image/svg+xml"]],
 ].map(([path, [file, type]]) => [path, { type, data: readFileSync(new URL(`./web/${file}`, import.meta.url)) }]));
@@ -512,6 +514,9 @@ class Session extends EventEmitter {
     this.conversationReplacing = false;
     this.uncertainWrite = false;
     this.agentBusy = false;
+    this.settledEventId = null;
+    this.agentReady = false;
+    this.agentCompacting = false;
     this.revision = 0;
 
     const args = ["--mode", "rpc"];
@@ -554,7 +559,13 @@ class Session extends EventEmitter {
       nativeSessionId: this.nativeSessionId,
       conversationReplacing: this.conversationReplacing,
       latestEventId: this.events.nextId - 1,
+      settledEventId: this.settledEventId,
       status: this.status,
+      activity: this.status !== "running" ? this.status
+        : [...this.pendingUi.values()].some(({ request }) => ["confirm", "select"].includes(request.method)) ? "waiting_action"
+        : this.pendingUi.size ? "waiting_reply"
+        : this.agentBusy || this.agentCompacting ? "running"
+        : !this.agentReady ? "starting" : "idle",
       createdAt: new Date(this.createdAt).toISOString(),
       lastActivityAt: new Date(this.lastActivityAt).toISOString(),
       pendingUi: [...this.pendingUi.values()].map((entry) => entry.request),
@@ -571,6 +582,9 @@ class Session extends EventEmitter {
   publish(value) {
     this.touch();
     const event = this.events.push(value);
+    // Persist the last completion beyond ring eviction and short runs between
+    // sidebar polls. Ordinary reads/notifications are not completions.
+    if (value.type === "agent_settled") this.settledEventId = event.id;
     for (const client of this.clients) {
       this.writeSse(client, `id: ${event.id}\nevent: pi\ndata: ${event.data}\n\n`);
     }
@@ -608,9 +622,12 @@ class Session extends EventEmitter {
   }
 
   onRecord(record) {
+    this.agentReady = true;
     if (record.type !== "response") this.revision++;
     if (["agent_start", "auto_retry_start", "auto_compaction_start"].includes(record.type)) this.agentBusy = true;
     if (record.type === "agent_settled") this.agentBusy = false;
+    if (record.type === "compaction_start") this.agentCompacting = true;
+    if (record.type === "compaction_end") this.agentCompacting = false;
     if (record.type === "response" && record.command === "get_state" && record.success && record.data) {
       if (typeof record.data.sessionName === "string") this.name = record.data.sessionName;
       if (NATIVE_SESSION_ID_RE.test(record.data.sessionId ?? "")) this.nativeSessionId = record.data.sessionId;

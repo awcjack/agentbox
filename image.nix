@@ -12,6 +12,7 @@
   writeShellScriptBin,
   writeTextFile,
   runCommand,
+  callPackage,
   # Core utilities
   coreutils,
   bashInteractive,
@@ -130,6 +131,8 @@
   # Disable via `services.agentbox.settings.enableNix = false` (NixOS builds the
   # image with `.override { withNix = false; }`) to keep the image lean.
   withNix ? true,
+  # Optional on-demand X11 desktop, browser, and automation tools.
+  withDesktop ? false,
 }:
 
 let
@@ -1340,6 +1343,7 @@ let
   ++ lib.optionals withNix [
     nix
   ]
+  ++ lib.optionals withDesktop [ (callPackage ./desktop.nix { }) ]
   ++ lib.optionals withCloudTools [
     awscli2
     kubectl
@@ -2318,6 +2322,10 @@ in
   extraCommands = ''
     # Create directory structure
     mkdir -p etc run tmp var/tmp var/empty/sshd var/log
+    ${lib.optionalString withDesktop ''
+      mkdir -p tmp/.X11-unix
+      chmod 1777 tmp/.X11-unix
+    ''}
     mkdir -p home/agent workspace config
     mkdir -p etc/skel.agent
     mkdir -p root

@@ -316,8 +316,11 @@ let
   // lib.optionalAttrs cfg.settings.dockerProxy.enable {
     DOCKER_HOST = "tcp://127.0.0.1:2375";
   }
-  # Env contributed via the generic extension surface
-  # (services.agentbox.extraEnvironment) — used by any add-on module you import.
+  // lib.optionalAttrs cfg.settings.desktop.enable {
+    XAUTHORITY = "/tmp/agentbox-desktop-1000/Xauthority";
+    DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/agentbox-desktop-1000/bus";
+  }
+  # Env contributed via the generic extension surface.
   // cfg.extraEnvironment;
 
 in
@@ -474,13 +477,13 @@ in
     ];
 
     # Default image: base image, with build-time variants toggled by settings —
-    # the cloud-tools bundle (enableCloudTools) and the nix CLI (enableNix, on by
-    # default; only overridden off here). lib.mkDefault lets an explicit
+    # cloud tools, the nix CLI, and the optional desktop. lib.mkDefault lets an explicit
     # `services.agentbox.image = …` assignment override this without conflict.
     services.agentbox.image = lib.mkDefault (
       pkgs.agentboxImage.override (
         (lib.optionalAttrs cfg.settings.enableCloudTools { withCloudTools = true; })
         // (lib.optionalAttrs (!cfg.settings.enableNix) { withNix = false; })
+        // (lib.optionalAttrs cfg.settings.desktop.enable { withDesktop = true; })
       )
     );
 
@@ -604,8 +607,8 @@ in
         "--memory=${cfg.settings.memoryLimits}"
         "--pids-limit=${toString cfg.settings.pidsLimit}"
       ]
-      # Container hardening (shared options). "default" => omit the flag so
-      # Docker applies its built-in default seccomp profile.
+      ++ lib.optional cfg.settings.desktop.enable "--shm-size=${cfg.settings.desktop.shmSize}"
+      # Container hardening (shared options). "default" keeps Docker's profile.
       ++ lib.optional (
         cfg.settings.hardening.seccompProfile != "default"
       ) "--security-opt=seccomp=${cfg.settings.hardening.seccompProfile}"

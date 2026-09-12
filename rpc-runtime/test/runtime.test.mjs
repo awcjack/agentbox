@@ -110,6 +110,47 @@ async function fixture(t, customConfig = config(), options = {}) {
   return { runtime, children, spawns, baseUrl };
 }
 
+test("list metadata tracks all sessions without per-session RPC or SSE subscriptions", async (t) => {
+  const { baseUrl, children } = await fixture(t);
+  const create = () => request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } });
+  const first = (await create()).body.session;
+  const second = (await create()).body.session;
+  const activity = async (id = first.id) => (await request(baseUrl, "/v1/sessions")).body.sessions.find((session) => session.id === id)?.activity;
+  const completion = async () => (await request(baseUrl, "/v1/sessions")).body.sessions.find((session) => session.id === first.id).settledEventId;
+  assert.equal(await completion(), null, "a fresh idle process is not a finished run");
+  assert.equal(await activity(), "starting");
+  children[0].output({ type: "agent_start" });
+  assert.equal(await activity(), "running");
+  assert.equal(await activity(second.id), "starting");
+  children[0].output({ type: "extension_ui_request", id: "reply", method: "input", title: "Answer?" });
+  assert.equal(await activity(), "waiting_reply");
+  children[0].output({ type: "extension_ui_request", id: "approval", method: "confirm", title: "Allow?" });
+  assert.equal(await activity(), "waiting_action");
+  await request(baseUrl, `/v1/sessions/${first.id}/ui`, { method: "POST", body: { id: "approval", confirmed: false } });
+  assert.equal(await activity(), "waiting_reply");
+  await request(baseUrl, `/v1/sessions/${first.id}/ui`, { method: "POST", body: { id: "reply", value: "yes" } });
+  children[0].output({ type: "agent_end" });
+  assert.equal(await activity(), "running", "a low-level run end can still continue automatically");
+  assert.equal(await completion(), null, "agent_end is not full completion");
+  children[0].output({ type: "agent_settled" });
+  assert.equal(await activity(), "idle");
+  const firstCompletion = await completion();
+  assert.ok(firstCompletion > 0);
+  for (let i = 0; i < 12; i++) children[0].output({ type: "extension_ui_request", method: "notify", message: "hello" });
+  assert.equal(await completion(), firstCompletion, "completion survives replay eviction and unrelated events");
+  children[0].output({ type: "agent_start" });
+  children[0].output({ type: "agent_settled" });
+  assert.ok(await completion() > firstCompletion, "short runs between list requests retain distinct completion IDs");
+  children[0].output({ type: "compaction_start", reason: "manual" });
+  assert.equal(await activity(), "running");
+  children[0].output({ type: "compaction_end", reason: "manual" });
+  assert.equal(await activity(), "idle");
+  const deleted = await request(baseUrl, `/v1/sessions/${first.id}`, { method: "DELETE" });
+  assert.equal(deleted.response.status, 204);
+  assert.equal(await activity(), undefined);
+  assert.equal(await activity(second.id), "starting");
+});
+
 async function request(baseUrl, path, options = {}) {
   const headers = new Headers(options.headers);
   if (options.auth !== false) headers.set("Authorization", `Bearer ${options.token ?? TOKEN}`);
@@ -548,7 +589,7 @@ test("web assets are public and allowlisted without weakening API authentication
   assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   assert.match(await page.text(), /Pi agent/);
-  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "styles.css", "icon.svg"]) {
+  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "styles.css", "icon.svg"]) {
     const response = await fetch(`${baseUrl}/${asset}`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
