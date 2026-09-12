@@ -151,6 +151,65 @@ test("list metadata tracks all sessions without per-session RPC or SSE subscript
   assert.equal(await activity(second.id), "starting");
 });
 
+test("auto mode changes require write scope, native identity, extension support and prompt permission", async (t) => {
+  const reader = "read-only-token";
+  const f = await fixture(t, config({ auth: { tokens: [
+    { sha256: TOKEN_HASH, scopes: ALL_SCOPES },
+    { sha256: createHash("sha256").update(reader).digest("hex"), scopes: ["sessions:read"] },
+  ] } }));
+  const session = (await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  const route = `/v1/sessions/${session.id}/auto`;
+  const change = (body, extra = {}) => request(f.baseUrl, route, { method: "POST", body, headers: { "X-Pi-Session-Id": session.nativeSessionId }, ...extra });
+  const child = f.children[0];
+  assert.equal(session.autoMode, null);
+  assert.equal((await change({ enabled: true })).body.error.code, "auto_mode_unavailable");
+  const status = (available, enabled) => child.output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: JSON.stringify({ available, enabled }) });
+  status(true, false);
+  assert.equal((await change({ enabled: true }, { token: reader })).response.status, 403);
+  assert.equal((await change({ enabled: true }, { headers: { "X-Pi-Session-Id": RESUME_ID } })).response.status, 409);
+  for (const body of [{}, { enabled: "yes" }, { enabled: true, command: "other" }, []]) {
+    assert.equal((await change(body)).response.status, 400);
+  }
+  assert.equal(child.input, "", "rejected changes never send a command");
+  let hold = false, suppressStatus = false, pending;
+  const commands = [];
+  child.stdin.on("data", (chunk) => {
+    const command = JSON.parse(chunk.toString()); commands.push(command);
+    if (hold) { pending = command; return; }
+    if (!suppressStatus) status(true, command.message === "/auto on");
+    child.output({ type: "response", id: command.id, command: "prompt", success: true });
+  });
+  assert.deepEqual((await change({ enabled: true })).body.autoMode, { available: true, enabled: true });
+  assert.deepEqual((await change({ enabled: false })).body.autoMode, { available: true, enabled: false });
+  assert.deepEqual(commands.map(({ type, message }) => ({ type, message })), [{ type: "prompt", message: "/auto on" }, { type: "prompt", message: "/auto off" }]);
+  const meta = (await request(f.baseUrl, `/v1/sessions/${session.id}`)).body.session;
+  assert.deepEqual(meta.autoMode, { available: true, enabled: false });
+  suppressStatus = true;
+  assert.equal((await change({ enabled: true })).body.error.code, "auto_mode_unchanged", "RPC success alone must not optimistically enable auto");
+  suppressStatus = false;
+  hold = true;
+  const first = change({ enabled: true });
+  const deadline = Date.now() + 1000;
+  while (!pending) {
+    assert.ok(Date.now() < deadline, "auto command reached Pi");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+  assert.equal((await change({ enabled: false })).body.error.code, "auto_mode_busy");
+  status(true, true);
+  child.output({ type: "response", id: pending.id, command: "prompt", success: true });
+  assert.equal((await first).response.status, 200);
+  hold = false;
+  status(false, false);
+  assert.equal((await change({ enabled: true })).body.error.code, "auto_mode_unavailable");
+  child.output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: '{"available":true,"enabled":"yes"}' });
+  assert.equal((await change({ enabled: true })).body.error.code, "auto_mode_unavailable");
+
+  const restricted = await fixture(t, config({ allowedCommands: ["get_state"] }));
+  const blocked = (await request(restricted.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  restricted.children[0].output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: '{"available":true,"enabled":false}' });
+  assert.equal((await request(restricted.baseUrl, `/v1/sessions/${blocked.id}/auto`, { method: "POST", body: { enabled: true } })).body.error.code, "command_forbidden");
+});
+
 async function request(baseUrl, path, options = {}) {
   const headers = new Headers(options.headers);
   if (options.auth !== false) headers.set("Authorization", `Bearer ${options.token ?? TOKEN}`);

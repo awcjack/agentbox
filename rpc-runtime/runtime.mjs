@@ -515,6 +515,8 @@ class Session extends EventEmitter {
     this.uncertainWrite = false;
     this.agentBusy = false;
     this.settledEventId = null;
+    this.autoMode = null;
+    this.autoModeChanging = false;
     this.agentReady = false;
     this.agentCompacting = false;
     this.revision = 0;
@@ -560,6 +562,7 @@ class Session extends EventEmitter {
       conversationReplacing: this.conversationReplacing,
       latestEventId: this.events.nextId - 1,
       settledEventId: this.settledEventId,
+      autoMode: this.autoMode,
       status: this.status,
       activity: this.status !== "running" ? this.status
         : [...this.pendingUi.values()].some(({ request }) => ["confirm", "select"].includes(request.method)) ? "waiting_action"
@@ -623,6 +626,14 @@ class Session extends EventEmitter {
 
   onRecord(record) {
     this.agentReady = true;
+    if (record.type === "extension_ui_request" && record.method === "setStatus" && record.statusKey === "agentbox-auto") {
+      this.autoMode = null;
+      try {
+        const value = JSON.parse(record.statusText);
+        if (value && typeof value.available === "boolean" && typeof value.enabled === "boolean"
+          && Object.keys(value).length === 2 && (!value.enabled || value.available)) this.autoMode = value;
+      } catch { /* Unknown or malformed extension status cannot enable the toggle. */ }
+    }
     if (record.type !== "response") this.revision++;
     if (["agent_start", "auto_retry_start", "auto_compaction_start"].includes(record.type)) this.agentBusy = true;
     if (record.type === "agent_settled") this.agentBusy = false;
@@ -1044,7 +1055,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|auto))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
@@ -1218,6 +1229,24 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         sessions.delete(session.id);
         response.statusCode = 204;
         return response.end();
+      }
+      if (action === "auto" && request.method === "POST") {
+        authenticate(request, config, "sessions:write");
+        const body = await readJson(request, config.limits.maxBodyBytes);
+        checkNativePrecondition(request, session, sessions.get(session.id));
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.enabled !== "boolean") {
+          throw new HttpError(400, "invalid_auto_mode", "expected exactly {enabled: boolean}");
+        }
+        if (!session.autoMode || (body.enabled && !session.autoMode.available)) throw new HttpError(409, "auto_mode_unavailable", "session auto mode is unavailable");
+        if (session.autoModeChanging) throw new HttpError(409, "auto_mode_busy", "an auto mode change is already in progress");
+        session.autoModeChanging = true;
+        try {
+          // An extension command, not an LLM prompt: the policy extension must
+          // have announced support first. Normal RPC allowlists still apply.
+          const result = await session.sendCommand({ type: "prompt", message: body.enabled ? "/auto on" : "/auto off" });
+          if (!result.success || session.autoMode?.enabled !== body.enabled) throw new HttpError(409, "auto_mode_unchanged", "auto mode change was not confirmed by the policy extension");
+          return json(response, 200, { autoMode: session.autoMode });
+        } finally { session.autoModeChanging = false; }
       }
       if (action === "rpc" && request.method === "POST") {
         const command = await readJson(request, config.limits.maxBodyBytes);
