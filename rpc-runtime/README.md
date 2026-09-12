@@ -160,6 +160,7 @@ present, it must exactly match `allowedOrigins`.
 | `DELETE /v1/sessions/:id` | `sessions:delete` | Abort and terminate the child |
 | `POST /v1/sessions/:id/rpc` | `sessions:read` for the read commands listed below; otherwise `sessions:write` | Forward an allowed RPC command and await its response |
 | `POST /v1/sessions/:id/ui` | `sessions:write` | Answer one pending extension dialog |
+| `POST /v1/sessions/:id/auto` | `sessions:write` | Set session auto mode using exactly `{"enabled":true}` or `{"enabled":false}` |
 | `GET /v1/sessions/:id/events` | `sessions:read` | SSE stream with bounded replay |
 
 The read-command set is `get_available_models`,
@@ -176,7 +177,14 @@ are `{"id":"...","confirmed":true}`, `{"id":"...","value":"..."}`, or
 `{"id":"...","cancelled":true}`. Select values must match an offered option.
 
 Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and
-pending UI requests. `activity` distinguishes `starting`, `running`,
+pending UI requests. `autoMode` is `null` until the policy extension announces
+support, then `{available, enabled}`. Auto starts off in every Pi process;
+managed `auto.enable` only makes it available. The web toggle requires write
+scope and allowed `prompt`, binds the request to the displayed native session,
+and sends the policy extension's `/auto on` or `/auto off` command. It waits for
+confirmed state, never optimistically enables auto, and never retries failed
+writes. State changes synchronize through the existing SSE/metadata flow.
+Forks, resumes, replacements, and workflow children start with auto off. `activity` distinguishes `starting`, `running`,
 `waiting_reply` (text input/editor), `waiting_action` (confirmation/selection),
 and `idle`; stopped processes retain their process status. Idle is reported only
 after `agent_settled`, not a low-level `agent_end` that may still retry or continue.
@@ -235,21 +243,20 @@ snapshots are also drained rather than killing the child.
 Managed workflow children forward human-required policy approvals through private
 stdio pipes to the parent extension, which opens the existing select UI. This
 includes effective explicit `ask` rules even with auto enabled, default asks
-when auto is disabled, and recovery checkpoints after repeated auto classifier
-denials/errors. All use the same existing transport and public decision schema. The
+when auto is disabled, and immediate human fallbacks whenever an enabled auto
+classifier denies or cannot evaluate a call. All use the same existing transport and public decision schema. The
 child still evaluates immutable guards and managed rules; forwarding does not
 override denies, change auto-permission behavior, or grant blanket access.
 Requests use per-child IDs, bounded frames and deadlines that include queue time.
 Children without a working parent approval channel fail closed.
 
-At 3 consecutive or 20 total classifier denials/errors, the threshold-triggering
-and subsequent auto-eligible calls require a human recovery checkpoint. Any allowed call resets
-only the consecutive count, not the total or latched pause. Successful recovery
-approval resets both counts and resumes auto; denied, cancelled, timed-out, or
-unavailable approval leaves the pause in place, so headless calls block while
-paused. Counters and pauses belong to each policy instance, are not shared by
-parent and child, and do not survive process restarts. Session start/switch/fork/
-tree/shutdown cancels stale checks and resets that state. No approval overrides
+A classifier denial, timeout, missing credentials, unsupported image history,
+or other inability to classify immediately asks a human about that same call.
+There is no silent-denial threshold. Denied, cancelled, timed-out, or unavailable
+human approval still blocks; no classifier failure grants permission. Auto is a
+per-process opt-in, starts off, and resets on session start/switch/fork/tree/shutdown.
+Disabling it cancels an in-flight classification without accepting a late allow.
+Existing pending approvals still require a human answer. No approval overrides
 rule denials. See the main README's Pi auto permissions section for classifier
 history evidence and trust limits.
 

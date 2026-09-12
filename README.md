@@ -143,8 +143,9 @@ No MCP server is enabled by default.
 
 ### Pi auto permissions
 
-Automatic permission classification is opt-in and disabled by default. Configure
-an explicit classifier provider and model, for example `openai-codex/gpt-5.3-codex-spark`:
+Automatic permission classification is opt-in and starts **off in every session**.
+Configure a classifier to make the toggle available, for example
+`openai-codex/gpt-5.3-codex-spark`:
 
 ```nix
 services.agentbox.settings.piConfig.permissions = {
@@ -161,8 +162,13 @@ services.agentbox.settings.piConfig.permissions = {
 The `openai-codex` provider uses Pi's ChatGPT/Codex login. For an OpenAI API key,
 use the `openai` provider and an available model such as `gpt-4.1-mini` instead.
 Model catalog presence does not guarantee account access; verify a live request
-before deployment, since unsupported models fail classification and eventually
-pause auto mode for human recovery.
+before deployment. Unsupported models immediately fall back to human approval.
+Setting `auto.enable = true` makes auto mode available; it does not activate it.
+Use the web header's **Auto: off/on** button or `/auto on` and `/auto off` in Pi.
+`/auto` toggles, and `/auto status` reports the current mode. With the toggle off,
+Pi follows the original managed permission rules without calling the classifier.
+The setting belongs to one Pi process, is not inherited by workflow children,
+and is not persisted. Children continue forwarding required human approvals.
 The `auto` defaults are `enable = false`, `provider = ""`, `model = ""`, and
 `timeout = 30000`; select a provider/model available in your Pi model registry.
 
@@ -185,7 +191,9 @@ siblings after it. Assistant prose/thinking and tool results are excluded.
 Prior tool-call history has a 12000-character subbudget within the fixed
 32000-character evidence maximum. Whole oldest calls are omitted to fit, and a
 history-omitted flag discloses omissions to the classifier. User text and the
-current call are never truncated; evidence that cannot fit fails closed.
+current call are never truncated; evidence that cannot fit requires human approval.
+Non-text user history (including screenshots) also falls back to human approval;
+it is never silently discarded as evidence or treated as permission to proceed.
 Transcript tool calls are untrusted proposals, not proof of execution or
 authorization.
 
@@ -194,22 +202,19 @@ Pi's Codex provider ignores that token limit; Codex requests use low reasoning
 effort instead. The timeout still applies, and verdict text over 256 characters
 is rejected after completion, not stopped during generation. Failure, timeout,
 malformed output, oversized input or output, and missing context all fail
-classification. Caller cancellation blocks without consuming the denial budget.
-
-Repeated automatic classifier denials/errors count toward a recovery checkpoint:
-3 consecutive or 20 total latch a pause and request human approval for that same
-call. Subsequent auto-eligible calls require human approval instead of
-classification until recovery succeeds. Any allowed call
-resets the consecutive counter, but not the total counter or an already latched
-pause. Successful recovery human approval resets both counters, clears the pause,
-and resumes auto for later calls. Denied, cancelled, timed-out, or unavailable
-human approval leaves the pause in place; headless calls block while paused.
-Explicit asks and recovery checkpoints use the same local approval UI or existing
-delegated-child approval transport. Rule denials are never overridden.
+classification. Any classifier denial or inability to classify requests human
+approval for that **same call immediately**; there is no silent-denial budget or
+recovery threshold. The classifier cannot turn a default ask into a hard deny.
+A human answer applies to that call only. Denied, cancelled, timed-out, or
+unavailable human approval still blocks execution; headless calls without an
+approval transport fail closed. Explicit asks and auto fallbacks use the same
+local approval UI or existing delegated-child approval transport. Rule denials
+are never overridden, and caller/session cancellation does not open a new prompt.
 
 Session start, switch, fork, tree navigation, and shutdown cancel stale checks
-and reset the per-instance counters and pause. This state is not shared between
-parent and child instances and is not persisted across process restarts.
+and reset auto to off. Turning auto off cancels an in-flight classification;
+a late classifier allow cannot authorize the call after the toggle changes.
+Changing the toggle does not answer or dismiss an existing human approval.
 
 This is not a sandbox and does not provide a security guarantee equivalent to
 Claude mode. MCP retains its independent per-server approval checks even when
