@@ -59,7 +59,7 @@ function canWrite(ctx, command = "prompt") {
   return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running" && !ctx.record.ending && !ctx.record.conversationBusy && !ctx.replacing && !ctx.meta.conversationReplacing && !readOnly && !ctx.record.forbidden.has(command));
 }
 function canChangeConversation(ctx) {
-  return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.modelBusy;
+  return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.record.autoModeBusy && !ctx.modelBusy;
 }
 function updateControls() {
   const ctx = current;
@@ -75,6 +75,11 @@ function updateControls() {
   $("logout").disabled = !token;
   $("end-session").disabled = !ctx || !token || deleteDenied || ctx.record.ending;
   $("end-session").textContent = ctx?.record.ending ? "Ending..." : "End session";
+  const autoMode = ctx?.meta?.autoMode;
+  $("auto-mode").disabled = !canWrite(ctx) || !autoMode?.available || ctx.record.autoModeBusy;
+  $("auto-mode").setAttribute("aria-pressed", String(autoMode?.enabled === true));
+  $("auto-mode").textContent = ctx?.record.autoModeBusy ? "Auto: ..." : autoMode?.enabled ? "Auto: on" : "Auto: off";
+  $("auto-mode").title = !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply." : "Auto mode is off. Normal permission rules apply. Click to enable for this session.";
   $("prompt").disabled = !ctx || readOnly;
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
   $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || !(draft.text.trim() || draft.images.length);
@@ -498,6 +503,7 @@ function handleEvent(ctx, frame) {
     // Metadata, not replay, decides which dialogs are still pending.
     if (dialogMethods.has(event.method)) { ctx.uiRevision++; requestRefresh(ctx); }
     else if (event.method === "notify") showNotice(event.message || "Agent notification", event.notifyType === "error");
+    else if (event.method === "setStatus" && event.statusKey === "agentbox-auto") requestRefresh(ctx);
   } else if (type === "supervisor") {
     if (["conversation_replacing", "conversation_source_exited"].includes(event.event)) {
       ctx.replacing = true; ctx.ready = false; ctx.stateRevision++; ctx.uiRevision++;
@@ -726,6 +732,26 @@ $("model").addEventListener("change", async () => {
   try { await rpc(ctx, { type: "set_model", provider, modelId }, true); if (active(ctx)) requestRefresh(ctx); }
   catch (error) { report(error, ctx, { write: true, command: "set_model", ambiguous: true }); }
   finally { if (active(ctx)) { ctx.modelBusy = false; renderModels(ctx); } }
+});
+
+$("auto-mode").addEventListener("click", async () => {
+  const ctx = current, ownEpoch = epoch;
+  if (!canWrite(ctx) || !ctx.meta.autoMode?.available || ctx.record.autoModeBusy) return;
+  ctx.record.autoModeBusy = true; updateControls();
+  try {
+    const result = await api.request(path(ctx, "/auto"), {
+      body: { enabled: !ctx.meta.autoMode.enabled },
+      nativeSessionId: ctx.state.sessionId || ctx.meta.nativeSessionId,
+      signal: auth.signal,
+    });
+    if (ownEpoch !== epoch) return;
+    if (active(ctx)) { ctx.meta.autoMode = result.autoMode; updateControls(); }
+  } catch (error) {
+    if (ownEpoch === epoch) report(error, ctx, { write: true, command: "prompt", ambiguous: true });
+  } finally {
+    ctx.record.autoModeBusy = false;
+    if (ownEpoch === epoch && current?.record === ctx.record) { updateControls(); requestRefresh(current); }
+  }
 });
 
 $("end-session").addEventListener("click", () => {

@@ -27,7 +27,7 @@ function conversationSnapshot(session) {
 }
 let tick = Date.now();
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
-const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
+const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, autoMode: session.autoMode || { available: true, enabled: false }, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
 function emit(session, event) {
   const frame = `id: ${++session.cursor}\nevent: pi\ndata: ${JSON.stringify(event)}\n\n`;
   session.events.push({ id: session.cursor, frame });
@@ -81,7 +81,7 @@ const server = createServer(async (request, response) => {
       sessions.set(session.id, session); saved.set(session.nativeSessionId, session);
       return json(response, 201, { session: meta(session) });
     }
-    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation))?$/.exec(url.pathname);
+    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|auto))?$/.exec(url.pathname);
     const session = match && sessions.get(match[1]);
     if (!session) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
     if (match[2] === "conversation") {
@@ -117,8 +117,15 @@ const server = createServer(async (request, response) => {
       saved.set(destination.nativeSessionId, destination);
       return json(response, 200, { session: meta(destination), draft });
     }
-    if (request.method === "POST" && (match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models"].includes(body.type)))) {
+    if (request.method === "POST" && (match[2] === "auto" || match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models"].includes(body.type)))) {
       assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "web writes carry the current native session ID");
+    }
+    if (match[2] === "auto" && request.method === "POST") {
+      assert.deepEqual(Object.keys(body), ["enabled"]); assert.equal(typeof body.enabled, "boolean");
+      calls.push({ id: session.id, auto: body });
+      session.autoMode = { available: true, enabled: body.enabled };
+      emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: JSON.stringify(session.autoMode) });
+      return json(response, 200, { autoMode: session.autoMode });
     }
     if (request.method === "DELETE") {
       calls.push({ id: session.id, method: "DELETE" });
@@ -263,6 +270,13 @@ try {
       await until(() => session.clients.size === 1 && page.locator("#connection-label").textContent().then((text) => text === "Connected"), "initial stream connected");
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "session ready");
       assert.equal(session.subscriptions, 1);
+      assert.equal(await page.locator("#auto-mode").getAttribute("aria-pressed"), "false");
+      await page.locator("#auto-mode").click();
+      await until(() => page.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "true"), "auto on confirmed");
+      await until(() => page.locator("#auto-mode").isEnabled(), "auto toggle ready");
+      await page.locator("#auto-mode").click();
+      await until(() => page.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "false"), "auto off confirmed");
+      assert.deepEqual(calls.filter((call) => call.id === session.id && call.auto).map((call) => call.auto.enabled), [true, false]);
       await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-reasoning"]));
       await until(() => page.locator("#model").inputValue().then((value) => value.includes("pi-reasoning")), "model switched");
       await until(() => session.model.id === "pi-reasoning", "model RPC");
@@ -344,6 +358,10 @@ try {
       if (label === "mobile") await observer.locator("#open-drawer").click();
       await observer.locator(".session-item").filter({ hasText: session.name }).click();
       await observer.locator(".approval").waitFor();
+      await page.locator("#auto-mode").click();
+      await until(() => observer.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "true"), "auto mode synchronized across tabs");
+      assert.equal(await observer.locator(".approval").count(), 1, "toggling auto does not answer an existing approval");
+      await noOverflow(page);
       await page.locator(".approval .approve").click();
       await observer.locator(".approval").waitFor({ state: "hidden" });
       assert.ok(calls.some((call) => call.ui?.id === approvalId && call.ui.confirmed));
@@ -443,6 +461,7 @@ try {
       await page.locator("#new-name").fill(`${label} other session`); await page.locator("#create-session").click();
       await until(() => page.locator("#session-title").textContent().then((text) => text === `${label} other session`), "other session selected");
       await page.locator("#prompt").fill("Keep this other draft");
+      assert.equal(await page.locator("#auto-mode").getAttribute("aria-pressed"), "false", "another session starts with auto off");
       await openSidebar();
       const backgroundRow = page.locator(".session-item").filter({ hasText: resumed.name });
       resumed.streaming = true;
