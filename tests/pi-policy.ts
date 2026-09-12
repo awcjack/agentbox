@@ -8,11 +8,13 @@ type Handler = (event: any, ctx: any) => Promise<any> | any
 
 const allowConfig = JSON.stringify({ version: 1, defaultDecision: "allow", rules: [] })
 
-function harness(config: string | Error = allowConfig, overrides: any = {}) {
+function harness(config: string | Error = allowConfig, overrides: any = {}, startAuto = true) {
   const handlers = new Map<string, Handler[]>()
+  const commands = new Map<string, any>()
   const reads: string[] = []
   const signals: string[] = []
   const pi = {
+    registerCommand(name: string, command: any) { commands.set(name, command) },
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler])
     },
@@ -27,11 +29,24 @@ function harness(config: string | Error = allowConfig, overrides: any = {}) {
     signal: async (state: string) => { signals.push(state) },
     ...overrides,
   })(pi)
+  const command = (args: string, ctx = context()) => commands.get("auto").handler(args, ctx)
+  let initialized = false
   return {
-    toolCall: handlers.get("tool_call")![0], reads, signals,
-    async lifecycle(name: string) {
+    // Legacy classifier fixtures explicitly opt in before their first tool call.
+    // startAuto=false exercises the actual production default (off).
+    async toolCall(event: any, ctx: any) {
+      if (!initialized) {
+        initialized = true
+        let enabled = false
+        try { enabled = startAuto && JSON.parse(String(config)).auto?.enable === true } catch {}
+        if (enabled) await command("on")
+      }
+      return handlers.get("tool_call")![0](event, ctx)
+    },
+    command, reads, signals,
+    async lifecycle(name: string, ctx = context()) {
       assert.ok(handlers.has(name), `Missing lifecycle handler: ${name}`)
-      for (const handler of handlers.get(name)!) await handler({ type: name }, context())
+      for (const handler of handlers.get(name)!) await handler({ type: name }, ctx)
     },
   }
 }
@@ -42,7 +57,7 @@ function context(overrides: any = {}) {
     mode: "tui",
     hasUI: true,
     signal: undefined,
-    ui: { select: async () => "Deny" },
+    ui: { select: async () => "Deny", setStatus: () => {}, notify: () => {} },
     ...overrides,
   }
 }
@@ -481,55 +496,10 @@ const stateRules = [
   { tools: ["read"], patterns: ["human"], decision: "ask" },
   { tools: ["read"], patterns: ["blocked"], decision: "deny" },
 ]
-const pausedTitle = "Approve tool call? Auto mode paused; read: README.md"
-for (const resetKind of ["auto", "deterministic", "human"]) {
-  const probe = autoProbe({ rules: stateRules })
-  for (let i = 0; i < 2; i++) assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.titles.length, 0)
-  probe.state.decision = "allow"
-  probe.state.human = "Allow once"
-  assert.equal(await probe.run(resetKind === "auto" ? "README.md" : resetKind === "human" ? "human" : "safe"), undefined)
-  probe.state.decision = "deny"
-  probe.state.human = "Deny"
-  const humanBefore = probe.state.titles.length
-  for (let i = 0; i < 2; i++) assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.titles.length, humanBefore, `${resetKind} allow resets consecutive denials`)
-  assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.titles.length, humanBefore + 1)
-  assert.equal(probe.state.titles.at(-1), pausedTitle)
-}
+const fallbackTitle = "Approve tool call? Auto could not approve; read: README.md"
 
-// Both kinds of non-recovery allow must retain the cumulative denial budget.
-for (const resetKind of ["auto", "deterministic", "human"]) {
-  const probe = autoProbe({ rules: stateRules })
-  for (let denial = 1; denial <= 20; denial++) {
-    probe.state.decision = "deny"
-    probe.state.human = "Deny"
-    const prompts = probe.state.titles.length
-    assert.equal((await probe.run()).block, true)
-    assert.equal(probe.state.titles.length, prompts + (denial === 20 ? 1 : 0), `total denial ${denial} (${resetKind})`)
-    if (denial < 20) {
-      probe.state.decision = "allow"
-      probe.state.human = "Allow once"
-      assert.equal(await probe.run(resetKind === "auto" ? "README.md" : resetKind === "human" ? "human" : "safe"), undefined)
-    }
-  }
-  assert.equal(probe.state.titles.at(-1), pausedTitle)
-  const models = probe.state.models
-  assert.equal(await probe.run("safe"), undefined)
-  assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.models, models, "deterministic allow must not resume paused auto")
-  probe.state.human = "Allow once"
-  assert.equal(await probe.run(), undefined)
-  assert.equal(probe.state.models, models)
-  probe.state.human = "Deny"
-  for (let i = 0; i < 2; i++) assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.models, models + 2, "recovery resets total and consecutive counts")
-  assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.titles.at(-1), pausedTitle)
-}
-
-for (const failure of ["deny", "malformed", "error", "timeout", "missing-model", "oversized-input"]) {
+// Every auto failure asks immediately; approval is still single-call only.
+for (const failure of ["deny", "malformed", "error", "timeout", "missing-model", "missing-auth", "oversized-input", "image-history"]) {
   const probe = autoProbe({ auto: { ...autoSettings, timeout: 5 } })
   let attempts = 0
   probe.ctx.modelRegistry.complete = async () => {
@@ -540,106 +510,94 @@ for (const failure of ["deny", "malformed", "error", "timeout", "missing-model",
     return verdict()
   }
   if (failure === "missing-model") probe.ctx.modelRegistry.find = () => undefined
-  for (let i = 1; i <= 3; i++) {
+  if (failure === "missing-auth") probe.ctx.modelRegistry.hasConfiguredAuth = () => false
+  if (failure === "image-history") probe.ctx.sessionManager.getBranch = () => [userEntry([{ type: "text", text: "Inspect this" }, { type: "image", data: "image" }]), userEntry("yes")]
+  for (const human of ["Allow once", "Deny", "Allow once"]) {
+    probe.state.human = human
     const result = await call(probe.toolCall, "read", { path: "README.md", ...(failure === "oversized-input" ? { extra: "x".repeat(32_001) } : {}) }, probe.ctx)
-    assert.equal(result.block, true)
-    assert.equal(probe.state.titles.length, i === 3 ? 1 : 0, failure)
+    assert.equal(result?.block, human === "Allow once" ? undefined : true, failure)
   }
-  assert.equal(attempts, ["missing-model", "oversized-input"].includes(failure) ? 0 : 3, failure)
+  assert.deepEqual(probe.state.titles, Array(3).fill(fallbackTitle), failure)
+  assert.equal(attempts, ["missing-model", "missing-auth", "oversized-input", "image-history"].includes(failure) ? 0 : 3, failure)
 }
 
 for (const unavailable of ["deny", "timeout", "no-ui"]) {
   const probe = autoProbe({ timeout: 5 })
   let uiSignal: AbortSignal | undefined
   if (unavailable === "timeout") probe.ctx.ui.select = async (title: string, _choices: any, options: any) => {
-    probe.state.titles.push(title)
-    uiSignal = options.signal
+    probe.state.titles.push(title); uiSignal = options.signal
     return new Promise(() => {})
   }
   if (unavailable === "no-ui") probe.ctx.hasUI = false
-  for (let i = 0; i < 5; i++) assert.equal((await probe.run()).block, true)
-  assert.equal(probe.state.models, 3, unavailable)
+  for (let i = 0; i < 3; i++) assert.equal((await probe.run()).block, true)
+  assert.equal(probe.state.models, 3)
   assert.equal(probe.state.titles.length, unavailable === "no-ui" ? 0 : 3)
   if (unavailable === "timeout") assert.equal(uiSignal?.aborted, true)
-  probe.ctx.hasUI = true
-  probe.ctx.ui.select = async (title: string) => { assert.equal(title, pausedTitle); return "Allow once" }
-  assert.equal(await probe.run(), undefined)
-  probe.state.decision = "allow"
-  assert.equal(await probe.run(), undefined)
-  assert.equal(probe.state.models, 4)
 }
 
-// An overdue response may settle before the abort timer gets an event-loop turn.
 const overdue = autoProbe({ auto: { ...autoSettings, timeout: 5 } })
-for (let i = 0; i < 2; i++) assert.equal((await overdue.run()).block, true)
 overdue.ctx.modelRegistry.complete = async () => {
-  overdue.state.models++
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15)
   return verdict("allow")
 }
 assert.equal((await overdue.run()).block, true)
-assert.equal(overdue.state.models, 3)
-assert.deepEqual(overdue.state.titles, [pausedTitle], "overdue allow must count as a denial, not reset the budget")
+assert.deepEqual(overdue.state.titles, [fallbackTitle], "overdue allows require a human too")
 
 const hardDenials = autoProbe({ rules: stateRules })
-for (let i = 0; i < 22; i++) {
-  assert.equal((await hardDenials.run("blocked")).block, true)
-  assert.equal((await hardDenials.run(".env")).block, true)
-  assert.equal((await call(hardDenials.toolCall, "write", { path: "/managed/policy.json" }, hardDenials.ctx)).block, true)
-}
+hardDenials.state.human = "Allow once"
+for (const path of ["blocked", ".env"]) assert.equal((await hardDenials.run(path)).block, true)
+assert.equal((await call(hardDenials.toolCall, "write", { path: "/managed/policy.json" }, hardDenials.ctx)).block, true)
 assert.equal(hardDenials.state.models, 0)
-assert.deepEqual(hardDenials.state.titles, [])
-for (let i = 0; i < 2; i++) assert.equal((await hardDenials.run()).block, true)
-assert.deepEqual(hardDenials.state.titles, [])
-assert.equal((await hardDenials.run()).block, true)
-const hardModels = hardDenials.state.models
-const hardPrompts = hardDenials.state.titles.length
-assert.equal((await hardDenials.run("blocked")).block, true)
-assert.equal((await hardDenials.run(".env")).block, true)
-assert.equal(hardDenials.state.models, hardModels)
-assert.equal(hardDenials.state.titles.length, hardPrompts)
-const independent = autoProbe()
-assert.equal((await independent.run()).block, true)
-assert.equal(independent.state.models, 1)
-assert.deepEqual(independent.state.titles, [])
-const interleavedDenials = autoProbe({ rules: stateRules })
-for (let i = 0; i < 2; i++) assert.equal((await interleavedDenials.run()).block, true)
-for (const path of ["blocked", ".env", "human"]) assert.equal((await interleavedDenials.run(path)).block, true)
-assert.equal(interleavedDenials.state.models, 2)
-assert.deepEqual(interleavedDenials.state.titles, ["Approve tool call? read: human"])
-assert.equal((await interleavedDenials.run()).block, true)
-assert.deepEqual(interleavedDenials.state.titles, ["Approve tool call? read: human", pausedTitle])
+assert.deepEqual(hardDenials.state.titles, [], "human approval cannot override hard denies")
 
-let childAllowed = false
+// Configuration availability does not turn auto on. Each instance starts off.
+const toggled = harness(autoPolicy({ rules: stateRules }), { realpath: async (path: string) => path }, false)
+let toggleModels = 0, togglePrompts = 0
+const statuses: any[] = []
+const toggleContext = autoContext(async () => { toggleModels++; return verdict("allow") })
+toggleContext.hasUI = true
+toggleContext.mode = "rpc"
+toggleContext.ui = { setStatus: (key: string, value: string) => { assert.equal(key, "agentbox-auto"); statuses.push(JSON.parse(value)) }, notify: () => {}, select: async () => { togglePrompts++; return "Allow once" } }
+await toggled.lifecycle("session_start", toggleContext)
+assert.deepEqual(statuses.at(-1), { available: true, enabled: false })
+assert.equal(await call(toggled.toolCall, "read", { path: "README.md" }, toggleContext), undefined)
+assert.equal(toggleModels, 0); assert.equal(togglePrompts, 1)
+await toggled.command("on", toggleContext)
+assert.deepEqual(statuses.at(-1), { available: true, enabled: true })
+assert.equal(await call(toggled.toolCall, "read", { path: "README.md" }, toggleContext), undefined)
+assert.equal(toggleModels, 1); assert.equal(togglePrompts, 1)
+await toggled.command("status", toggleContext)
+assert.equal(statuses.at(-1).enabled, true)
+await toggled.command("off", toggleContext)
+await call(toggled.toolCall, "read", { path: "README.md" }, toggleContext)
+assert.equal(toggleModels, 1); assert.equal(togglePrompts, 2)
+await toggled.command("", toggleContext)
+assert.equal(statuses.at(-1).enabled, true)
+await toggled.command("not-a-mode", toggleContext)
+await toggled.command("status", toggleContext)
+assert.equal(statuses.at(-1).enabled, true, "invalid input does not change mode")
+await toggled.command("off", toggleContext)
+const unavailableAuto = harness(autoPolicy({ auto: { ...autoSettings, enable: false } }), {}, false)
+await unavailableAuto.command("on", toggleContext)
+assert.deepEqual(statuses.at(-1), { available: false, enabled: false })
+const independent = harness(autoPolicy(), {}, false)
+await call(independent.toolCall, "read", { path: "README.md" }, toggleContext)
+assert.equal(toggleModels, 1, "another session remains off")
+
 const childSummaries: string[] = []
-let childSignal: AbortSignal | undefined
-let childClosed = 0
-const childRecovery = autoProbe({ rules: stateRules }, {
+let childClosed = 0, childSignal: AbortSignal | undefined
+const childFallback = autoProbe({}, {
   env: { PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_APPROVAL_VERSION: "1" },
-  approvalClient: {
-    close: () => { childClosed++ },
-    ask: async (summary: string, timeout: number, signal: AbortSignal) => {
-      childSummaries.push(summary)
-      assert.equal(timeout, 30_000)
-      childSignal = signal
-      return childAllowed
-    },
-  },
+  approvalClient: { close: () => { childClosed++ }, ask: async (summary: string, _timeout: number, signal: AbortSignal) => {
+    childSummaries.push(summary); childSignal = signal; return true
+  } },
 })
-childRecovery.ctx.hasUI = false
-for (let i = 0; i < 4; i++) assert.equal((await childRecovery.run()).block, true)
-assert.equal(childRecovery.state.models, 3)
-assert.deepEqual(childSummaries, Array(2).fill("Auto mode paused; read: README.md"))
-childAllowed = true
-assert.equal(await childRecovery.run("human"), undefined)
-assert.equal(childSummaries.at(-1), "Auto mode paused; read: human")
-assert.equal(childRecovery.state.models, 3, "explicit recovery ask bypasses classifier")
-assert.equal((await childRecovery.run()).block, true)
-assert.equal(childRecovery.state.models, 4)
-assert.deepEqual(childRecovery.state.titles, [])
-await childRecovery.lifecycle("session_shutdown")
-assert.equal(childClosed, 1)
-assert.equal(childSignal?.aborted, true)
+childFallback.ctx.hasUI = false
+assert.equal(await childFallback.run(), undefined)
+assert.deepEqual(childSummaries, ["Auto could not approve; read: README.md"])
+assert.deepEqual(childFallback.state.titles, [])
+await childFallback.lifecycle("session_shutdown")
+assert.equal(childClosed, 1); assert.equal(childSignal?.aborted, true)
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -656,145 +614,82 @@ async function bounded<T>(promise: Promise<T>) {
 }
 const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve))
 
+// Off cancels an in-flight classifier and requires a real approval, even if a
+// stale provider request later resolves with allow. It does not abort the tool.
+const switching = autoProbe()
+const classifierEntered = deferred<AbortSignal>(), lateAllow = deferred<any>()
+switching.ctx.modelRegistry.complete = async (_model: any, _request: any, options: any) => {
+  classifierEntered.resolve(options.signal); return lateAllow.promise
+}
+switching.state.human = "Allow once"
+const switchingCall = switching.run()
+const switchingSignal = await bounded(classifierEntered.promise)
+await switching.command("off")
+assert.equal(switchingSignal.aborted, true)
+assert.equal(await bounded(switchingCall), undefined)
+assert.deepEqual(switching.state.titles, [fallbackTitle])
+lateAllow.resolve(verdict("allow")); await nextTurn()
+
+for (const lifecycle of ["session_start", "session_tree", "session_shutdown"]) {
+  for (const stage of ["model", "human"]) {
+    const probe = autoProbe({ rules: stateRules, timeout: 5_000, auto: { ...autoSettings, timeout: 5_000 } })
+    const entered = deferred<AbortSignal>(), late = deferred<any>()
+    if (stage === "model") probe.ctx.modelRegistry.complete = async (_model: any, _request: any, options: any) => { entered.resolve(options.signal); return late.promise }
+    else probe.ctx.ui.select = async (_title: string, _choices: any, options: any) => { entered.resolve(options.signal); return late.promise }
+    const pending = probe.run(stage === "human" ? "human" : "README.md")
+    const signal = await bounded(entered.promise)
+    const queued = probe.run()
+    await probe.lifecycle(lifecycle)
+    assert.equal(signal.aborted, true)
+    assert.equal((await bounded(pending)).block, true)
+    assert.equal((await bounded(queued)).block, true)
+    if (lifecycle === "session_shutdown") {
+      assert.equal((await probe.run()).block, true)
+      await probe.lifecycle("session_start")
+    }
+    const before = probe.state.models
+    probe.ctx.ui.select = async () => "Allow once"
+    probe.ctx.modelRegistry.complete = async () => { probe.state.models++; return verdict("allow") }
+    assert.equal(await probe.run(), undefined)
+    assert.equal(probe.state.models, before, "lifecycle resets auto to off")
+    late.resolve(stage === "model" ? verdict("allow") : "Allow once"); await nextTurn()
+  }
+}
+
 for (const stage of ["model", "human"]) {
   const probe = autoProbe({ rules: stateRules, timeout: 5_000, auto: { ...autoSettings, timeout: 5_000 } })
-  for (let i = 0; i < 2; i++) assert.equal((await probe.run()).block, true)
-  const controller = new AbortController()
-  const entered = deferred<AbortSignal>()
-  const late = deferred<any>()
-  if (stage === "model") probe.ctx.modelRegistry.complete = async (_model: any, _request: any, options: any) => {
-    entered.resolve(options.signal)
-    return late.promise
-  }
-  else probe.ctx.ui.select = async (_title: string, _choices: any, options: any) => {
-    entered.resolve(options.signal)
-    return late.promise
-  }
+  const controller = new AbortController(), entered = deferred<AbortSignal>(), late = deferred<any>()
+  if (stage === "model") probe.ctx.modelRegistry.complete = async (_model: any, _request: any, options: any) => { entered.resolve(options.signal); return late.promise }
+  else probe.ctx.ui.select = async (_title: string, _choices: any, options: any) => { entered.resolve(options.signal); return late.promise }
   const pending = probe.run(stage === "human" ? "human" : "README.md", { signal: controller.signal })
   const signal = await bounded(entered.promise)
   controller.abort()
   assert.equal((await bounded(pending)).block, true)
   assert.equal(signal.aborted, true)
-  late.resolve(stage === "model" ? verdict("allow") : "Allow once")
-  await nextTurn()
-  probe.ctx.modelRegistry.complete = async () => { probe.state.models++; return verdict() }
-  probe.ctx.ui.select = async (title: string) => { probe.state.titles.push(title); return "Deny" }
-  assert.equal((await probe.run()).block, true)
-  assert.deepEqual(probe.state.titles, [pausedTitle], `${stage} cancellation must not reset consecutive denials`)
-}
-// Cancellation must not increment either budget, including pre-aborted calls.
-const cancelledBudget = autoProbe({ rules: stateRules })
-for (let i = 0; i < 20; i++) {
-  assert.equal((await cancelledBudget.run()).block, true)
-  const controller = new AbortController()
-  const ctx = autoContext(async () => { controller.abort(); return verdict() })
-  ctx.signal = controller.signal
-  assert.equal((await cancelledBudget.run("README.md", ctx)).block, true)
-  assert.equal((await cancelledBudget.run("README.md", { signal: AbortSignal.abort() })).block, true)
-  assert.equal(cancelledBudget.state.titles.length, i === 19 ? 1 : 0)
-  assert.equal(await cancelledBudget.run("safe"), undefined)
+  late.resolve(stage === "model" ? verdict("allow") : "Allow once"); await nextTurn()
+  assert.deepEqual(probe.state.titles, [], "cancellation must not open another approval")
 }
 
-for (const lifecycle of ["session_start", "session_tree", "session_shutdown"]) {
-  for (const stage of ["model", "human"]) {
-    const probe = autoProbe({ timeout: 5_000, auto: { ...autoSettings, timeout: 5_000 } })
-    for (let i = 0; i < 2; i++) assert.equal((await probe.run()).block, true)
-    const entered = deferred<AbortSignal>()
-    const late = deferred<any>()
-    if (stage === "model") probe.ctx.modelRegistry.complete = async (_model: any, _request: any, options: any) => {
-      entered.resolve(options.signal)
-      return late.promise
-    }
-    else probe.ctx.ui.select = async (_title: string, _choices: any, options: any) => {
-      entered.resolve(options.signal)
-      return late.promise
-    }
-    const pending = probe.run()
-    const signal = await bounded(entered.promise)
-    const queued = probe.run()
-    const reads = probe.reads.length
-    await probe.lifecycle(lifecycle)
-    assert.equal(signal.aborted, true, `${lifecycle}/${stage}`)
-    assert.equal((await bounded(pending)).block, true)
-    assert.equal((await bounded(queued)).block, true)
-    assert.equal(probe.reads.length, reads, "old queued checks must not read policy in a new epoch")
-    if (lifecycle === "session_shutdown") {
-      assert.equal((await probe.run()).block, true, "shutdown rejects calls until start")
-      await probe.lifecycle("session_start")
-    }
-    probe.ctx.modelRegistry.complete = async () => { probe.state.models++; return verdict() }
-    probe.ctx.ui.select = async (title: string) => { probe.state.titles.push(title); return "Deny" }
-    for (let i = 0; i < 2; i++) assert.equal((await probe.run()).block, true)
-    assert.deepEqual(probe.state.titles, [], "reset clears pause and denial counts")
-    late.resolve(stage === "model" ? verdict("allow") : "Allow once")
-    await nextTurn()
-    assert.equal((await probe.run()).block, true)
-    assert.deepEqual(probe.state.titles, [pausedTitle], "stale allow cannot reset the new epoch's counts")
-    if (stage === "human") assert.deepEqual(probe.signals, ["waiting", "working", "waiting", "working"])
+for (const kind of ["fallback", "explicit"]) {
+  const serial = autoProbe({ rules: stateRules, timeout: 5_000 })
+  // Explicit opt-in before starting concurrent calls avoids racing test setup.
+  await serial.command("on")
+  await serial.run("safe")
+  const entered = deferred<void>(), answer = deferred<string>()
+  serial.ctx.ui.select = async (title: string) => {
+    serial.state.titles.push(title)
+    if (serial.state.titles.length === 1) { entered.resolve(); return answer.promise }
+    return "Deny"
   }
-  const budget = autoProbe({ rules: stateRules })
-  for (let i = 0; i < 19; i++) {
-    assert.equal((await budget.run()).block, true)
-    assert.equal(await budget.run("safe"), undefined)
-  }
-  await budget.lifecycle(lifecycle)
-  if (lifecycle === "session_shutdown") await budget.lifecycle("session_start")
-  for (let i = 0; i < 2; i++) assert.equal((await budget.run()).block, true)
-  assert.deepEqual(budget.state.titles, [], `${lifecycle} resets total denials`)
+  const calls = [serial.run(kind === "explicit" ? "human" : "README.md"), serial.run(kind === "explicit" ? "human" : "README.md")]
+  await bounded(entered.promise); await nextTurn()
+  assert.equal(serial.state.titles.length, 1, "human prompts cannot overlap")
+  assert.equal(serial.state.models, kind === "explicit" ? 0 : 1)
+  answer.resolve("Allow once")
+  assert.deepEqual((await bounded(Promise.all(calls))).map((result) => result?.block), [undefined, true])
+  assert.equal(serial.state.titles.length, 2)
+  assert.equal(serial.state.models, kind === "explicit" ? 0 : 2)
+  assert.deepEqual(serial.signals, ["waiting", "working", "waiting", "working"])
 }
-
-const serial = autoProbe({ timeout: 5_000, auto: { ...autoSettings, timeout: 5_000 } })
-const modelEntered = deferred<void>()
-const modelAnswer = deferred<any>()
-const uiEntered = deferred<void>()
-const uiAnswer = deferred<string>()
-const order: string[] = []
-serial.ctx.modelRegistry.complete = async () => {
-  serial.state.models++
-  order.push(`model-${serial.state.models}`)
-  if (serial.state.models === 1) { modelEntered.resolve(); return modelAnswer.promise }
-  return verdict()
-}
-serial.ctx.ui.select = async (title: string) => {
-  serial.state.titles.push(title)
-  order.push("human")
-  uiEntered.resolve()
-  return uiAnswer.promise
-}
-const concurrent = Array.from({ length: 4 }, () => serial.run())
-await bounded(modelEntered.promise)
-await nextTurn()
-assert.equal(serial.state.models, 1, "only one classifier may run at a time")
-assert.equal(serial.reads.length, 1, "entire hook is serialized")
-modelAnswer.resolve(verdict())
-await bounded(uiEntered.promise)
-await nextTurn()
-assert.equal(serial.state.models, 3)
-assert.equal(serial.reads.length, 3, "fourth check waits for threshold-call UI")
-assert.deepEqual(serial.state.titles, [pausedTitle])
-uiAnswer.resolve("Allow once")
-const concurrentResults = await bounded(Promise.all(concurrent))
-assert.deepEqual(concurrentResults.map((result) => result?.block), [true, true, undefined, true])
-assert.deepEqual(order, ["model-1", "model-2", "model-3", "human", "model-4"])
-assert.deepEqual(serial.signals, ["waiting", "working"])
-
-const serialHuman = autoProbe({ rules: stateRules, timeout: 5_000 })
-const firstHuman = deferred<void>()
-const humanAnswer = deferred<string>()
-serialHuman.ctx.ui.select = async (title: string) => {
-  serialHuman.state.titles.push(title)
-  if (serialHuman.state.titles.length === 1) { firstHuman.resolve(); return humanAnswer.promise }
-  return "Deny"
-}
-const humanCalls = [serialHuman.run("human"), serialHuman.run("human")]
-await bounded(firstHuman.promise)
-await nextTurn()
-assert.equal(serialHuman.state.titles.length, 1, "human prompts cannot overlap")
-assert.equal(serialHuman.reads.length, 1)
-humanAnswer.resolve("Allow once")
-assert.deepEqual((await bounded(Promise.all(humanCalls))).map((result) => result?.block), [undefined, true])
-assert.equal(serialHuman.state.titles.length, 2)
-assert.equal(serialHuman.state.models, 0)
-assert.deepEqual(serialHuman.signals, ["waiting", "working", "waiting", "working"])
 
 console.log("pi policy extension tests passed")

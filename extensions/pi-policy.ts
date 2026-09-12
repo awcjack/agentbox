@@ -607,22 +607,69 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
   return function piPolicy(pi: ExtensionAPI) {
     let approvalClient = dependencies.approvalClient
     let transportOpened = false
-    let consecutiveDenials = 0
-    let totalDenials = 0
-    let paused = false
+    // Administrator configuration makes auto available; only an explicit
+    // session command enables it. Never persist this choice across sessions.
+    let autoEnabled = false
+    let modeRequest = 0
+    let autoAttempt = new AbortController()
     let session = new AbortController()
     let queue = Promise.resolve()
     const reset = (shutdown = false) => {
       session.abort()
       session = new AbortController()
       if (shutdown) session.abort()
-      consecutiveDenials = 0
-      totalDenials = 0
-      paused = false
+      autoAttempt.abort()
+      autoAttempt = new AbortController()
+      autoEnabled = false
+      modeRequest++
       queue = Promise.resolve()
     }
-    pi.on("session_start", () => reset())
-    pi.on("session_tree", () => reset())
+    function showAuto(ctx: ExtensionContext, available: boolean) {
+      ctx.ui.setStatus("agentbox-auto", ctx.mode === "rpc"
+        ? JSON.stringify({ available, enabled: autoEnabled })
+        : available ? `Auto: ${autoEnabled ? "on" : "off"}` : undefined)
+    }
+    async function publishAuto(ctx: ExtensionContext) {
+      const epoch = session
+      let available = false
+      try {
+        const config = parseConfig(await readFile(env.PI_POLICY_CONFIG || DEFAULT_CONFIG_PATH), env.PI_POLICY_CONFIG || DEFAULT_CONFIG_PATH)
+        available = config.auto?.enable === true
+      } catch { /* Invalid policy remains fail-closed, including auto mode. */ }
+      if (epoch !== session || epoch.signal.aborted) return false
+      if (!available) {
+        autoEnabled = false
+        autoAttempt.abort()
+        autoAttempt = new AbortController()
+      }
+      showAuto(ctx, available)
+      return available
+    }
+    pi.registerCommand("auto", {
+      description: "Toggle session auto-approval: /auto on, /auto off, or /auto status",
+      handler: async (args, ctx) => {
+        const value = args.trim().toLowerCase()
+        if (!["", "on", "off", "status"].includes(value)) {
+          ctx.ui.notify("Usage: /auto [on|off|status]", "error")
+          return
+        }
+        const epoch = session, request = ++modeRequest
+        const available = await publishAuto(ctx)
+        if (epoch !== session || epoch.signal.aborted || request !== modeRequest || value === "status") return
+        const enabled = value === "on" || (value === "" && !autoEnabled)
+        if (enabled && !available) {
+          ctx.ui.notify("Auto mode is not available in the managed policy.", "warning")
+          return
+        }
+        autoAttempt.abort()
+        autoAttempt = new AbortController()
+        autoEnabled = enabled
+        showAuto(ctx, available)
+        ctx.ui.notify(`Auto mode ${enabled ? "on" : "off"}. Explicit approval rules and safety guards still apply.`, "info")
+      },
+    })
+    pi.on("session_start", async (_event, ctx) => { reset(); await publishAuto(ctx) })
+    pi.on("session_tree", async (_event, ctx) => { reset(); await publishAuto(ctx) })
     pi.on("session_shutdown", () => {
       reset(true)
       approvalClient?.close()
@@ -652,7 +699,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     pi.on("tool_call", (event, context) => {
       const ctx = { ...context, signal: context.signal ? AbortSignal.any([context.signal, session.signal]) : session.signal }
       const cancelled = { block: true, reason: "Pi policy approval cancelled or session changed" }
-      // Serialize decisions, including human prompts, so concurrent calls cannot race the denial budget.
+      // Serialize decisions so concurrent tool calls never overlap human prompts.
       const pending = queue.then(async () => {
         if (ctx.signal.aborted) return cancelled
         const input = event.input as Record<string, unknown>
@@ -674,35 +721,21 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         if (!targetGroups) return { block: true, reason: "Pi policy cannot safely canonicalize a policy target" }
         const targets = targetGroups.flat()
         const decision = managedDecision(config, event.toolName, targetGroups)
-        if (decision === "allow") {
-          consecutiveDenials = 0
-          return
-        }
+        if (decision === "allow") return
         if (decision === "deny") return { block: true, reason: "Denied by managed Pi policy" }
-        if (config.auto?.enable && decision === "defaultAsk" && !paused) {
-          const approved = await autoApprove(ctx, config.auto, event.toolName, input, targets, event.toolCallId)
+        let autoFallback = false
+        if (autoEnabled && config.auto?.enable && decision === "defaultAsk") {
+          const attempt = autoAttempt
+          const approved = await autoApprove({ ...ctx, signal: AbortSignal.any([ctx.signal, attempt.signal]) }, config.auto, event.toolName, input, targets, event.toolCallId)
           if (ctx.signal.aborted) return cancelled
-          if (approved) {
-            consecutiveDenials = 0
-            return
-          }
-          consecutiveDenials++
-          totalDenials++
-          paused = consecutiveDenials >= 3 || totalDenials >= 20
-          if (!paused) return { block: true, reason: "Pi auto permission denied or could not safely approve this tool call" }
+          if (approved && autoEnabled && attempt === autoAttempt && !attempt.signal.aborted) return
+          autoFallback = true
         }
-        const recovering = !!config.auto?.enable && paused
-        const summary = boundedDisplay(recovering ? `Auto mode paused; ${event.toolName}` : event.toolName, targets)
+        // A classifier rejection/error is not a policy deny. Unsupported image
+        // history, missing credentials, timeouts, etc. all ask on the FIRST call.
+        const summary = boundedDisplay(autoFallback ? `Auto could not approve; ${event.toolName}` : event.toolName, targets)
         const result = await askHuman(ctx, config, summary)
-        if (ctx.signal.aborted) return cancelled
-        if (!result) {
-          consecutiveDenials = 0
-          if (recovering) {
-            totalDenials = 0
-            paused = false
-          }
-        }
-        return result
+        return ctx.signal.aborted ? cancelled : result
       }).then((result) => ctx.signal.aborted ? cancelled : result, () => ({ block: true, reason: "Pi policy check failed; failing closed" }))
       queue = pending.then(() => undefined)
       return pending
