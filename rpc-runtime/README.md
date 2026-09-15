@@ -38,6 +38,19 @@ the exact browser origin (scheme, host, and port) in `allowedOrigins`, including
 same-origin use. Protect remote HTTP access with a trusted VPN or terminate TLS
 at a trusted reverse proxy; bearer authentication alone does not encrypt traffic.
 
+Type `/` in the composer to discover the selected Pi process's extension,
+skill, and prompt-template commands. Arrow keys navigate; Tab, Enter, or clicking
+inserts a suggestion without executing it. Escape dismisses the menu. Suggestions
+load lazily through `get_commands` (which the profile and read scope must allow),
+are cached per selection, and can be reloaded with Refresh. TUI-only built-ins
+are not advertised. `/auto on`, `/auto off`, and `/auto status` are suggested only
+when the process actually registers `auto`.
+
+If metadata does not report auto-mode support, the header shows **Auto: unknown**,
+not a misleading off state. The browser refuses to send `/auto` to the model in
+that case. Deploy the updated runtime and policy extension and start a new Pi
+session; merely refreshing the page does not upgrade an existing child process.
+
 Working directories and history roots are administrator-owned profile settings,
 not arbitrary browser input. The UI uses native Pi sessions and credentials;
 it does not convert OpenCode conversations or import OpenCode authentication.

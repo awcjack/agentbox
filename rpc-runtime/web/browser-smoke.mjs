@@ -27,7 +27,7 @@ function conversationSnapshot(session) {
 }
 let tick = Date.now();
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
-const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, autoMode: session.autoMode || { available: true, enabled: false }, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
+const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, autoMode: session.autoMode === undefined ? { available: true, enabled: false } : session.autoMode, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
 function emit(session, event) {
   const frame = `id: ${++session.cursor}\nevent: pi\ndata: ${JSON.stringify(event)}\n\n`;
   session.events.push({ id: session.cursor, frame });
@@ -55,7 +55,7 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -117,7 +117,7 @@ const server = createServer(async (request, response) => {
       saved.set(destination.nativeSessionId, destination);
       return json(response, 200, { session: meta(destination), draft });
     }
-    if (request.method === "POST" && (match[2] === "auto" || match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models"].includes(body.type)))) {
+    if (request.method === "POST" && (match[2] === "auto" || match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models", "get_commands"].includes(body.type)))) {
       assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "web writes carry the current native session ID");
     }
     if (match[2] === "auto" && request.method === "POST") {
@@ -157,6 +157,7 @@ const server = createServer(async (request, response) => {
       data = { messages: session.messages };
     }
     else if (body.type === "get_available_models") data = { models };
+    else if (body.type === "get_commands") data = { commands: [{ name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
     else if (body.type === "set_model") { session.model = models.find((model) => model.id === body.modelId); data = session.model; }
     else if (body.type === "abort") { session.streaming = false; emit(session, { type: "agent_end" }); }
     else if (body.type === "prompt") {
@@ -180,7 +181,7 @@ const server = createServer(async (request, response) => {
     } else throw new Error(`Unhandled fixture command ${body.type}`);
     const result = { type: "response", command: body.type, success: true, ...(data === undefined ? {} : { data }) };
     // Match the supervisor: read snapshots are HTTP-only, not SSE replay data.
-    if (!["get_state", "get_messages", "get_available_models"].includes(body.type)) emit(session, result);
+    if (!["get_state", "get_messages", "get_available_models", "get_commands"].includes(body.type)) emit(session, result);
     json(response, 200, result);
   } catch (error) { serverErrors.push(error.stack); if (!response.headersSent) json(response, 500, { error: { message: error.message } }); else response.destroy(); }
 });
@@ -277,6 +278,34 @@ try {
       await page.locator("#auto-mode").click();
       await until(() => page.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "false"), "auto off confirmed");
       assert.deepEqual(calls.filter((call) => call.id === session.id && call.auto).map((call) => call.auto.enabled), [true, false]);
+      const promptCalls = () => calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length;
+      const promptsBeforeCompletion = promptCalls();
+      await page.locator("#prompt").fill("/aut");
+      await until(() => page.locator(".command-option").count().then((count) => count === 4), "slash commands loaded");
+      await page.locator("#prompt").press("ArrowDown"); await page.locator("#prompt").press("ArrowDown");
+      await page.locator("#prompt").press("Tab");
+      assert.equal(await page.locator("#prompt").inputValue(), "/auto on ");
+      assert.equal(await page.locator("#command-suggestions").isVisible(), false);
+      assert.equal(promptCalls(), promptsBeforeCompletion, "completion does not execute a command");
+      await page.locator("#prompt").fill("/"); await page.locator("#prompt").press("Escape");
+      assert.equal(await page.locator("#command-suggestions").isVisible(), false);
+      await page.locator("#prompt").fill("/skill:c");
+      await page.locator(".command-option").click();
+      assert.equal(await page.locator("#prompt").inputValue(), "/skill:commit ");
+      assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "get_commands").length, 1, "command catalog is cached for the selected session");
+      assert.equal(promptCalls(), promptsBeforeCompletion);
+      await noOverflow(page);
+      session.autoMode = null;
+      emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: "" });
+      await until(() => page.locator("#auto-mode").textContent().then((text) => text === "Auto: unknown"), "legacy session mode is not misreported as off");
+      assert.equal(await page.locator("#auto-mode").isDisabled(), true);
+      await page.locator("#prompt").fill("/auto off "); await page.locator("#prompt").press("Enter");
+      assert.ok((await page.locator("#notice-text").textContent()).includes("Nothing was sent to the model"));
+      assert.equal(promptCalls(), promptsBeforeCompletion);
+      session.autoMode = { available: true, enabled: false };
+      emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: JSON.stringify(session.autoMode) });
+      await until(() => page.locator("#auto-mode").textContent().then((text) => text === "Auto: off"), "policy support restored");
+      await page.locator("#prompt").fill("");
       await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-reasoning"]));
       await until(() => page.locator("#model").inputValue().then((value) => value.includes("pi-reasoning")), "model switched");
       await until(() => session.model.id === "pi-reasoning", "model RPC");

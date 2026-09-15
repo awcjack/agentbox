@@ -4,6 +4,7 @@ import { renderSubagents } from "./subagents.mjs";
 import { initSidebarResize } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
+import { commandQuery, commandSuggestions } from "./commands.mjs";
 
 initSidebarResize();
 
@@ -23,6 +24,7 @@ let sessionPoll = null;
 const dialogMethods = new Set(["confirm", "select", "input", "editor"]);
 const conversation = $("conversation");
 let followBottom = true, renderPending = false;
+let commandItems = [], commandIndex = 0, commandKey = "", dismissedCommands = null;
 
 function record(id) {
   if (!records.has(id)) records.set(id, { draft: { text: "", images: [], version: 0 }, messages: [], models: [], uiDrafts: new Map(), forbidden: new Set(), sending: false, notice: null });
@@ -78,8 +80,8 @@ function updateControls() {
   const autoMode = ctx?.meta?.autoMode;
   $("auto-mode").disabled = !canWrite(ctx) || !autoMode?.available || ctx.record.autoModeBusy;
   $("auto-mode").setAttribute("aria-pressed", String(autoMode?.enabled === true));
-  $("auto-mode").textContent = ctx?.record.autoModeBusy ? "Auto: ..." : autoMode?.enabled ? "Auto: on" : "Auto: off";
-  $("auto-mode").title = !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply." : "Auto mode is off. Normal permission rules apply. Click to enable for this session.";
+  $("auto-mode").textContent = ctx?.record.autoModeBusy || (ctx && !ctx.ready) ? "Auto: ..." : ctx && !autoMode ? "Auto: unknown" : autoMode?.enabled ? "Auto: on" : "Auto: off";
+  $("auto-mode").title = ctx && !autoMode ? "This Pi session has not reported auto-mode support. Deploy the updated runtime and policy extension, then start a new Pi session; the current mode cannot be confirmed." : !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply." : "Auto mode is off. Normal permission rules apply. Click to enable for this session.";
   $("prompt").disabled = !ctx || readOnly;
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
   $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || !(draft.text.trim() || draft.images.length);
@@ -105,6 +107,85 @@ function updateControls() {
     input.disabled = !canWrite(ctx, "ui") || card.dataset.busy === "true";
   }
   for (const button of $("messages").querySelectorAll("[data-conversation-action]")) button.disabled = !canChangeConversation(ctx);
+  renderCommandSuggestions();
+}
+
+function hideCommandSuggestions() {
+  $("command-suggestions").hidden = true;
+  $("prompt").setAttribute("aria-expanded", "false");
+  $("prompt").removeAttribute("aria-activedescendant");
+  commandItems = [];
+}
+async function loadCommands(ctx) {
+  ctx.commandLoading = true;
+  const nativeId = ctx.meta.nativeSessionId;
+  try {
+    const data = await rpc(ctx, { type: "get_commands" });
+    if (active(ctx) && ctx.meta.nativeSessionId === nativeId) ctx.commands = data?.commands || [];
+  } catch (error) {
+    if (!active(ctx) || ctx.meta.nativeSessionId !== nativeId) return;
+    if (error.status === 401) { report(error, ctx); return; }
+    ctx.commands = [];
+    ctx.commandError = error.code === "command_forbidden" || error.status === 403
+      ? "Command suggestions are unavailable: this profile/token must allow get_commands."
+      : "Could not load commands. Use Refresh to try again.";
+  } finally {
+    ctx.commandLoading = false;
+    if (active(ctx)) renderCommandSuggestions();
+  }
+}
+function renderCommandSuggestions() {
+  const ctx = current, input = $("prompt"), root = $("command-suggestions");
+  const key = `${ctx?.id}:${input.value}`;
+  if (!canWrite(ctx) || $("composer").hidden || document.activeElement !== input
+    || commandQuery(input.value, input.selectionStart, input.selectionEnd) === null || dismissedCommands === key) {
+    hideCommandSuggestions(); return;
+  }
+  if (ctx.commands === undefined && !ctx.commandLoading) loadCommands(ctx);
+  commandItems = commandSuggestions(input.value, ctx.commands);
+  if (key !== commandKey) commandIndex = 0;
+  commandKey = key;
+  commandIndex = Math.max(0, Math.min(commandIndex, commandItems.length - 1));
+  root.replaceChildren(); root.hidden = false; input.setAttribute("aria-expanded", "true");
+  input.removeAttribute("aria-activedescendant");
+  if (!commandItems.length) {
+    root.append(element("div", "command-empty", ctx.commandLoading ? "Loading commands..." : ctx.commandError || "No matching commands in this Pi session."));
+    return;
+  }
+  commandItems.forEach((command, index) => {
+    const button = element("button", "command-option");
+    button.type = "button"; button.id = `command-option-${index}`; button.tabIndex = -1;
+    button.setAttribute("role", "option"); button.setAttribute("aria-selected", String(index === commandIndex));
+    button.append(element("strong", "", `/${command.name}`), element("span", "", command.description));
+    button.addEventListener("pointerdown", (event) => event.preventDefault());
+    button.addEventListener("click", () => chooseCommand(index)); root.append(button);
+  });
+  input.setAttribute("aria-activedescendant", `command-option-${commandIndex}`);
+}
+function chooseCommand(index) {
+  const ctx = current, command = commandItems[index];
+  if (!canWrite(ctx) || !command) return;
+  ctx.record.draft.text = `/${command.name} `; ctx.record.draft.version++;
+  dismissedCommands = null; restoreDraft(); $("prompt").focus();
+  $("prompt").setSelectionRange($("prompt").value.length, $("prompt").value.length);
+  renderCommandSuggestions();
+}
+function commandKeydown(event) {
+  if (event.isComposing || event.keyCode === 229 || $("command-suggestions").hidden) return false;
+  const input = $("prompt");
+  if (commandQuery(input.value, input.selectionStart, input.selectionEnd) === null) { hideCommandSuggestions(); return false; }
+  if (event.key === "Escape") {
+    dismissedCommands = commandKey; hideCommandSuggestions(); event.preventDefault(); event.stopPropagation(); return true;
+  }
+  if (commandItems.length && ["ArrowDown", "ArrowUp"].includes(event.key)) {
+    event.preventDefault();
+    commandIndex = (commandIndex + (event.key === "ArrowDown" ? 1 : commandItems.length - 1)) % commandItems.length;
+    renderCommandSuggestions(); $(`command-option-${commandIndex}`)?.scrollIntoView({ block: "nearest" }); return true;
+  }
+  if (commandItems.length && ["Enter", "Tab"].includes(event.key) && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    event.preventDefault(); chooseCommand(commandIndex); return true;
+  }
+  return false;
 }
 
 function drawer(open) {
@@ -408,6 +489,7 @@ function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
     ctx.record.messages = []; ctx.partial = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
     ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
+    ctx.commands = undefined; ctx.commandError = null;
     renderMessages();
   }
   ctx.meta = meta;
@@ -691,6 +773,9 @@ $("composer").addEventListener("submit", async (event) => {
   if (!canWrite(ctx) || $("composer").hidden || ctx.record.sending || ctx.record.readingImages) return;
   const draft = ctx.record.draft, text = draft.text.trim(), images = draft.images.slice(), version = draft.version, ownEpoch = epoch;
   if (!text && !images.length) return;
+  if (/^\/auto(?:\s|$)/.test(text) && !ctx.meta.autoMode) {
+    showNotice("This Pi session has not reported the new /auto command. Deploy the updated policy extension and start a new session. Nothing was sent to the model.", true); return;
+  }
   if (images.length && ctx.state.model?.input && !ctx.state.model.input.includes("image")) { showNotice("The selected model does not accept images. Choose a vision-capable model or remove the attachments.", true); return; }
   const command = { type: "prompt", message: text, streamingBehavior: $("send-mode").value };
   if (images.length) command.images = images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
@@ -708,8 +793,12 @@ $("composer").addEventListener("submit", async (event) => {
     else ctx.record.notice = { message: `${error.message} Your draft was kept. The message may have been accepted; inspect this session before resending.`, error: true };
   } finally { if (ownEpoch === epoch) { ctx.record.sending = false; if (current?.record === ctx.record) { updateControls(); requestRefresh(current); } } }
 });
-$("prompt").addEventListener("input", () => { if (current) { current.record.draft.text = $("prompt").value; current.record.draft.version++; updateControls(); } });
+$("prompt").addEventListener("input", () => { dismissedCommands = null; if (current) { current.record.draft.text = $("prompt").value; current.record.draft.version++; updateControls(); } });
+$("prompt").addEventListener("focus", () => renderCommandSuggestions());
+$("prompt").addEventListener("click", () => renderCommandSuggestions());
+$("prompt").addEventListener("blur", () => hideCommandSuggestions());
 $("prompt").addEventListener("keydown", (event) => {
+  if (commandKeydown(event)) return;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault(); if (!$("send").disabled) $("composer").requestSubmit();
   }
@@ -831,6 +920,7 @@ function logout(message = "") {
   token = ""; auth.abort(); auth = new AbortController();
   clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
   attention.clear(); document.title = baseTitle;
+  dismissedCommands = null; commandKey = ""; hideCommandSuggestions();
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   current = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
@@ -871,6 +961,7 @@ $("new-session").addEventListener("click", openNew);
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
 $("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ profile: $("new-profile").value, ...(name ? { name } : {}) }); });
 $("refresh-sessions").addEventListener("click", () => {
+  if (current) { current.commands = undefined; current.commandError = null; }
   refreshSessions();
   if (current?.online && current.ready) requestRefresh(current);
   else if (current) activate(current.meta, { reconnect: true });
