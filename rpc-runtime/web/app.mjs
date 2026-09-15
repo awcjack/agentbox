@@ -5,6 +5,7 @@ import { initSidebarResize } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions } from "./commands.mjs";
+import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 
 initSidebarResize();
 
@@ -61,7 +62,7 @@ function canWrite(ctx, command = "prompt") {
   return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running" && !ctx.record.ending && !ctx.record.conversationBusy && !ctx.replacing && !ctx.meta.conversationReplacing && !readOnly && !ctx.record.forbidden.has(command));
 }
 function canChangeConversation(ctx) {
-  return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.record.autoModeBusy && !ctx.modelBusy;
+  return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.record.autoModeBusy && !ctx.modelBusy && !ctx.thinkingBusy;
 }
 function updateControls() {
   const ctx = current;
@@ -84,14 +85,15 @@ function updateControls() {
   $("auto-mode").title = ctx && !autoMode ? "This Pi session has not reported auto-mode support. Deploy the updated runtime and policy extension, then start a new Pi session; the current mode cannot be confirmed." : !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply." : "Auto mode is off. Normal permission rules apply. Click to enable for this session.";
   $("prompt").disabled = !ctx || readOnly;
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
-  $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || !(draft.text.trim() || draft.images.length);
+  $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy || !(draft.text.trim() || draft.images.length);
   $("send").firstChild.textContent = ctx?.record.sending ? "Sending " : streaming ? "Queue " : "Send ";
   $("send-mode").hidden = !streaming;
   $("send-mode").disabled = !canWrite(ctx);
   $("stop").hidden = !streaming;
   $("stop").disabled = !canWrite(ctx, "abort") || ctx?.stopping;
   $("stop").textContent = ctx?.stopping ? "Stopping..." : "Stop";
-  $("model").disabled = !canWrite(ctx, "set_model") || streaming || ctx?.modelBusy || !ctx?.record.models.length;
+  $("model").disabled = !canWrite(ctx, "set_model") || streaming || ctx?.modelBusy || ctx?.thinkingBusy || !ctx?.record.models.length;
+  renderThinking(ctx);
   $("session-title").textContent = ctx ? ctx.state.sessionName || ctx.meta?.name || "Untitled session" : "Pi coding workspace";
   $("session-subtitle").textContent = ctx ? `${ctx.meta?.profile || "workspace"} / ${ctx.meta?.cwd || ctx.state.sessionId || ctx.id}` : "Code, tools, and persistent conversations.";
   $("session-status").textContent = !ctx ? "WORKSPACE" : !ctx.ready ? "SYNCING" : readOnly ? "READ ONLY" : ctx.meta?.status !== "running" ? (ctx.meta?.status || "OFFLINE").toUpperCase() : !ctx.online ? "OFFLINE" : streaming ? "WORKING" : "READY";
@@ -285,6 +287,42 @@ function renderModels(ctx) {
     root.append(option);
   }
   updateControls();
+}
+
+function renderThinking(ctx) {
+  const root = $("thinking-level"), currentLevel = ctx?.state.thinkingLevel;
+  const catalog = ctx?.thinkingCatalog;
+  const levels = catalog?.key === thinkingModelKey(ctx?.meta, ctx?.state) ? catalog.levels : [];
+  root.replaceChildren();
+  if (!currentLevel || !levels.includes(currentLevel)) {
+    const option = element("option", "", currentLevel ? `Thinking: ${currentLevel}` : catalog?.loading ? "Thinking: loading..." : "Thinking: unavailable");
+    option.value = ""; option.selected = true; option.disabled = true; root.append(option);
+  }
+  for (const level of levels) {
+    const option = element("option", "", `Thinking: ${level}`);
+    option.value = level; option.selected = level === currentLevel; root.append(option);
+  }
+  root.disabled = !canWrite(ctx, "set_thinking_level") || ctx?.state.isStreaming || ctx?.state.isCompacting
+    || ctx?.modelBusy || ctx?.thinkingBusy || catalog?.loading || !levels.length || (levels.length === 1 && levels[0] === currentLevel);
+  root.title = catalog?.error || (catalog?.loading ? "Loading this model's supported thinking levels" : "Reasoning effort for the current model");
+}
+function refreshThinkingLevels(ctx, force = false) {
+  const key = thinkingModelKey(ctx.meta, ctx.state);
+  if (!active(ctx) || !key || ctx.modelBusy || (!force && ctx.thinkingCatalog?.key === key)) return;
+  const catalog = { key, levels: [], loading: true, error: null };
+  ctx.thinkingCatalog = catalog;
+  rpc(ctx, { type: "get_available_thinking_levels" }).then((data) => {
+    if (!active(ctx) || ctx.thinkingCatalog !== catalog || thinkingModelKey(ctx.meta, ctx.state) !== key) return;
+    catalog.levels = thinkingLevels(data?.levels);
+    if (!catalog.levels.length) catalog.error = "Pi did not report supported thinking levels. Refresh to try again.";
+  }).catch((error) => {
+    if (!active(ctx) || ctx.thinkingCatalog !== catalog) return;
+    if (error.status === 401) { report(error, ctx); return; }
+    catalog.error = error.status === 403 ? "This profile/token does not allow reading thinking levels." : "Could not load thinking levels. Refresh to try again.";
+  }).finally(() => {
+    catalog.loading = false;
+    if (active(ctx) && ctx.thinkingCatalog === catalog) updateControls();
+  });
 }
 
 function renderContent(parent, content) {
@@ -489,7 +527,7 @@ function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
     ctx.record.messages = []; ctx.partial = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
     ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
-    ctx.commands = undefined; ctx.commandError = null;
+    ctx.commands = undefined; ctx.commandError = null; ctx.thinkingCatalog = null;
     renderMessages();
   }
   ctx.meta = meta;
@@ -521,10 +559,12 @@ async function snapshot(ctx, initial = false) {
   const [messages, state] = await Promise.all([rpc(ctx, { type: "get_messages" }), rpc(ctx, { type: "get_state" })]);
   if (!active(ctx) || ctx.replacing) return null;
   ctx.record.messages = messages?.messages || [];
-  if (initial || revision === ctx.stateRevision) ctx.state = state || {};
+  const freshState = initial || revision === ctx.stateRevision;
+  if (freshState) ctx.state = state || {};
   if (ctx.partial && ctx.record.messages.some((message) => messageKey(message) && messageKey(message) === messageKey(ctx.partial))) ctx.partial = null;
   for (const message of ctx.record.messages) if (message.role === "toolResult") ctx.tools.delete(message.toolCallId);
   ctx.ready = true;
+  if (freshState) refreshThinkingLevels(ctx, initial);
   renderModels(ctx); scheduleRender();
   return cursor;
 }
@@ -602,8 +642,10 @@ function handleEvent(ctx, frame) {
       showNotice(event.error || "The agent process has ended. Resume a saved session to continue.", true);
       ctx.streamController.abort(); updateControls();
     }
-  } else if (type === "response" && ["set_model", "set_session_name", "abort", "prompt", "steer", "follow_up", "clear_queue"].includes(event.command)) {
-    requestRefresh(ctx);
+  } else if (type === "response" && ["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "set_session_name", "abort", "prompt", "steer", "follow_up", "clear_queue"].includes(event.command)) {
+    if (["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level"].includes(event.command)) ctx.stateRevision++;
+    if (["set_model", "cycle_model"].includes(event.command)) ctx.thinkingCatalog = null;
+    updateControls(); requestRefresh(ctx);
   } else if (["extension_error", "auto_retry_start"].includes(type)) {
     showNotice(event.error || event.errorMessage || "The agent is retrying a provider request.", true);
   } else if (type === "auto_retry_end" && event.success === false) {
@@ -770,7 +812,7 @@ function openNew() {
 $("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
   const ctx = current;
-  if (!canWrite(ctx) || $("composer").hidden || ctx.record.sending || ctx.record.readingImages) return;
+  if (!canWrite(ctx) || $("composer").hidden || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy) return;
   const draft = ctx.record.draft, text = draft.text.trim(), images = draft.images.slice(), version = draft.version, ownEpoch = epoch;
   if (!text && !images.length) return;
   if (/^\/auto(?:\s|$)/.test(text) && !ctx.meta.autoMode) {
@@ -815,12 +857,23 @@ $("stop").addEventListener("click", async () => {
 });
 $("model").addEventListener("change", async () => {
   const ctx = current;
-  if (!canWrite(ctx, "set_model") || ctx.modelBusy || ctx.state.isStreaming) return;
+  if (!canWrite(ctx, "set_model") || ctx.modelBusy || ctx.thinkingBusy || ctx.state.isStreaming) return;
   const [provider, modelId] = JSON.parse($("model").value);
-  ctx.modelBusy = true; updateControls();
+  ctx.modelBusy = true; ctx.stateRevision++; ctx.thinkingCatalog = null; updateControls();
   try { await rpc(ctx, { type: "set_model", provider, modelId }, true); if (active(ctx)) requestRefresh(ctx); }
   catch (error) { report(error, ctx, { write: true, command: "set_model", ambiguous: true }); }
-  finally { if (active(ctx)) { ctx.modelBusy = false; renderModels(ctx); } }
+  finally { if (active(ctx)) { ctx.modelBusy = false; renderModels(ctx); requestRefresh(ctx); } }
+});
+$("thinking-level").addEventListener("change", async () => {
+  const ctx = current, level = $("thinking-level").value;
+  if (!canWrite(ctx, "set_thinking_level") || ctx.modelBusy || ctx.thinkingBusy || ctx.state.isStreaming || ctx.state.isCompacting
+    || ctx.thinkingCatalog?.key !== thinkingModelKey(ctx.meta, ctx.state) || !ctx.thinkingCatalog.levels.includes(level)) return;
+  ctx.thinkingBusy = true; ctx.stateRevision++; updateControls();
+  try {
+    await rpc(ctx, { type: "set_thinking_level", level }, true);
+    if (active(ctx)) requestRefresh(ctx);
+  } catch (error) { report(error, ctx, { write: true, command: "set_thinking_level", ambiguous: true }); }
+  finally { if (active(ctx)) { ctx.thinkingBusy = false; updateControls(); requestRefresh(ctx); } }
 });
 
 $("auto-mode").addEventListener("click", async () => {
@@ -961,7 +1014,7 @@ $("new-session").addEventListener("click", openNew);
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
 $("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ profile: $("new-profile").value, ...(name ? { name } : {}) }); });
 $("refresh-sessions").addEventListener("click", () => {
-  if (current) { current.commands = undefined; current.commandError = null; }
+  if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; }
   refreshSessions();
   if (current?.online && current.ready) requestRefresh(current);
   else if (current) activate(current.meta, { reconnect: true });

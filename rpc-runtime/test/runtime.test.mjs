@@ -300,6 +300,41 @@ async function conversationFixture(t, overrides = {}, options = {}) {
     act: (changes = {}, requestOptions = {}) => request(f.baseUrl, route, { method: "POST", body: { ...body, ...changes }, ...requestOptions }) };
 }
 
+test("thinking levels use model-reported values and changing them requires write scope", async (t) => {
+  const reader = "thinking-reader", writer = "thinking-writer";
+  const cfg = config({ allowedCommands: undefined, auth: { tokens: [
+    { sha256: TOKEN_HASH, scopes: ALL_SCOPES },
+    { sha256: createHash("sha256").update(reader).digest("hex"), scopes: ["sessions:read"] },
+    { sha256: createHash("sha256").update(writer).digest("hex"), scopes: ["sessions:write"] },
+  ] } });
+  assert.ok(normalizeConfig(cfg).profiles.get("default").allowedCommands.has("set_thinking_level"));
+  const f = await fixture(t, cfg);
+  const id = await createSession(f.baseUrl), child = f.children[0];
+  const meta = (await request(f.baseUrl, `/v1/sessions/${id}`)).body.session;
+  let level = "low";
+  const levels = ["off", "low", "high", "max"], received = [];
+  child.stdin.on("data", (chunk) => {
+    const command = JSON.parse(chunk.toString()); received.push(command);
+    let data;
+    if (command.type === "get_available_thinking_levels") data = { levels };
+    if (command.type === "set_thinking_level") {
+      if (!levels.includes(command.level)) { child.output({ type: "response", id: command.id, command: command.type, success: false, error: "Unsupported level" }); return; }
+      level = command.level;
+    }
+    child.output({ type: "response", id: command.id, command: command.type, success: true, data });
+  });
+  const rpc = (body, token = TOKEN, native = meta.nativeSessionId) => request(f.baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", token, headers: { "X-Pi-Session-Id": native }, body });
+  assert.deepEqual((await rpc({ type: "get_available_thinking_levels" }, reader)).body.data.levels, levels);
+  assert.equal((await rpc({ type: "get_available_thinking_levels" }, writer)).response.status, 403);
+  assert.equal((await rpc({ type: "set_thinking_level", level: "max" }, reader)).response.status, 403);
+  assert.equal((await rpc({ type: "set_thinking_level", level: "max" }, TOKEN, RESUME_ID)).response.status, 409);
+  assert.equal(received.length, 1, "rejected mutations never reach Pi");
+  assert.equal((await rpc({ type: "set_thinking_level", level: "max" }, writer)).body.success, true);
+  assert.equal(level, "max");
+  assert.equal((await rpc({ type: "set_thinking_level", level: "unknown" })).body.success, false);
+  assert.equal(level, "max", "Pi rejects levels outside its model's capabilities");
+});
+
 test("conversation GET returns authoritative active-branch message IDs", async (t) => {
   const f = await conversationFixture(t);
   const result = await request(f.baseUrl, f.route);
@@ -648,7 +683,7 @@ test("web assets are public and allowlisted without weakening API authentication
   assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   assert.match(await page.text(), /Pi agent/);
-  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "styles.css", "icon.svg"]) {
+  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "styles.css", "icon.svg"]) {
     const response = await fetch(`${baseUrl}/${asset}`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");

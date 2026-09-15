@@ -16,6 +16,7 @@ const WEB_ASSETS = new Map([
   ["/attention.mjs", ["attention.mjs", "text/javascript; charset=utf-8"]],
   ["/tool-display.mjs", ["tool-display.mjs", "text/javascript; charset=utf-8"]],
   ["/commands.mjs", ["commands.mjs", "text/javascript; charset=utf-8"]],
+  ["/thinking.mjs", ["thinking.mjs", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/icon.svg", ["icon.svg", "image/svg+xml"]],
 ].map(([path, [file, type]]) => [path, { type, data: readFileSync(new URL(`./web/${file}`, import.meta.url)) }]));
@@ -44,6 +45,7 @@ const DEFAULT_ALLOWED_COMMANDS = [
   "set_auto_retry",
   "set_follow_up_mode",
   "set_model",
+  "set_thinking_level",
   "set_session_name",
   "set_steering_mode",
   "steer",

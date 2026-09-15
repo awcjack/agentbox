@@ -46,6 +46,17 @@ are cached per selection, and can be reloaded with Refresh. TUI-only built-ins
 are not advertised. `/auto on`, `/auto off`, and `/auto status` are suggested only
 when the process actually registers `auto`.
 
+The thinking-level selector beside the model shows Pi's current reasoning effort.
+Available choices come from `get_available_thinking_levels` for the selected
+model, including `xhigh`/`max` only where supported. A model with only `off` shows
+that value without an editable choice. Discovery failures leave the current
+level visible but disable changes; Refresh retries discovery. Changes use
+`set_thinking_level`, require `sessions:write`, carry the displayed native-session
+identity, and are confirmed by `get_state`; failed writes are never retried.
+The selector is disabled while streaming, compacting, changing models, or without
+write access. Custom command allowlists must include `get_available_thinking_levels`
+and `set_thinking_level`; both runtime and Nix defaults include them.
+
 If metadata does not report auto-mode support, the header shows **Auto: unknown**,
 not a misleading off state. The browser refuses to send `/auto` to the model in
 that case. Deploy the updated runtime and policy extension and start a new Pi

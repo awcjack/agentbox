@@ -1627,6 +1627,7 @@ in
             "set_auto_retry"
             "set_follow_up_mode"
             "set_model"
+            "set_thinking_level"
             "set_session_name"
             "set_steering_mode"
             "steer"

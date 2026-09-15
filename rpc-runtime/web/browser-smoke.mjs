@@ -15,6 +15,7 @@ const models = [
   { provider: "fixture", id: "pi-reasoning", name: "Pi Reasoning", input: ["text", "image"] },
 ];
 const sessions = new Map(), saved = new Map(), calls = [], serverErrors = [];
+const availableThinking = (session) => session.model?.id === "pi-reasoning" ? ["off", "minimal", "low", "medium", "high", "xhigh", "max"] : ["off"];
 const entryIds = new WeakMap();
 function conversationSnapshot(session) {
   let parentId = null;
@@ -55,7 +56,7 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -117,7 +118,7 @@ const server = createServer(async (request, response) => {
       saved.set(destination.nativeSessionId, destination);
       return json(response, 200, { session: meta(destination), draft });
     }
-    if (request.method === "POST" && (match[2] === "auto" || match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models", "get_commands"].includes(body.type)))) {
+    if (request.method === "POST" && (match[2] === "auto" || match[2] === "ui" || (match[2] === "rpc" && !["get_state", "get_messages", "get_available_models", "get_commands", "get_available_thinking_levels"].includes(body.type)))) {
       assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "web writes carry the current native session ID");
     }
     if (match[2] === "auto" && request.method === "POST") {
@@ -148,7 +149,7 @@ const server = createServer(async (request, response) => {
     }
     calls.push({ id: session.id, command: body });
     let data;
-    if (body.type === "get_state") data = { sessionId: session.nativeSessionId, sessionName: session.name, model: session.model, isStreaming: session.streaming, pendingMessageCount: session.queued.length };
+    if (body.type === "get_state") data = { sessionId: session.nativeSessionId, sessionName: session.name, model: session.model, thinkingLevel: session.thinkingLevel || "off", isStreaming: session.streaming, pendingMessageCount: session.queued.length };
     else if (body.type === "get_messages") {
       if (session.holdInitialSnapshot && !session.initialSnapshotResponse) {
         session.initialSnapshotResponse = response;
@@ -158,7 +159,23 @@ const server = createServer(async (request, response) => {
     }
     else if (body.type === "get_available_models") data = { models };
     else if (body.type === "get_commands") data = { commands: [{ name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
-    else if (body.type === "set_model") { session.model = models.find((model) => model.id === body.modelId); data = session.model; }
+    else if (body.type === "get_available_thinking_levels") {
+      if (session.denyThinking) return json(response, 403, { error: { code: "command_forbidden", message: "Thinking discovery is forbidden" } });
+      data = { levels: availableThinking(session) };
+      if (session.holdThinking) {
+        session.holdThinking = false;
+        await new Promise((resolve) => { session.releaseThinking = resolve; });
+      }
+    }
+    else if (body.type === "set_model") {
+      session.model = models.find((model) => model.id === body.modelId); data = session.model;
+      if (!availableThinking(session).includes(session.thinkingLevel)) session.thinkingLevel = "off";
+    }
+    else if (body.type === "set_thinking_level") {
+      assert.ok(availableThinking(session).includes(body.level), "only supported levels are sent");
+      if (session.rejectThinking) return json(response, 200, { type: "response", command: body.type, success: false, error: "Fixture thinking rejection" });
+      session.thinkingLevel = body.level;
+    }
     else if (body.type === "abort") { session.streaming = false; emit(session, { type: "agent_end" }); }
     else if (body.type === "prompt") {
       if (session.streaming) {
@@ -181,7 +198,7 @@ const server = createServer(async (request, response) => {
     } else throw new Error(`Unhandled fixture command ${body.type}`);
     const result = { type: "response", command: body.type, success: true, ...(data === undefined ? {} : { data }) };
     // Match the supervisor: read snapshots are HTTP-only, not SSE replay data.
-    if (!["get_state", "get_messages", "get_available_models", "get_commands"].includes(body.type)) emit(session, result);
+    if (!["get_state", "get_messages", "get_available_models", "get_commands", "get_available_thinking_levels"].includes(body.type)) emit(session, result);
     json(response, 200, result);
   } catch (error) { serverErrors.push(error.stack); if (!response.headersSent) json(response, 500, { error: { message: error.message } }); else response.destroy(); }
 });
@@ -309,6 +326,40 @@ try {
       await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-reasoning"]));
       await until(() => page.locator("#model").inputValue().then((value) => value.includes("pi-reasoning")), "model switched");
       await until(() => session.model.id === "pi-reasoning", "model RPC");
+      const thinking = page.locator("#thinking-level");
+      await until(() => thinking.isEnabled(), "thinking discovery");
+      assert.deepEqual(await thinking.locator("option").evaluateAll((nodes) => nodes.map((node) => node.value)), availableThinking(session));
+      await thinking.selectOption("max");
+      await until(() => thinking.inputValue().then((value) => value === "max"), "thinking level confirmed from Pi state");
+      assert.equal(session.thinkingLevel, "max");
+      assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "set_thinking_level").length, 1);
+      session.rejectThinking = true;
+      await thinking.selectOption("high");
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Fixture thinking rejection")), "thinking rejection reported");
+      assert.equal(session.thinkingLevel, "max");
+      await until(() => thinking.inputValue().then((value) => value === "max"), "rejected change retains confirmed thinking level");
+      session.rejectThinking = false;
+
+      const refreshThinking = async () => {
+        await openSidebar(); await page.locator("#refresh-sessions").click();
+        if (label === "mobile") await page.locator("#close-drawer").click();
+      };
+      session.denyThinking = true; await refreshThinking();
+      await until(() => thinking.getAttribute("title").then((text) => text.includes("does not allow")), "forbidden thinking discovery is graceful");
+      assert.equal(await thinking.isDisabled(), true);
+      session.denyThinking = false; session.holdThinking = true; await refreshThinking();
+      await until(() => Boolean(session.releaseThinking), "old-model thinking discovery held");
+      await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-fast"]));
+      await until(async () => await thinking.inputValue() === "off" && session.model.id === "pi-fast", "non-reasoning model clamps thinking to off");
+      session.releaseThinking();
+      await page.waitForTimeout(150);
+      assert.deepEqual(await thinking.locator("option").evaluateAll((nodes) => nodes.map((node) => node.value)), ["off"], "late old-model levels are discarded");
+      assert.equal(await thinking.isDisabled(), true);
+      await page.locator("#model").selectOption(JSON.stringify(["fixture", "pi-reasoning"]));
+      await until(() => thinking.isEnabled(), "thinking options follow the restored model");
+      await thinking.selectOption("max");
+      await until(() => thinking.inputValue().then((value) => value === "max"), "thinking restored");
+      await noOverflow(page);
 
       // Let the model-change snapshot settle before measuring click-only traffic.
       await page.waitForTimeout(250);
@@ -348,6 +399,7 @@ try {
       assert.equal(await page.locator("#prompt").inputValue(), "Inspect the project\na");
       await page.locator("#prompt").press("Enter");
       await until(() => session.streaming, "prompt accepted");
+      await until(() => page.locator("#thinking-level").isDisabled(), "thinking changes disabled while agent is running");
       await until(() => page.locator("#prompt").inputValue().then((value) => value === ""), "accepted draft cleared");
       assert.equal(await page.locator("#notice").isVisible(), false, "successful prompts do not show an acceptance bar");
       assert.equal(calls.find((call) => call.id === session.id && call.command?.type === "prompt").command.images[0].mimeType, "image/png");
@@ -391,6 +443,9 @@ try {
       await until(() => observer.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "true"), "auto mode synchronized across tabs");
       assert.equal(await observer.locator(".approval").count(), 1, "toggling auto does not answer an existing approval");
       await noOverflow(page);
+      session.thinkingLevel = "high";
+      emit(session, { type: "response", command: "set_thinking_level", success: true });
+      await until(() => observer.locator("#thinking-level").inputValue().then((value) => value === "high"), "thinking state synchronized across tabs");
       await page.locator(".approval .approve").click();
       await observer.locator(".approval").waitFor({ state: "hidden" });
       assert.ok(calls.some((call) => call.ui?.id === approvalId && call.ui.confirmed));
