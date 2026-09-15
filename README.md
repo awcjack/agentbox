@@ -100,6 +100,12 @@ For headless ChatGPT/Codex login, run `/login`, select `ChatGPT Plus/Pro
 (Codex)`, then choose `Device code login (headless)`. Pi stores and refreshes
 the result in `~/.pi/agent/auth.json`.
 
+Pi slash skills (`/skill:commit optional arguments`) embed the skill instructions
+once and substitute `$ARGUMENTS` (also `$ARGUMENT`) literally with the supplied
+arguments, or an empty string when omitted. Arguments are also appended for
+skills without placeholders. The agent is instructed to use the embedded skill
+without rereading its Markdown; referenced files can still be loaded as needed.
+
 ```nix
 services.agentbox = {
   enable = true;

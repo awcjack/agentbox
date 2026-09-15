@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { isIP } from "node:net"
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path"
 import {
@@ -476,11 +477,40 @@ export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies =
     await client?.shutdown()
   })
 
-  pi.on("before_agent_start", async () => {
+  // Use Pi's discovered commands, not a second scan of skill directories. This
+  // preserves trust filtering, collisions, /reload, and user-installed skills.
+  pi.on("input", async (event, ctx) => {
+    const match = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(event.text)
+    if (!match) return
+    const command = pi.getCommands().find((item) => item.name === `skill:${match[1]}`)
+    if (command?.source !== "skill") return
+    const path = command.sourceInfo.path
+    const args = (match[2] ?? "").trim()
+    let markdown: string
+    try {
+      markdown = await readFile(path, "utf8")
+    } catch (error) {
+      ctx.ui.notify(`Cannot load skill ${match[1]}: ${String(error)}`, "error")
+      return { action: "handled" }
+    }
+    // Claude-derived skills use $ARGUMENTS (and sometimes $ARGUMENT). Replace
+    // only whole placeholders, literally and once, without shell evaluation.
+    const body = markdown.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "")
+      .trim().replace(/\$ARGUMENTS?\b/g, () => args)
+    const block = `<skill name="${match[1]}" location="${path}">\nReferences are relative to ${dirname(path)}.\n\n${body}\n</skill>`
+    return { action: "transform", text: args ? `${block}\n\n${args}` : block, images: event.images }
+  })
+
+  pi.on("before_agent_start", async (event) => {
     if (process.env.AGENT_HISTORY_REQUESTS_ENABLED === "true" && sessionID) {
       await run("bash", [ARCHIVE, "cancel", "pi", sessionID])
     }
     await signal("start", sessionTitle)
+    const guidance = "When a user message contains a <skill ...> block, its instructions are already loaded. Follow that block directly; do not read its SKILL.md again unless explicitly asked to refresh it. Read referenced files as needed, resolving relative paths against the skill file's directory. For matching skills not already loaded in context, use read to load the skill file."
+    const original = "Use the read tool to load a skill's file when the task matches its description."
+    return { systemPrompt: event.systemPrompt.includes(original)
+      ? event.systemPrompt.replace(original, guidance)
+      : `${event.systemPrompt}\n\n${guidance}` }
   })
 
   pi.on("agent_start", async () => {

@@ -8,10 +8,12 @@ type Handler = (event: any, ctx: any) => Promise<any> | any
 
 const handlers = new Map<string, Handler[]>()
 const tools = new Map<string, any>()
+const commands: any[] = []
 let lspCreated = 0
 let lspClosed = 0
 const lspRequests: any[] = []
 const pi = {
+  getCommands: () => commands,
   on(name: string, handler: Handler) {
     handlers.set(name, [...(handlers.get(name) ?? []), handler])
   },
@@ -67,6 +69,47 @@ await sessionStart({}, {
 assert.equal(process.env.PI_SESSION_ID, "pi-session-test")
 assert.equal(handlers.has("session_info_changed"), true)
 assert.equal(handlers.has("agent_settled"), true)
+
+// Slash skills are expanded once with literal arguments, including RPC/queued
+// input. Resolve only Pi-discovered commands, never arbitrary user paths.
+const skillPath = join(root, "SKILL.md")
+commands.push({ name: "skill:commit", source: "skill", sourceInfo: { path: skillPath } })
+writeFileSync(skillPath, "---\r\nname: commit\r\ndescription: Commit\r\n---\r\nUse $ARGUMENTS and $ARGUMENT. Keep $ARGUMENTSuffix.\r\n")
+const input = handler("input")
+const images = [{ type: "image", data: "example", mimeType: "image/png" }]
+const args = "fix '$&' $ARGUMENTS `echo nope`\nsecond line"
+for (const source of ["interactive", "rpc", "extension"]) {
+  for (const streamingBehavior of [undefined, "steer", "followUp"]) {
+    const expanded = await input({ text: `/skill:commit\t${args}`, source, streamingBehavior, images }, ctx)
+    assert.equal(expanded.action, "transform")
+    assert.equal(expanded.text, `<skill name="commit" location="${skillPath}">\nReferences are relative to ${root}.\n\nUse ${args} and ${args}. Keep $ARGUMENTSuffix.\n</skill>\n\n${args}`)
+    assert.equal(expanded.images, images)
+    assert.equal(await input({ text: expanded.text, source }, ctx), undefined, "already expanded input is not expanded again")
+  }
+}
+assert.match((await input({ text: "/skill:commit" }, ctx)).text, /Use  and \. Keep \$ARGUMENTSuffix\./)
+writeFileSync(skillPath, "Updated instructions without frontmatter")
+assert.match((await input({ text: "/skill:commit scope" }, ctx)).text, /Updated instructions without frontmatter\n<\/skill>\n\nscope$/)
+for (const text of ["ordinary prompt", "/skill:unknown", "/skill:../../secret", "please /skill:commit"]) {
+  assert.equal(await input({ text }, ctx), undefined)
+}
+commands.unshift({ name: "skill:commit", source: "prompt" })
+assert.equal(await input({ text: "/skill:commit" }, ctx), undefined, "preserve command precedence")
+commands.length = 0
+assert.equal(await input({ text: "/skill:commit" }, ctx), undefined, "no stale command cache after reload")
+commands.push({ name: "skill:missing", source: "skill", sourceInfo: { path: join(root, "missing.md") } })
+let loadError = ""
+assert.deepEqual(await input({ text: "/skill:missing" }, { ui: { notify: (text: string) => { loadError = text } } }), { action: "handled" })
+assert.match(loadError, /Cannot load skill missing/)
+const skillDirective = "Use the read tool to load a skill's file when the task matches its description."
+for (const systemPrompt of [`Header\n${skillDirective}\nFooter`, "Custom system prompt"]) {
+  const result = await handler("before_agent_start")({ systemPrompt }, ctx)
+  assert.equal(result.systemPrompt.includes(skillDirective), false)
+  assert.match(result.systemPrompt, /instructions are already loaded/)
+  assert.match(result.systemPrompt, /do not read its SKILL.md again/)
+  assert.match(result.systemPrompt, /Read referenced files as needed/)
+  assert.match(result.systemPrompt, /matching skills not already loaded/)
+}
 
 assert.match(
   (await toolCall({ toolName: "read", input: { path: ".env" } }, ctx)).reason,
