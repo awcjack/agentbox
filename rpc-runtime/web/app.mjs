@@ -1,7 +1,7 @@
 import { ApiError, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { initSidebarResize } from "./sidebar.mjs";
+import { initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions } from "./commands.mjs";
@@ -219,7 +219,9 @@ function renderSessions() {
     button.dataset.activity = historical ? "history" : session.activity || session.status;
     if (!historical && current?.id === session.id) button.setAttribute("aria-current", "page");
     button.title = historical ? `Resume ${session.name || session.id}\n${session.cwd || session.profile}` : `${session.name || session.id}\n${session.profile}`;
-    button.append(element("span", "session-symbol", historical ? "/" : ">"));
+    const symbol = element("span", "session-symbol", sessionActivitySymbol(button.dataset.activity));
+    symbol.setAttribute("aria-hidden", "true");
+    button.append(symbol);
     const copy = element("span", "session-copy");
     copy.append(element("strong", "", displayTitle(session)));
     const date = session.modifiedAt || session.lastActivityAt || session.createdAt;

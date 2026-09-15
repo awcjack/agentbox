@@ -1,6 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initSidebarResize } from "./sidebar.mjs";
+import { initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
+
+test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
+  const expected = {
+    starting: "◷", running: "▶", waiting_reply: "?", waiting_action: "!",
+    idle: "✓", stopping: "■", exited: "×", history: "/",
+  };
+  for (const [activity, symbol] of Object.entries(expected)) {
+    assert.equal(sessionActivitySymbol(activity), symbol);
+  }
+  assert.equal(new Set(Object.values(expected)).size, Object.keys(expected).length);
+  assert.equal(sessionActivitySymbol("unknown"), ">");
+  assert.equal(sessionActivitySymbol(undefined), ">");
+});
+
+test("session icons follow transitions into and out of waiting states", () => {
+  assert.deepEqual(
+    ["starting", "running", "waiting_action", "running", "waiting_reply", "idle", "exited"].map(sessionActivitySymbol),
+    ["◷", "▶", "!", "▶", "?", "✓", "×"],
+  );
+});
 
 function setup(viewport = 1200) {
   const win = new EventTarget();

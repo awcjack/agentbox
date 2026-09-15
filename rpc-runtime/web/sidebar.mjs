@@ -1,3 +1,18 @@
+const activitySymbols = new Map([
+  ["starting", "◷"],
+  ["running", "▶"],
+  ["waiting_reply", "?"],
+  ["waiting_action", "!"],
+  ["idle", "✓"],
+  ["stopping", "■"],
+  ["exited", "×"],
+  ["history", "/"],
+]);
+
+export function sessionActivitySymbol(activity) {
+  return activitySymbols.get(activity) || ">";
+}
+
 export function initSidebarResize(doc = document) {
   const win = doc.defaultView;
   const workspace = doc.getElementById("workspace");
