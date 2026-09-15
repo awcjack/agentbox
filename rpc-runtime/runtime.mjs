@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { messageTitle } from "./web/session-title.mjs";
 
@@ -1017,7 +1017,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         authenticate(request, config, "sessions:read");
         const profileName = url.searchParams.get("profile");
         if (!config.profiles.has(profileName)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
-        return json(response, 200, await listHistory(config.profiles.get(profileName), profileName));
+        return json(response, 200, await listHistory(config.profiles.get(profileName), profileName, { includeArchived: url.searchParams.get("includeArchived") === "true" }));
       }
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
         authenticate(request, config, "sessions:read");
@@ -1239,6 +1239,8 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
         await session.stop();
         if (!session.exit) throw new HttpError(502, "stop_failed", "Pi has not exited; session ownership is retained");
+        try { await archiveHistory(session.profile, session.nativeSessionId); }
+        catch { throw new HttpError(502, "archive_failed", "Pi has stopped, but archiving failed; session ownership is retained so ending can be retried"); }
         sessions.delete(session.id);
         response.statusCode = 204;
         return response.end();

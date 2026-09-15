@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { readFileSync } from "node:fs";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -109,6 +109,34 @@ async function fixture(t, customConfig = config(), options = {}) {
   t.after(() => runtime.close());
   return { runtime, children, spawns, baseUrl };
 }
+
+test("end stops the child and archives history across runtime restarts", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-archive-runtime-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = config({ profiles: { default: { cwd: "/workspace", sessionDir: root } } });
+  const first = await fixture(t, settings);
+  const created = (await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  const source = join(root, `${created.nativeSessionId}.jsonl`);
+  const original = JSON.stringify({ type: "session", version: 3, id: created.nativeSessionId, cwd: "/workspace" }) + "\n";
+  await writeFile(source, original);
+  // A failed archive must retain the stopped runtime slot for an explicit retry.
+  const marker = join(root, `.archived-${created.nativeSessionId}`);
+  await mkdir(marker);
+  const failed = await request(first.baseUrl, `/v1/sessions/${created.id}`, { method: "DELETE" });
+  assert.equal(failed.body.error.code, "archive_failed");
+  assert.equal(first.children[0].exited, true);
+  assert.equal((await request(first.baseUrl, "/v1/sessions")).body.sessions.length, 1);
+  await rm(marker, { recursive: true });
+  assert.equal((await request(first.baseUrl, `/v1/sessions/${created.id}`, { method: "DELETE" })).response.status, 204);
+  assert.equal((await request(first.baseUrl, "/v1/sessions")).body.sessions.length, 0);
+  await first.runtime.close();
+  const second = await fixture(t, settings);
+  assert.deepEqual((await request(second.baseUrl, "/v1/history?profile=default")).body.sessions, []);
+  const archived = await request(second.baseUrl, "/v1/history?profile=default&includeArchived=true");
+  assert.equal(archived.body.sessions[0].id, created.nativeSessionId);
+  assert.equal(await readFile(source, "utf8"), original);
+  assert.equal((await request(second.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: created.nativeSessionId } })).response.status, 201);
+});
 
 test("list metadata tracks all sessions without per-session RPC or SSE subscriptions", async (t) => {
   const { baseUrl, children } = await fixture(t);

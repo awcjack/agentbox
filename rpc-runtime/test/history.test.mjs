@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, utimes,
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
+import { archiveHistory, createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
 
 const ID = "01991817-3dac-7000-8123-0123456789ab";
 const OLD_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
@@ -14,6 +14,26 @@ async function fixture(t) {
   return { root, profile: { sessionDir: root, cwd: "/workspace" } };
 }
 function header(id = ID, cwd = "/workspace") { return JSON.stringify({ type: "session", version: 3, id, cwd }); }
+
+test("archives persist without modifying history and reject unsafe markers", async (t) => {
+  const { root, profile } = await fixture(t);
+  const source = join(root, `${ID}.jsonl`), original = `${header()}\n`;
+  await writeFile(source, original);
+  await archiveHistory(profile, ID);
+  await archiveHistory(profile, ID); // Idempotent.
+  assert.deepEqual((await listHistory({ ...profile }, "default")).sessions, []);
+  assert.equal((await listHistory(profile, "default", { includeArchived: true })).sessions[0].id, ID);
+  assert.equal(await resolveHistorySession(profile, ID), source);
+  assert.equal(await readFile(source, "utf8"), original);
+  const marker = join(root, `.archived-${ID}`);
+  assert.equal((await stat(marker)).mode & 0o777, 0o600);
+  await rm(marker);
+  await symlink(source, marker);
+  await assert.rejects(archiveHistory(profile, ID));
+  assert.equal(await readFile(source, "utf8"), original);
+  await assert.rejects(archiveHistory(profile, "../../escape"));
+  await archiveHistory({ cwd: "/workspace" }, ID);
+});
 
 test("conversation history publishes a private v3 child including compaction and metadata, never rewrites source", async (t) => {
   const { root, profile } = await fixture(t);

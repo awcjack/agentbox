@@ -133,7 +133,26 @@ export async function createConversationHistory(profile, sourceId, snapshot, pre
   return path;
 }
 
-export async function listHistory(profile, profileName) {
+// Sidecar markers leave native Pi JSONL files untouched. Exclusive creation
+// makes repeated archive requests safe without following existing symlinks.
+export async function archiveHistory(profile, id) {
+  if (!profile.sessionDir) return; // Ephemeral profiles have no browsable history.
+  if (!NATIVE_SESSION_ID_RE.test(id)) throw new Error("invalid archive session ID");
+  let root;
+  try { root = await historyDirectory(profile); }
+  catch (error) { if (error.code === "ENOENT") return; throw error; }
+  if (!root) throw new Error("invalid history directory");
+  const path = join(root, `.archived-${id.toLowerCase()}`);
+  let handle;
+  try {
+    handle = await open(path, "wx", 0o600);
+    await handle.sync();
+  } catch (error) {
+    if (error.code !== "EEXIST" || !(await lstat(path)).isFile()) throw error;
+  } finally { await handle?.close(); }
+}
+
+export async function listHistory(profile, profileName, { includeArchived = false } = {}) {
   if (!profile.sessionDir) return { sessions: [], truncated: false };
   let directory, root;
   try {
@@ -153,6 +172,12 @@ export async function listHistory(profile, profileName) {
     if (!NATIVE_SESSION_ID_RE.test(id)) continue;
     const path = join(root, entry.name);
     try {
+      if (!includeArchived) {
+        try {
+          await lstat(join(root, `.archived-${id.toLowerCase()}`));
+          continue;
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+      }
       const info = await lstat(path);
       if (info.isFile()) files.push({ path, id, modified: info.mtimeMs });
     } catch { /* A session can be removed while the directory is being scanned. */ }

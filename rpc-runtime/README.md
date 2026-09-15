@@ -181,7 +181,7 @@ present, it must exactly match `allowedOrigins`.
 | `POST /v1/sessions` | `sessions:create` | Create or resume a supervised child |
 | `GET /v1/sessions` | `sessions:read` | List in-memory sessions |
 | `GET /v1/sessions/:id` | `sessions:read` | Session state and bounded stderr tail |
-| `DELETE /v1/sessions/:id` | `sessions:delete` | Abort and terminate the child |
+| `DELETE /v1/sessions/:id` | `sessions:delete` | Terminate the child and persistently archive its history |
 | `POST /v1/sessions/:id/rpc` | `sessions:read` for the read commands listed below; otherwise `sessions:write` | Forward an allowed RPC command and await its response |
 | `POST /v1/sessions/:id/ui` | `sessions:write` | Answer one pending extension dialog |
 | `POST /v1/sessions/:id/auto` | `sessions:write` | Set session auto mode using exactly `{"enabled":true}` or `{"enabled":false}` |
@@ -214,8 +214,19 @@ and `idle`; stopped processes retain their process status. Idle is reported only
 after `agent_settled`, not a low-level `agent_end` that may still retry or continue.
 The browser polls the lightweight session list every 1.5 seconds to update all
 sidebar rows, without opening an SSE stream or reading transcripts for each one.
-Ending a session removes its runtime and history rows for the current login;
-saved files are not deleted, and reload/login makes history available again.
+End & archive terminates the child and persistently hides its history, including
+across browser and runtime restarts. Native JSONL files are never deleted or
+rewritten: private `.archived-<native-uuid>` marker files live in the profile's
+session directory. Markers are written only after the child exits. An archive
+failure returns `archive_failed` and retains the stopped runtime slot for an
+explicit DELETE retry. Ephemeral profiles have no history to archive.
+
+`GET /v1/history?profile=default&includeArchived=true` includes archived history
+for API recovery; the normal sidebar excludes it. An exact archived UUID can
+still be explicitly resumed (starting a new process); its archive marker remains.
+To restore normal history visibility, an administrator can remove that UUID's
+marker from the configured session directory. There is no archive browser yet.
+Previously ended conversations are not retroactively archived.
 
 The tab title shows unread session counts, e.g. `1! 2 | Pi Agent | Agentbox`
 means one session needs input/approval and two have finished. Entering a session
