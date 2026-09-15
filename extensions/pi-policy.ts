@@ -7,8 +7,10 @@ import { APPROVAL_ENV, openApprovalClient, selectApproval } from "./pi-approval.
 const DEFAULT_CONFIG_PATH = "/etc/pi/agentbox-policy.json"
 const SIGNAL_PATH = "/home/agent/.local/bin/agent-signal.sh"
 const MAX_CONFIG_BYTES = 1024 * 1024
-const DEFAULT_TIMEOUT_MS = 30_000
-const MAX_TIMEOUT_MS = 300_000
+const DEFAULT_TIMEOUT_MS = 1_800_000
+const MAX_TIMEOUT_MS = 1_800_000
+const DEFAULT_AUTO_TIMEOUT_MS = 30_000
+const MAX_AUTO_TIMEOUT_MS = 300_000
 const MAX_DISPLAY_CHARS = 240
 const MAX_RULES = 1_000
 const MAX_RULE_ENTRIES = 128
@@ -157,7 +159,7 @@ function parseConfig(raw: string | Buffer, path: string): PolicyConfig {
       || typeof candidate.enable !== "boolean"
       || (candidate.provider !== undefined && (typeof candidate.provider !== "string" || candidate.provider.length > MAX_POLICY_STRING_CHARS))
       || (candidate.model !== undefined && (typeof candidate.model !== "string" || candidate.model.length > MAX_POLICY_STRING_CHARS))
-      || (candidate.timeout !== undefined && (!Number.isInteger(candidate.timeout) || (candidate.timeout as number) < 1 || (candidate.timeout as number) > MAX_TIMEOUT_MS))) {
+      || (candidate.timeout !== undefined && (!Number.isInteger(candidate.timeout) || (candidate.timeout as number) < 1 || (candidate.timeout as number) > MAX_AUTO_TIMEOUT_MS))) {
       throw new Error(`${path} has invalid auto permission settings`)
     }
     auto = candidate as unknown as AutoConfig
@@ -519,7 +521,7 @@ async function selectWithTimeout(ctx: any, title: string, timeout: number) {
 }
 
 async function autoApprove(ctx: ExtensionContext, config: AutoConfig, toolName: string, input: Record<string, unknown>, targets: string[], toolCallId: string) {
-  const timeout = config.timeout ?? DEFAULT_TIMEOUT_MS
+  const timeout = config.timeout ?? DEFAULT_AUTO_TIMEOUT_MS
   const deadline = Date.now() + timeout
   const controller = new AbortController()
   const abort = () => controller.abort()

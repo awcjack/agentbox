@@ -29,6 +29,20 @@ for (const answer of ["Allow once", "Deny", "allow", undefined]) {
   p.close()
 }
 
+// Both ends of the child transport accept a 30-minute human reply deadline.
+let longShown = false
+const longWait = pair(async (_title: string, _choices: string[], options: any) => {
+  longShown = true
+  assert.ok(options.timeout > 1_799_000 && options.timeout <= 1_800_000)
+  return "Allow once"
+})
+assert.equal(await longWait.client.ask("long human approval", 1_800_000), true)
+assert.equal(longShown, true)
+longShown = false
+assert.equal(await longWait.client.ask("over limit", 1_800_001), false)
+assert.equal(longShown, false)
+longWait.close()
+
 // Valid asks are unconditional in auto, even without UI. Off never reuses a grant.
 const autoPair = pair(async () => { throw new Error("must not prompt") }, false)
 autoEnabled = true

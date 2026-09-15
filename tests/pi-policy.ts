@@ -151,6 +151,24 @@ assert.equal(prompt.length <= 260, true)
 assert.deepEqual(tui.signals, ["waiting", "working"])
 assert.equal(tui.signals.some((entry) => entry.includes("printf")), false)
 
+// Human reply waits default to 30 minutes; explicit shorter waits still work.
+for (const configuredTimeout of [undefined, 1_800_000, 300_000, 1000]) {
+  const timed = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [], timeout: configuredTimeout }))
+  const expected = configuredTimeout ?? 1_800_000
+  let shown = false
+  const timedCtx = context({ ui: { select: async (_title: string, _choices: string[], options: any) => {
+    shown = true
+    assert.ok(options.timeout > expected - 1000 && options.timeout <= expected)
+    return "Allow once"
+  } } })
+  assert.equal(await call(timed.toolCall, "bash", { command: "pwd" }, timedCtx), undefined)
+  assert.equal(shown, true)
+}
+for (const timeout of [0, -1, 1.5, 1_800_001]) {
+  const timed = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [], timeout }))
+  assert.match((await call(timed.toolCall, "bash", { command: "pwd" })).reason, /failing closed/)
+}
+
 const noUi = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }))
 let noUiSelected = false
 const deniedWithoutUi = await call(noUi.toolCall, "read", { path: "README.md" }, context({

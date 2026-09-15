@@ -1268,9 +1268,9 @@ in
             description = "Managed Pi decision for unmatched targets. Auto mode approves asks; denials always block.";
           };
           timeoutMs = lib.mkOption {
-            type = lib.types.ints.between 1 300000;
-            default = 30000;
-            description = "Timeout for interactive Pi tool approvals.";
+            type = lib.types.ints.between 1 1800000;
+            default = 1800000;
+            description = "Timeout in milliseconds for interactive Pi tool approvals (default: 30 minutes).";
           };
           auto = lib.mkOption {
             type = lib.types.submodule {

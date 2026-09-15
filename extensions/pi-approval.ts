@@ -9,7 +9,7 @@ export const APPROVAL_TITLE_PREFIX = "Pi child approval "
 const MAX_FRAME = 4096
 const MAX_PENDING = 32
 const MAX_REQUESTS = 4096
-const MAX_TIMEOUT = 300_000
+const MAX_TIMEOUT = 1_800_000
 type Transport = { input: Readable; output: Writable }
 export type ApprovalContext = {
   hasUI: boolean

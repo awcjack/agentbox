@@ -118,7 +118,7 @@ services.agentbox = {
     enablePiWeb = true;    # browser TUI on http://localhost:4097
 
     piConfig.workflow.maxConcurrency = 4;
-    piConfig.permissions.timeoutMs = 30000;
+    piConfig.permissions.timeoutMs = 1800000; # default: 30 minutes
 
     # Empty by default. Values below are interpreted as environment variable
     # identifiers; keep the corresponding secret values in environmentFile.
@@ -138,6 +138,10 @@ services.agentbox = {
 `settings.piConfig.workflow` types roles and delegation limits.
 `settings.piConfig.permissions` types and bounds ordered
 `tools`/`patterns`/`decision` rules, generated policy size, and approval timeout.
+Human policy approvals, including forwarded child approvals, default to 30
+minutes (`timeoutMs`, range `1..1800000` milliseconds); expiry still denies the
+call. The `question` tool has no reply timeout and waits until answered or
+cancelled. These settings do not change classifier or MCP call timeouts.
 `settings.piConfig.mcpServers` supports stdio
 (`command`, `args`, `cwd`, env references) and Streamable HTTP (`url`, header
 references), per-server allow/deny tool globs, approval mode, and connection,
