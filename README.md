@@ -179,22 +179,47 @@ wins. A multi-target call with an effective explicit ask requires a human unless
 any target is denied. Existing allows and denials remain unchanged, including
 immutable sensitive-path and managed-write denials; neither auto nor human
 approval can override denials. Rules that resolve to `allow` bypass classification.
-With auto disabled, default asks also require human approval. The public decision
-schema remains `allow` / `ask` / `deny`.
+With auto disabled, default asks require human approval except for routine
+installed skill Markdown reads. The public decision schema remains
+`allow` / `ask` / `deny`.
+
+`read` of `.md` files under `~/.pi/agent/skills` or `~/.agents/skills` does not
+prompt when the effective decision is the default ask, even with auto off. This
+covers `SKILL.md` and Markdown references, not executing scripts, shell reads,
+writes, or arbitrary project Markdown. Both lexical and resolved paths must stay
+within the same installed skill root; symlink escapes do not gain this exemption.
+Explicit ask/deny rules, default deny, and sensitive-file guards still apply.
+
+With auto on, the classifier focuses on the latest user instruction and recent
+follow-up context. A clear request to commit and push a repository makes the
+normal scoped Git workflow eligible for auto approval: status/diff/log, staging,
+commit with normal hooks, and push to its configured remote. It no longer rejects
+that requested push solely as external publication or for lacking hook contents.
+This is not a blanket Git allow rule: commit-only requests do not authorize push;
+later restrictions and unrelated tasks supersede earlier intent. Force-push,
+remote changes, hook bypasses, unrelated repositories/commands, and ambiguous
+scope still require human approval unless independently allowed by managed rules.
 
 Classification uses a direct, tool-free `ctx.modelRegistry.complete` call with
 existing Pi authentication, not a delegated agent or separate auth setup. Evidence
-shared with the classifier provider includes all user text and up to 32 recent
-prior tool calls across the active session branch, plus the current tool call.
+shared with the classifier provider includes up to 12 recent user text messages
+and up to 32 prior tool calls across the active session branch, plus the current
+tool call. `latestUserRequestIndex` identifies the latest retained instruction.
 The history cutoff uses `toolCallId` to exclude the pending current call and any
 siblings after it. Assistant prose/thinking and tool results are excluded.
 Prior tool-call history has a 12000-character subbudget within the fixed
-32000-character evidence maximum. Whole oldest calls are omitted to fit, and a
-history-omitted flag discloses omissions to the classifier. User text and the
-current call are never truncated; evidence that cannot fit requires human approval.
-Non-text user history (including screenshots) also falls back to human approval;
-it is never silently discarded as evidence or treated as permission to proceed.
-Transcript tool calls are untrusted proposals, not proof of execution or
+32000-character evidence maximum. Whole oldest calls, then older user requests,
+may be omitted to fit; counts and a history-omitted flag disclose omissions.
+Prior-call request indices are remapped (`-1` means absent/omitted). The latest
+user instruction and current call are never truncated; if those cannot fit,
+human approval is required.
+
+Image bytes are not sent to the text classifier. `userRequestsWithAttachments`
+identifies messages with omitted non-text content. A historical screenshot no
+longer disables auto for later clear textual requests, but unseen image contents
+cannot establish authorization. An image-only latest request requires a human;
+otherwise available text must independently establish the action and scope.
+Transcript tool calls remain untrusted proposals, not proof of execution or
 authorization.
 
 The classifier requests a 128-output-token `maxTokens` limit.

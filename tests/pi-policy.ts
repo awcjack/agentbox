@@ -411,20 +411,21 @@ assert.equal(explicitNoUi.state.models, 0)
 const userEntry = (content: any) => ({ type: "message", message: { role: "user", content } })
 const toolPart = (id: string, input: any = { command: id }) => ({ type: "toolCall", id, name: "bash", arguments: input })
 const assistantEntry = (...content: any[]) => ({ type: "message", message: { role: "assistant", content } })
-async function evidenceFor(branch: any[], input: any = { path: "README.md" }) {
-  let payload: string | undefined
+async function evidenceFor(branch: any[], input: any = { path: "README.md" }, toolName = "read") {
+  let payload: string | undefined, systemPrompt = ""
   let attempts = 0
   const ctx = autoContext(async (_model: any, request: any) => {
     attempts++
     payload = request.messages[0].content[0].text
+    systemPrompt = request.systemPrompt
     return verdict("allow")
   })
   ctx.sessionManager = { getBranch: () => branch }
-  const result = await call(harness(autoPolicy(), { realpath: async (path: string) => path }).toolCall, "read", input, ctx)
+  const result = await call(harness(autoPolicy(), { realpath: async (path: string) => path }).toolCall, toolName, input, ctx)
   assert.equal(result, undefined)
   assert.equal(attempts, 1)
   assert.ok(payload)
-  return { evidence: JSON.parse(payload), payload }
+  return { evidence: JSON.parse(payload), payload, systemPrompt }
 }
 const priorInput = { command: "printf earlier", nested: { intact: [1, true] } }
 const history = await evidenceFor([
@@ -437,7 +438,8 @@ const history = await evidenceFor([
   assistantEntry(toolPart("later-in-branch")),
 ])
 assert.deepEqual(history.evidence, {
-  userRequests: ["First request", "Second request\nMore detail"], cwd: "/workspace/project", toolName: "read",
+  userRequests: ["First request", "Second request\nMore detail"], latestUserRequestIndex: 1, userRequestsWithAttachments: [], omittedUserRequestCount: 0,
+  cwd: "/workspace/project", toolName: "read",
   input: { path: "README.md" }, targets: ["README.md", "/workspace/project/README.md"],
   priorToolCalls: [
     { id: "before-user", toolName: "bash", input: { command: "before-user" }, userRequestIndex: -1 },
@@ -499,7 +501,7 @@ const stateRules = [
 const fallbackTitle = "Approve tool call? Auto could not approve; read: README.md"
 
 // Every auto failure asks immediately; approval is still single-call only.
-for (const failure of ["deny", "malformed", "error", "timeout", "missing-model", "missing-auth", "oversized-input", "image-history"]) {
+for (const failure of ["deny", "malformed", "error", "timeout", "missing-model", "missing-auth", "oversized-input", "image-only-latest"]) {
   const probe = autoProbe({ auto: { ...autoSettings, timeout: 5 } })
   let attempts = 0
   probe.ctx.modelRegistry.complete = async () => {
@@ -511,14 +513,14 @@ for (const failure of ["deny", "malformed", "error", "timeout", "missing-model",
   }
   if (failure === "missing-model") probe.ctx.modelRegistry.find = () => undefined
   if (failure === "missing-auth") probe.ctx.modelRegistry.hasConfiguredAuth = () => false
-  if (failure === "image-history") probe.ctx.sessionManager.getBranch = () => [userEntry([{ type: "text", text: "Inspect this" }, { type: "image", data: "image" }]), userEntry("yes")]
+  if (failure === "image-only-latest") probe.ctx.sessionManager.getBranch = () => [userEntry("Inspect this"), userEntry([{ type: "image", data: "image" }])]
   for (const human of ["Allow once", "Deny", "Allow once"]) {
     probe.state.human = human
     const result = await call(probe.toolCall, "read", { path: "README.md", ...(failure === "oversized-input" ? { extra: "x".repeat(32_001) } : {}) }, probe.ctx)
     assert.equal(result?.block, human === "Allow once" ? undefined : true, failure)
   }
   assert.deepEqual(probe.state.titles, Array(3).fill(fallbackTitle), failure)
-  assert.equal(attempts, ["missing-model", "missing-auth", "oversized-input", "image-history"].includes(failure) ? 0 : 3, failure)
+  assert.equal(attempts, ["missing-model", "missing-auth", "oversized-input", "image-only-latest"].includes(failure) ? 0 : 3, failure)
 }
 
 for (const unavailable of ["deny", "timeout", "no-ui"]) {
@@ -691,5 +693,106 @@ for (const kind of ["fallback", "explicit"]) {
   assert.equal(serial.state.models, kind === "explicit" ? 0 : 2)
   assert.deepEqual(serial.signals, ["waiting", "working", "waiting", "working"])
 }
+
+// Installed skill Markdown reads are routine even with auto off. They do not
+// include arbitrary Markdown, shell reads, scripts, writes, or symlink escapes.
+const skillHome = join(root, "skill-home")
+const skillRoots = [join(skillHome, ".pi/agent/skills"), join(skillHome, ".agents/skills")]
+const skillFiles: string[] = []
+for (const skillRoot of skillRoots) {
+  mkdirSync(join(skillRoot, "demo/references"), { recursive: true })
+  for (const name of ["SKILL.md", "references/usage.md"]) {
+    const path = join(skillRoot, "demo", name)
+    writeFileSync(path, "# Skill documentation\n"); skillFiles.push(path)
+  }
+}
+const skillEnv = { HOME: skillHome, PI_POLICY_CONFIG: "/managed/policy.json" }
+const skillsPolicy = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), { env: skillEnv }, false)
+for (const path of skillFiles) {
+  assert.equal(await call(skillsPolicy.toolCall, "read", { path }, context({ hasUI: false })), undefined)
+}
+assert.equal(await call(skillsPolicy.toolCall, "read", { path: "~/.pi/agent/skills/demo/SKILL.md" }, context({ hasUI: false })), undefined)
+assert.deepEqual(skillsPolicy.signals, [], "reading skill docs must not open an approval dialog")
+const outsideMd = join(root, "outside.md")
+writeFileSync(outsideMd, "# Not an installed skill\n")
+const escapeMd = join(skillRoots[0], "demo/escape.md"), secretMd = join(skillRoots[0], "demo/secret.md"), withinMd = join(skillRoots[0], "demo/alias.md")
+symlinkSync(outsideMd, escapeMd)
+symlinkSync(join(root, "safe/.env"), secretMd)
+symlinkSync(skillFiles[1], withinMd)
+assert.equal(await call(skillsPolicy.toolCall, "read", { path: withinMd }, context({ hasUI: false })), undefined)
+assert.match((await call(skillsPolicy.toolCall, "read", { path: secretMd })).reason, /sensitive path/)
+for (const [tool, input] of [
+  ["read", { path: outsideMd }], ["read", { path: escapeMd }],
+  ["read", { path: `${skillRoots[0]}-other/SKILL.md` }],
+  ["read", { path: join(skillRoots[0], "demo/run.sh") }],
+  ["read", { path: skillFiles[0], file_path: outsideMd }],
+  ["write", { path: skillFiles[0], content: "changed" }],
+  ["bash", { command: `cat ${skillFiles[0]}` }],
+  ["custom_tool", { path: skillFiles[0] }],
+] as const) assert.equal((await call(skillsPolicy.toolCall, tool, input)).block, true)
+for (const decision of ["ask", "deny"]) {
+  const explicit = harness(autoPolicy({ rules: [{ tools: ["read"], patterns: ["*"], decision }] }), { env: skillEnv })
+  const result = await call(explicit.toolCall, "read", { path: skillFiles[0] })
+  assert.equal(result.block, true, `explicit ${decision} still wins for skill docs`)
+}
+const defaultDenySkills = harness(JSON.stringify({ version: 1, defaultDecision: "deny", rules: [] }), { env: skillEnv })
+assert.equal((await call(defaultDenySkills.toolCall, "read", { path: skillFiles[0] })).block, true)
+
+// Clear later text intent remains usable after a screenshot. Image bytes are
+// not sent to the classifier and omitted content is explicitly disclosed.
+const requestedGit = await evidenceFor([
+  userEntry([{ type: "text", text: "Improve this UI" }, { type: "image", data: "IMAGE_BYTES_NOT_EVIDENCE" }]),
+  userEntry("Commit and push changes in agentbox"),
+  userEntry("Continue"),
+], { command: "git -C /workspace/personal/agentbox push" }, "bash")
+assert.deepEqual(requestedGit.evidence.userRequests, ["Improve this UI", "Commit and push changes in agentbox", "Continue"])
+assert.equal(requestedGit.evidence.latestUserRequestIndex, 2)
+assert.deepEqual(requestedGit.evidence.userRequestsWithAttachments, [0])
+assert.equal(requestedGit.payload.includes("IMAGE_BYTES_NOT_EVIDENCE"), false)
+assert.match(requestedGit.systemPrompt, /request to commit and push changes authorizes/)
+assert.match(requestedGit.systemPrompt, /Commit-only intent does not authorize push/)
+assert.match(requestedGit.systemPrompt, /force-push/)
+assert.match(requestedGit.systemPrompt, /Every segment of a compound shell command/)
+assert.match(requestedGit.systemPrompt, /new unrelated task does not inherit old commit\/push authorization/)
+for (const request of ["Do not push; commit only", "Stop that task and inspect README.md instead"]) {
+  const probe = autoProbe()
+  let checked = false
+  probe.ctx.sessionManager.getBranch = () => [userEntry("Commit and push agentbox"), userEntry(request)]
+  probe.ctx.modelRegistry.complete = async (_model: any, prompt: any) => {
+    const data = JSON.parse(prompt.messages[0].content[0].text)
+    assert.equal(data.userRequests[data.latestUserRequestIndex], request)
+    checked = true
+    return verdict("deny")
+  }
+  assert.equal((await call(probe.toolCall, "bash", { command: "git -C /workspace/personal/agentbox push" }, probe.ctx)).block, true)
+  assert.equal(checked, true)
+  assert.equal(probe.state.titles.length, 1, "a classifier rejection still asks, rather than caching old Git intent")
+}
+for (const decision of ["ask", "deny"]) {
+  const probe = autoProbe({ rules: [{ tools: ["bash"], patterns: ["*"], decision }] })
+  probe.ctx.sessionManager.getBranch = () => [userEntry("Commit and push agentbox")]
+  assert.equal((await call(probe.toolCall, "bash", { command: "git push" }, probe.ctx)).block, true)
+  assert.equal(probe.state.models, 0, "explicit policy rules take precedence over Git intent")
+}
+
+// Whole oldest prompts may be removed; the newest instruction is never cut.
+const recentHistory = await evidenceFor(Array.from({ length: 15 }, (_, index) => [
+  userEntry(index === 3 ? [{ type: "text", text: "Old task 3" }, { type: "image", data: "OMITTED_IMAGE" }] : index === 14 ? "Commit and push agentbox" : `Old task ${index}`),
+  assistantEntry(toolPart(`action-${index}`)),
+]).flat())
+assert.equal(recentHistory.evidence.userRequests.length, 12)
+assert.equal(recentHistory.evidence.latestUserRequestIndex, 11)
+assert.equal(recentHistory.evidence.userRequests[11], "Commit and push agentbox")
+assert.equal(recentHistory.evidence.omittedUserRequestCount, 3)
+assert.deepEqual(recentHistory.evidence.userRequestsWithAttachments, [0])
+assert.equal(recentHistory.payload.includes("OMITTED_IMAGE"), false)
+assert.equal(recentHistory.evidence.historyOmitted, true)
+assert.equal(recentHistory.evidence.priorToolCalls[0].userRequestIndex, -1)
+assert.equal(recentHistory.evidence.priorToolCalls[3].userRequestIndex, 0)
+const longPast = await evidenceFor([userEntry("old".repeat(20_000)), userEntry("Commit and push agentbox")])
+assert.deepEqual(longPast.evidence.userRequests, ["Commit and push agentbox"])
+assert.equal(longPast.evidence.latestUserRequestIndex, 0)
+assert.equal(longPast.evidence.omittedUserRequestCount, 1)
+assert.ok(longPast.payload.length <= 32_000)
 
 console.log("pi policy extension tests passed")

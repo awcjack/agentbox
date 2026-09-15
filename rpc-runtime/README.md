@@ -274,8 +274,13 @@ override denies, change auto-permission behavior, or grant blanket access.
 Requests use per-child IDs, bounded frames and deadlines that include queue time.
 Children without a working parent approval channel fail closed.
 
-A classifier denial, timeout, missing credentials, unsupported image history,
+A classifier denial, timeout, missing credentials, an image-only latest request,
 or other inability to classify immediately asks a human about that same call.
+Historical screenshots no longer automatically defeat later clear textual intent;
+omitted attachments are disclosed and cannot establish authorization. The latest
+user request and recent follow-ups guide classification, including explicitly
+requested normal commit/push operations. Installed skill Markdown reads default
+to no prompt, but explicit ask/deny rules and sensitive-path guards still win.
 There is no silent-denial threshold. Denied, cancelled, timed-out, or unavailable
 human approval still blocks; no classifier failure grants permission. Auto is a
 per-process opt-in, starts off, and resets on session start/switch/fork/tree/shutdown.
