@@ -408,11 +408,15 @@ try {
       assert.equal(calls.find((call) => call.id === session.id && call.command?.type === "prompt").command.images[0].mimeType, "image/png");
       update(session, { type: "text_delta", contentIndex: 0, delta: "Inspecting " });
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Inspecting")), "first streaming delta");
+      const streamingArticle = await page.locator("#messages .assistant").last().elementHandle();
+      const userArticle = await page.locator("#messages .user").first().elementHandle();
       // A snapshot during a stream contains no partial; later deltas must still render.
       await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_messages"), "message snapshot");
       update(session, { type: "text_delta", contentIndex: 0, delta: "the repository." });
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Inspecting the repository.")), "continued streaming delta");
       assert.equal(session.messages.filter((message) => message.role === "assistant").length, 0);
+      assert.ok(await streamingArticle.evaluate((node) => node.isConnected && node.textContent.includes("Inspecting the repository.")), "streaming updates preserve the article instead of replaying its entrance animation");
+      assert.ok(await userArticle.evaluate((node) => node.isConnected), "history remains mounted during streaming");
       await page.locator("#send-mode").selectOption("followUp");
       await page.locator("#prompt").fill("Then check tests"); await page.locator("#prompt").press("Enter");
       await until(() => session.queued.length === 1, "follow-up queued");
@@ -422,6 +426,11 @@ try {
       assert.equal(await page.locator(".thinking").count(), 0, "empty thinking is hidden");
       update(session, { type: "thinking_delta", contentIndex: 1, delta: "Check entry points and tests first." });
       await page.locator(".thinking").waitFor();
+      await page.locator(".thinking summary").click();
+      const thinkingPanel = await page.locator(".thinking").elementHandle();
+      update(session, { type: "thinking_delta", contentIndex: 1, delta: " More reasoning." });
+      await until(() => page.locator(".thinking").textContent().then((text) => text.includes("More reasoning.")), "thinking update");
+      assert.ok(await thinkingPanel.evaluate((node) => node.isConnected && node.open), "thinking stays mounted and expanded across deltas");
       const tool = { type: "toolCall", id: `call-${label}`, name: "read", arguments: { path: "src/main.mjs" } };
       update(session, { type: "toolcall_start", contentIndex: 2, id: tool.id, toolName: tool.name });
       update(session, { type: "toolcall_end", contentIndex: 2, toolCall: tool });
@@ -431,6 +440,11 @@ try {
       await page.locator(".approval").waitFor();
       assert.equal(await page.locator(".tool-preview").first().textContent(), "src/main.mjs");
       assert.equal(await page.locator(".tool-detail").first().getAttribute("open"), null, "path is visible without expanding");
+      await page.locator(".tool-detail summary").first().click();
+      const toolPanel = await page.locator(".tool-detail").first().elementHandle();
+      emit(session, { type: "tool_execution_update", toolCallId: tool.id, toolName: tool.name, partialResult: { content: [{ type: "text", text: "Reading entry point…" }] } });
+      await until(() => page.locator(".tool-detail").first().textContent().then((text) => text.includes("Reading entry point…")), "tool progress update");
+      assert.ok(await toolPanel.evaluate((node) => node.isConnected && node.open), "tool progress preserves the expanded panel");
       assert.equal(await page.locator("#composer").isVisible(), false);
       assert.equal(await page.locator(".activity").isVisible(), false);
       await noOverflow(page);

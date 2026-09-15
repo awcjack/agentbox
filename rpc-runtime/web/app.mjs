@@ -365,11 +365,45 @@ function renderTool(call, result, key) {
   }
   return detail;
 }
+// Keep live transcript nodes mounted: replacing the tree on every token resets
+// disclosure layout, image loading, selection and browser scroll anchoring.
+function patchTranscript(parent, next) {
+  const key = (node) => node?.nodeType === 1 ? node.dataset.detailKey || node.dataset.messageKey || "" : "";
+  let cursor = parent.firstChild;
+  for (const fresh of [...next.childNodes]) {
+    if (key(fresh) && key(cursor) !== key(fresh)) {
+      const match = [...parent.childNodes].find((node) => key(node) === key(fresh));
+      if (match) { parent.insertBefore(match, cursor); cursor = match; }
+      else { parent.insertBefore(fresh, cursor); continue; }
+    }
+    if (!cursor) { parent.append(fresh); continue; }
+    const old = cursor;
+    cursor = old.nextSibling;
+    if (old.nodeType !== fresh.nodeType || old.nodeName !== fresh.nodeName || key(old) !== key(fresh)) {
+      parent.replaceChild(fresh, old);
+    } else if (old.nodeType === 3) {
+      if (old.data !== fresh.data) old.data = fresh.data;
+    } else if (old.nodeType === 1) {
+      // These controls have closures over the rendered message/code. Use fresh
+      // handlers rather than retaining ones that would copy an earlier delta.
+      if (fresh.classList.contains("message-actions") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
+        parent.replaceChild(fresh, old);
+        continue;
+      }
+      for (const attr of [...old.attributes]) if (!fresh.hasAttribute(attr.name)) old.removeAttribute(attr.name);
+      for (const attr of fresh.attributes) if (old.getAttribute(attr.name) !== attr.value) old.setAttribute(attr.name, attr.value);
+      patchTranscript(old, fresh);
+    }
+  }
+  while (cursor) { const next = cursor.nextSibling; cursor.remove(); cursor = next; }
+}
+let transcriptContext = null;
 function renderMessages() {
   const ctx = current, root = $("messages");
+  if (transcriptContext !== ctx) { root.replaceChildren(); transcriptContext = ctx; }
+  const next = document.createElement("div");
   const open = new Set([...root.querySelectorAll("details[open]")].map((node) => node.dataset.detailKey));
   const previousTop = conversation.scrollTop;
-  root.replaceChildren();
   if (!ctx) { $("welcome").hidden = false; return; }
   const messages = visibleMessages(ctx.record.messages, ctx.partial);
   const results = new Map(ctx.tools);
@@ -380,6 +414,7 @@ function renderMessages() {
     const message = messages[index];
     if (message.role === "toolResult") continue;
     const article = element("article", `message ${message.role === "user" ? "user" : "assistant"}`);
+    article.dataset.messageKey = `${message.role}:${index}`;
     const header = element("div", "message-header");
     header.append(element("span", "avatar", message.role === "user" ? "u" : "pi"), element("span", "", message.role === "user" ? "You" : message.role === "assistant" ? "Pi agent" : message.role || "Context"));
     if (message.role === "assistant" && message.model) {
@@ -438,15 +473,16 @@ function renderMessages() {
       }
       if (actions.childElementCount) article.append(actions);
     }
-    root.append(article);
+    next.append(article);
     previousArticle = article; previousMessage = message;
   }
-  for (const [id, result] of results) if (!shown.has(id)) root.append(renderTool({ name: result.toolName, arguments: result.args }, result, id));
+  for (const [id, result] of results) if (!shown.has(id)) next.append(renderTool({ name: result.toolName, arguments: result.args }, result, id));
   if (ctx.meta?.status !== "running" && ctx.meta?.stderr) {
     const detail = element("details", "tool-detail"); detail.dataset.detailKey = "stderr";
-    detail.append(element("summary", "", "Process diagnostics"), element("pre", "", ctx.meta.stderr)); root.append(detail);
+    detail.append(element("summary", "", "Process diagnostics"), element("pre", "", ctx.meta.stderr)); next.append(detail);
   }
-  for (const node of root.querySelectorAll("details")) node.open = open.has(node.dataset.detailKey);
+  for (const node of next.querySelectorAll("details")) node.open = open.has(node.dataset.detailKey);
+  patchTranscript(root, next);
   $("welcome").hidden = Boolean(root.childElementCount);
   if (followBottom) conversation.scrollTop = conversation.scrollHeight;
   else conversation.scrollTop = previousTop;
