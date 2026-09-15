@@ -151,6 +151,33 @@ test("list metadata tracks all sessions without per-session RPC or SSE subscript
   assert.equal(await activity(second.id), "starting");
 });
 
+test("live metadata retains first-message titles and explicit names override previews", async (t) => {
+  const f = await fixture(t);
+  const session = (await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  const child = f.children[0];
+  const name = async () => (await request(f.baseUrl, "/v1/sessions")).body.sessions[0].name;
+  assert.equal(await name(), null);
+  child.output({ type: "response", command: "get_messages", success: true, data: { messages: [{ role: "user", content: "Inspect this project" }] } });
+  assert.equal(await name(), "Inspect this project");
+  child.output({ type: "response", command: "get_state", success: true, data: { sessionName: "", sessionId: session.nativeSessionId } });
+  assert.equal(await name(), "Inspect this project", "an unnamed native snapshot does not erase the preview");
+  child.output({ type: "response", command: "get_messages", success: true, data: { messages: [{ role: "user", content: "Later compacted context" }] } });
+  assert.equal(await name(), "Inspect this project");
+  child.output({ type: "response", command: "get_state", success: true, data: { sessionName: "Explicit name" } });
+  assert.equal(await name(), "Explicit name");
+});
+
+test("expired approval replies remain single-use and never reach Pi", async (t) => {
+  const f = await fixture(t);
+  const session = (await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  f.children[0].output({ type: "extension_ui_request", id: "expired", method: "confirm", title: "Allow?", timeout: 10 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const result = await request(f.baseUrl, `/v1/sessions/${session.id}/ui`, { method: "POST", body: { id: "expired", confirmed: true } });
+  assert.equal(result.body.error.code, "ui_request_not_found");
+  assert.equal(f.children[0].input, "");
+  assert.deepEqual((await request(f.baseUrl, `/v1/sessions/${session.id}`)).body.session.pendingUi, []);
+});
+
 test("auto mode changes require write scope, native identity, extension support and prompt permission", async (t) => {
   const reader = "read-only-token";
   const f = await fixture(t, config({ auth: { tokens: [

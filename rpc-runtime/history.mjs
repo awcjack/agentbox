@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { link, lstat, open, opendir, realpath, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { messageTitle } from "./web/session-title.mjs";
 
 // Pi currently creates UUIDv7 IDs; older persisted conversations use UUIDv4.
 export const NATIVE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -181,9 +182,7 @@ export async function listHistory(profile, profileName) {
         try { entry = JSON.parse(line); } catch { continue; }
         if (entry?.type === "session_info") name = typeof entry.name === "string" ? entry.name.trim() : "";
         if (!firstMessage && entry?.type === "message" && entry.message?.role === "user") {
-          const content = entry.message.content;
-          firstMessage = typeof content === "string" ? content : Array.isArray(content)
-            ? content.filter((block) => block?.type === "text").map((block) => block.text).join(" ") : "";
+          firstMessage = messageTitle([entry.message]);
         }
       }
       sessions.push({

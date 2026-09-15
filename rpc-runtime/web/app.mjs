@@ -6,6 +6,7 @@ import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
+import { sessionTitle } from "./session-title.mjs";
 
 initSidebarResize();
 
@@ -94,7 +95,7 @@ function updateControls() {
   $("stop").textContent = ctx?.stopping ? "Stopping..." : "Stop";
   $("model").disabled = !canWrite(ctx, "set_model") || streaming || ctx?.modelBusy || ctx?.thinkingBusy || !ctx?.record.models.length;
   renderThinking(ctx);
-  $("session-title").textContent = ctx ? ctx.state.sessionName || ctx.meta?.name || "Untitled session" : "Pi coding workspace";
+  $("session-title").textContent = ctx ? displayTitle(ctx.meta) : "Pi coding workspace";
   $("session-subtitle").textContent = ctx ? `${ctx.meta?.profile || "workspace"} / ${ctx.meta?.cwd || ctx.state.sessionId || ctx.id}` : "Code, tools, and persistent conversations.";
   $("session-status").textContent = !ctx ? "WORKSPACE" : !ctx.ready ? "SYNCING" : readOnly ? "READ ONLY" : ctx.meta?.status !== "running" ? (ctx.meta?.status || "OFFLINE").toUpperCase() : !ctx.online ? "OFFLINE" : streaming ? "WORKING" : "READY";
   $("session-status").classList.toggle("working", streaming);
@@ -200,6 +201,11 @@ function drawer(open) {
 function updateTabTitle(viewedId = document.visibilityState === "visible" && document.hasFocus() ? current?.id : null) {
   document.title = attentionTitle(attention.update(sessions.filter((session) => !records.get(session.id)?.ending), viewedId), baseTitle);
 }
+function displayTitle(session) {
+  const ctx = current?.id === session?.id ? current : null;
+  const saved = history.find((item) => item.profile === session?.profile && item.id === session?.nativeSessionId);
+  return sessionTitle(session, ctx?.state, records.get(session?.id)?.messages, saved);
+}
 function renderSessions() {
   updateTabTitle();
   const root = $("sessions");
@@ -215,7 +221,7 @@ function renderSessions() {
     button.title = historical ? `Resume ${session.name || session.id}\n${session.cwd || session.profile}` : `${session.name || session.id}\n${session.profile}`;
     button.append(element("span", "session-symbol", historical ? "/" : ">"));
     const copy = element("span", "session-copy");
-    copy.append(element("strong", "", session.name || "Untitled session"));
+    copy.append(element("strong", "", displayTitle(session)));
     const date = session.modifiedAt || session.lastActivityAt || session.createdAt;
     const parsed = new Date(date);
     const when = Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -514,7 +520,17 @@ function renderApprovals(ctx) {
         ctx.uiRevision++;
         ctx.record.uiDrafts.delete(id);
         ctx.meta.pendingUi = ctx.meta.pendingUi.filter((item) => item.id !== id); renderApprovals(ctx);
-      } catch (error) { report(error, ctx, { write: true, ambiguous: true }); }
+      } catch (error) {
+        if (!active(ctx)) return;
+        if (error.code === "ui_request_not_found") {
+          // Expiry or another client's reply won the race. Never retry an answer.
+          ctx.uiRevision++;
+          ctx.record.uiDrafts.delete(id);
+          ctx.meta.pendingUi = (ctx.meta.pendingUi || []).filter((item) => item.id !== id);
+          renderApprovals(ctx);
+          showNotice("This request expired or was already answered. Refreshing pending requests.");
+        } else report(error, ctx, { write: true, ambiguous: true });
+      }
       finally {
         if (active(ctx)) { card.dataset.busy = "false"; updateControls(); requestRefresh(ctx); }
       }
@@ -565,7 +581,7 @@ async function snapshot(ctx, initial = false) {
   for (const message of ctx.record.messages) if (message.role === "toolResult") ctx.tools.delete(message.toolCallId);
   ctx.ready = true;
   if (freshState) refreshThinkingLevels(ctx, initial);
-  renderModels(ctx); scheduleRender();
+  renderModels(ctx); renderSessions(); scheduleRender();
   return cursor;
 }
 function requestRefresh(ctx) {

@@ -56,7 +56,7 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "session-title.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -142,8 +142,11 @@ const server = createServer(async (request, response) => {
       session.clients.add(response); response.on("close", () => session.clients.delete(response)); return;
     }
     if (match[2] === "ui") {
+      if (session.expireUiOnReply === body.id) session.pendingUi = session.pendingUi.filter((request) => request.id !== body.id);
       const pending = session.pendingUi.find((request) => request.id === body.id);
-      calls.push({ id: session.id, ui: body }); resolveUi(session, body.id);
+      calls.push({ id: session.id, ui: body });
+      if (!pending) return json(response, 404, { error: { code: "ui_request_not_found", message: "pending extension UI request not found" } });
+      resolveUi(session, body.id);
       if (pending?.method === "select" && body.value === "2. Other (type an answer)") requestUi(session, { method: "input", title: pending.title, placeholder: "Type your answer" });
       return json(response, 202, { accepted: true });
     }
@@ -450,6 +453,14 @@ try {
       await observer.locator(".approval").waitFor({ state: "hidden" });
       assert.ok(calls.some((call) => call.ui?.id === approvalId && call.ui.confirmed));
       await observer.close();
+      const expiredId = requestUi(session, { method: "confirm", title: "Expiring approval" });
+      const expiredCard = page.locator(`.approval[data-id="${expiredId}"]`);
+      await expiredCard.waitFor(); session.expireUiOnReply = expiredId;
+      await expiredCard.locator(".approve").click();
+      await expiredCard.waitFor({ state: "hidden" });
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("expired or was already answered")), "stale approval gets a friendly notice");
+      await page.waitForTimeout(150);
+      assert.equal(calls.filter((call) => call.ui?.id === expiredId).length, 1, "expired approvals are never retried");
       for (const [method, value] of [["select", "Allow once"], ["input", "test input"], ["editor", "edited approval\nsecond line"]]) {
         const id = requestUi(session, { method, title: `Approval ${method}`, options: ["Deny", "Allow once"], prefill: method === "editor" ? "original" : undefined });
         const card = page.locator(`.approval[data-id="${id}"]`); await card.waitFor();

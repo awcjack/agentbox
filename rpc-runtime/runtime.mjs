@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
 import { listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
+import { messageTitle } from "./web/session-title.mjs";
 
 const WEB_ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
@@ -17,6 +18,7 @@ const WEB_ASSETS = new Map([
   ["/tool-display.mjs", ["tool-display.mjs", "text/javascript; charset=utf-8"]],
   ["/commands.mjs", ["commands.mjs", "text/javascript; charset=utf-8"]],
   ["/thinking.mjs", ["thinking.mjs", "text/javascript; charset=utf-8"]],
+  ["/session-title.mjs", ["session-title.mjs", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/icon.svg", ["icon.svg", "image/svg+xml"]],
 ].map(([path, [file, type]]) => [path, { type, data: readFileSync(new URL(`./web/${file}`, import.meta.url)) }]));
@@ -498,6 +500,7 @@ class Session extends EventEmitter {
     this.resume = resume ?? null;
     this.nativeSessionId = resume ?? id;
     this.name = name ?? null;
+    this.previewName = null;
     this.config = config;
     this.now = now;
     this.uuid = uuid;
@@ -560,7 +563,7 @@ class Session extends EventEmitter {
       id: this.id,
       profile: this.profileName,
       cwd: this.profile.cwd,
-      name: this.name,
+      name: this.name?.trim() || this.previewName,
       nativeSessionId: this.nativeSessionId,
       conversationReplacing: this.conversationReplacing,
       latestEventId: this.events.nextId - 1,
@@ -645,6 +648,13 @@ class Session extends EventEmitter {
     if (record.type === "response" && record.command === "get_state" && record.success && record.data) {
       if (typeof record.data.sessionName === "string") this.name = record.data.sessionName;
       if (NATIVE_SESSION_ID_RE.test(record.data.sessionId ?? "")) this.nativeSessionId = record.data.sessionId;
+    }
+    if (record.type === "response" && record.command === "get_messages" && record.success && Array.isArray(record.data?.messages)) {
+      // Keep an established first-message preview across compacted snapshots.
+      this.previewName ||= messageTitle(record.data.messages) || null;
+    }
+    if (["message_start", "message_end"].includes(record.type) && !this.previewName) {
+      this.previewName = messageTitle([record.message]) || null;
     }
     let approvalOwner;
     if (record.type === "extension_ui_request" && record.method === "select" && typeof record.title === "string" && record.title.startsWith("Pi child approval ")) {
