@@ -22,8 +22,8 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   page exit. No cookies, local/session storage, IndexedDB, or service worker.
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,
   streaming steering/follow-up selection, queue counts, and stop-current-run.
-- End session with confirmation uses `DELETE /v1/sessions/:id` to free runtime
-  capacity without deleting saved history. Delete-scope denial disables this
+- End & archive with confirmation uses `DELETE /v1/sessions/:id` to stop the
+  process and persistently hide saved history without deleting it. Delete-scope denial disables this
   control independently of write access. Successful empty `204` responses work.
 - Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
   previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
@@ -177,8 +177,9 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
   invent a new deadline when restoring a request with only a relative timeout.
 - Exited children cannot answer snapshot RPCs. Cached messages and bounded
   stderr remain inspectable in this tab; resume persisted history to reload the
-  conversation in a running child. End session releases the supervised process,
-  not the persisted conversation. Drafts are not saved into that history.
+  conversation in a running child. End & archive releases the supervised process
+  and hides the persisted conversation across restarts. API recovery is documented
+  in the runtime README; there is no archive browser yet. Drafts are not saved into that history.
 - When first joining a delta-only stream mid-message, text before the captured
   cursor is unavailable from `get_messages`. New deltas are displayed immediately;
   completion reconciles the full message from the authoritative snapshot.

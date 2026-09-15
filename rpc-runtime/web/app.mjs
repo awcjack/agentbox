@@ -78,7 +78,7 @@ function updateControls() {
   $("profile-filter").disabled = !token || !profiles.length;
   $("logout").disabled = !token;
   $("end-session").disabled = !ctx || !token || deleteDenied || ctx.record.ending;
-  $("end-session").textContent = ctx?.record.ending ? "Ending..." : "End session";
+  $("end-session").textContent = ctx?.record.ending ? "Ending..." : "End & archive";
   const autoMode = ctx?.meta?.autoMode;
   $("auto-mode").disabled = !canWrite(ctx) || !autoMode?.available || ctx.record.autoModeBusy;
   $("auto-mode").setAttribute("aria-pressed", String(autoMode?.enabled === true));
@@ -940,7 +940,7 @@ $("end-form").addEventListener("submit", async (event) => {
       restoreDraft(); renderMessages(); setNetwork("online", "Connected");
     }
     renderSessions(); updateControls();
-    showNotice("Session ended and removed from the sidebar. Saved history is retained; reload to browse it again.");
+    showNotice("Session stopped and archived. Saved history is retained and stays hidden after restart.");
     await refreshSessions();
   } catch (error) {
     if (ownEpoch !== epoch) return;

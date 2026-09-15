@@ -30,7 +30,7 @@
         <div class="session-heading"><h1 id="session-title">Pi coding workspace</h1><p id="session-subtitle">Code, tools, and persistent conversations.</p></div>
         <span id="session-status" class="status-pill">WORKSPACE</span>
         <button id="auto-mode" class="auto-toggle" type="button" aria-label="Auto permission mode" aria-pressed="false" title="Auto mode is off. Normal permission rules apply." disabled>Auto: off</button>
-        <button id="end-session" class="text-button" disabled>End session</button>
+        <button id="end-session" class="text-button" disabled>End &amp; archive</button>
       </header>
       <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="Dismiss notification">&times;</button></div>
       <div id="conversation" class="conversation" tabindex="0" aria-label="Conversation">
@@ -85,9 +85,9 @@
   </dialog>
   <dialog id="end-dialog" aria-labelledby="end-title">
     <form id="end-form" class="dialog-body">
-      <span class="dialog-eyebrow">RELEASE RUNTIME CAPACITY</span><h2 id="end-title">End this session?</h2>
-      <p id="end-description"></p><p>This stops the Pi process and its tools. Persisted conversation history is not deleted and can be resumed. Unsent drafts are not part of that history.</p>
-      <button type="submit" class="primary-button">End session</button><button type="button" id="cancel-end" class="text-button">Keep session open</button>
+      <span class="dialog-eyebrow">RELEASE RUNTIME CAPACITY</span><h2 id="end-title">End and archive this session?</h2>
+      <p id="end-description"></p><p>This stops the Pi process and its tools, and archives the conversation. Saved history is retained but stays hidden from the sidebar, including after restart. Unsent drafts are not saved.</p>
+      <button type="submit" class="primary-button">End &amp; archive</button><button type="button" id="cancel-end" class="text-button">Keep session open</button>
     </form>
   </dialog>
   <noscript>This workspace requires JavaScript. No build or browser extensions are needed.</noscript>
