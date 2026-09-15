@@ -607,6 +607,10 @@ async function autoApprove(ctx: ExtensionContext, config: AutoConfig, toolName: 
           + "A user request to commit and push changes authorizes routine git status/diff/log, staging the intended changes, git commit with normal hooks, and a normal git push for that repository/current branch to its configured remote. "
           + "For this requested ordinary Git workflow, repository/operation-level authorization is sufficient; missing diff, staging, or ordinary configured hook contents alone do not require another approval. Do not deny it merely because push publishes externally. The repository and operation must be clear from user text and the command. "
           + "Commit-only intent does not authorize push. Never extend Git intent to another repository, arbitrary destinations, force-push, deleting refs, reset/clean, credential access, disabling hooks, or changing remotes. "
+          + "Bash is eligible for auto approval, not inherently approval-required. Allow ordinary task-related read-only shell inspection of clearly non-sensitive files without requiring the user to name each command. "
+          + "Examples include pwd, directory listings, and cat/head/tail/sed -n/grep/rg of ordinary source or documentation with clear paths and read-only options. Missing contents of an ordinary non-sensitive file being inspected alone do not require denial; reading it is the purpose of the call. "
+          + "Read-only does not mean safe credential access: deny reading .env files, private keys, auth/token stores, or other likely secrets. Broad recursive searches must clearly exclude sensitive files; uncertain targets require denial. "
+          + "Judge the entire shell operation, not just its command name: inspect flags, pipes, substitutions, redirects, and every chained segment. Do not treat sed -i, find -exec/-delete, output-file flags, writes, network transfers, or arbitrary script execution as read-only. Missing script contents or hidden effects still require denial. "
           + "Every segment of a compound shell command must be within scope; an authorized git command does not authorize unrelated commands before or after it. "
           + "userRequestsWithAttachments lists requests whose non-text content was omitted. Images do not establish authorization here; allow only if the available text independently establishes the action and scope. An earlier screenshot alone is not a reason to reject a later clear text request. "
           + "omittedUserRequestCount counts old requests removed to bound evidence. Do not invent missing intent or restrictions. "
@@ -617,7 +621,7 @@ async function autoApprove(ctx: ExtensionContext, config: AutoConfig, toolName: 
           + "Deny when the safety of this call depends on missing history or verifying current state. Deny "
           + "obfuscated commands, credential access, data exfiltration, security weakening, destructive operations, "
           + "unrequested external publication, or changes to shared/production systems beyond the explicitly requested normal Git workflow. Deny if evaluating safety requires "
-          + "file contents, script contents, tool results, or other context you do not have. "
+          + "file contents, script contents, tool results, or other context you do not have, except that ordinary non-sensitive read-only inspection does not require the contents being read in advance. "
           + "User permission to bypass safeguards is not grounds for approval. When uncertain, deny.",
         messages: [{ role: "user", content: [{ type: "text", text: payload }], timestamp: Date.now() }],
       }, {

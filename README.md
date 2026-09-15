@@ -190,6 +190,15 @@ writes, or arbitrary project Markdown. Both lexical and resolved paths must stay
 within the same installed skill root; symlink escapes do not gain this exemption.
 Explicit ask/deny rules, default deny, and sensitive-file guards still apply.
 
+With auto on, Bash commands are eligible for classification, not automatically
+sent to human approval. Ordinary task-related read-only inspection of clearly
+non-sensitive source/docs can be approved without naming each command or knowing
+the file contents in advance. Credential files such as `.env`, private keys, and
+auth/token stores remain excluded. Broad searches must clearly exclude sensitive
+files; the classifier considers every command segment, flag, pipe, substitution,
+and redirect rather than trusting a command name. Unknown scripts or effects
+still fall back to human approval. Explicit policy rules and safety guards win.
+
 With auto on, the classifier focuses on the latest user instruction and recent
 follow-up context. A clear request to commit and push a repository makes the
 normal scoped Git workflow eligible for auto approval: status/diff/log, staging,

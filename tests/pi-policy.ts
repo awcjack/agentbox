@@ -427,6 +427,18 @@ async function evidenceFor(branch: any[], input: any = { path: "README.md" }, to
   assert.ok(payload)
   return { evidence: JSON.parse(payload), payload, systemPrompt }
 }
+// Stubbed verdicts test classifier routing/evidence, not live model accuracy.
+const readOnlyBash = await evidenceFor([userEntry("Inspect the project's README")], { command: "head -n 80 README.md" }, "bash")
+assert.equal(readOnlyBash.evidence.toolName, "bash")
+assert.equal(readOnlyBash.evidence.input.command, "head -n 80 README.md")
+assert.match(readOnlyBash.systemPrompt, /Bash is eligible for auto approval/)
+assert.match(readOnlyBash.systemPrompt, /without requiring the user to name each command/)
+assert.match(readOnlyBash.systemPrompt, /deny reading \.env files/)
+assert.match(readOnlyBash.systemPrompt, /Broad recursive searches must clearly exclude sensitive files/)
+assert.match(readOnlyBash.systemPrompt, /inspect flags, pipes, substitutions, redirects/)
+assert.match(readOnlyBash.systemPrompt, /Missing script contents or hidden effects still require denial/)
+assert.match(readOnlyBash.systemPrompt, /does not require the contents being read in advance/)
+
 const priorInput = { command: "printf earlier", nested: { intact: [1, true] } }
 const history = await evidenceFor([
   assistantEntry(toolPart("before-user")),
