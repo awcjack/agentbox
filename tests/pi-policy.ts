@@ -13,7 +13,9 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
   const commands = new Map<string, any>()
   const reads: string[] = []
   const signals: string[] = []
+  const events = new Map<string, (request: unknown) => void>()
   const pi = {
+    events: { on: (name: string, handler: (request: unknown) => void) => events.set(name, handler) },
     registerCommand(name: string, command: any) { commands.set(name, command) },
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler])
@@ -32,18 +34,28 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
   const command = (args: string, ctx = context()) => commands.get("auto").handler(args, ctx)
   let initialized = false
   return {
-    // Legacy classifier fixtures explicitly opt in before their first tool call.
+    // Legacy classifier fixtures explicitly opt into review before their first tool call.
     // startAuto=false exercises the actual production default (off).
     async toolCall(event: any, ctx: any) {
       if (!initialized) {
         initialized = true
         let enabled = false
         try { enabled = startAuto && JSON.parse(String(config)).auto?.enable === true } catch {}
-        if (enabled) await command("on")
+        if (enabled) await command("review")
       }
       return handlers.get("tool_call")![0](event, ctx)
     },
     command, reads, signals,
+    requestApproval(ctx: any, summary = "MCP tool: docs/search", timeout = 1000) {
+      let answer = Promise.resolve(false)
+      events.get("agentbox:approval-request")?.({ context: ctx, summary, timeout, reply: (value: Promise<boolean>) => { answer = value } })
+      return answer
+    },
+    queryAuto() {
+      let enabled = false
+      events.get("agentbox:auto-query")?.({ reply: (value: boolean) => { enabled = value } })
+      return enabled
+    },
     async lifecycle(name: string, ctx = context()) {
       assert.ok(handlers.has(name), `Missing lifecycle handler: ${name}`)
       for (const handler of handlers.get(name)!) await handler({ type: name }, ctx)
@@ -320,7 +332,7 @@ assert.equal(cancelledAttempts, 1)
 assert.equal(pendingSignal?.aborted, true)
 
 for (const settings of [null, {}, { ...autoSettings, extra: true }, { ...autoSettings, enable: "true" },
-  { ...autoSettings, provider: " " }, { ...autoSettings, model: "" }, { ...autoSettings, timeout: 0 },
+  { ...autoSettings, provider: 42 }, { ...autoSettings, model: null }, { ...autoSettings, timeout: 0 },
   { ...autoSettings, timeout: 300_001 }, { ...autoSettings, timeout: 1.5 }]) {
   const invalid = harness(autoPolicy({ auto: settings }))
   assert.match((await call(invalid.toolCall, "read", { path: "README.md" }, autoContext())).reason, /failing closed/)
@@ -579,12 +591,12 @@ assert.equal(toggleModels, 0); assert.equal(togglePrompts, 1)
 await toggled.command("on", toggleContext)
 assert.deepEqual(statuses.at(-1), { available: true, enabled: true })
 assert.equal(await call(toggled.toolCall, "read", { path: "README.md" }, toggleContext), undefined)
-assert.equal(toggleModels, 1); assert.equal(togglePrompts, 1)
+assert.equal(toggleModels, 0); assert.equal(togglePrompts, 1)
 await toggled.command("status", toggleContext)
 assert.equal(statuses.at(-1).enabled, true)
 await toggled.command("off", toggleContext)
 await call(toggled.toolCall, "read", { path: "README.md" }, toggleContext)
-assert.equal(toggleModels, 1); assert.equal(togglePrompts, 2)
+assert.equal(toggleModels, 0); assert.equal(togglePrompts, 2)
 await toggled.command("", toggleContext)
 assert.equal(statuses.at(-1).enabled, true)
 await toggled.command("not-a-mode", toggleContext)
@@ -596,7 +608,7 @@ await unavailableAuto.command("on", toggleContext)
 assert.deepEqual(statuses.at(-1), { available: false, enabled: false })
 const independent = harness(autoPolicy(), {}, false)
 await call(independent.toolCall, "read", { path: "README.md" }, toggleContext)
-assert.equal(toggleModels, 1, "another session remains off")
+assert.equal(toggleModels, 0, "another session remains off")
 
 const childSummaries: string[] = []
 let childClosed = 0, childSignal: AbortSignal | undefined
@@ -687,7 +699,7 @@ for (const stage of ["model", "human"]) {
 for (const kind of ["fallback", "explicit"]) {
   const serial = autoProbe({ rules: stateRules, timeout: 5_000 })
   // Explicit opt-in before starting concurrent calls avoids racing test setup.
-  await serial.command("on")
+  await serial.command("review")
   await serial.run("safe")
   const entered = deferred<void>(), answer = deferred<string>()
   serial.ctx.ui.select = async (title: string) => {
@@ -806,5 +818,87 @@ assert.deepEqual(longPast.evidence.userRequests, ["Commit and push agentbox"])
 assert.equal(longPast.evidence.latestUserRequestIndex, 0)
 assert.equal(longPast.evidence.omittedUserRequestCount, 1)
 assert.ok(longPast.payload.length <= 32_000)
+
+// True auto mode is deterministic and independent of classifier auth/context.
+for (const explicit of [false, true]) {
+  const instance = harness(autoPolicy({ auto: { enable: true }, rules: explicit
+    ? [{ tools: ["*"], patterns: ["*"], decision: "ask" }] : [] }), {
+    realpath: async (path: string) => path,
+  }, false)
+  let prompts = 0
+  const ctx = context({
+    hasUI: false,
+    ui: { ...context().ui, select: async () => { prompts++; throw new Error("must not prompt") } },
+    modelRegistry: { find: () => { throw new Error("must not classify") } },
+    sessionManager: { getBranch: () => { throw new Error("must not read history") } },
+  })
+  assert.equal(instance.queryAuto(), false)
+  await instance.command("on", ctx)
+  assert.equal(instance.queryAuto(), true)
+  for (const [tool, input] of [
+    ["bash", { command: "npm test" }],
+    ["read", { path: "README.md" }],
+    ["web_search", { query: "Pi permissions" }],
+    ["task", { prompt: "Inspect the source" }],
+    ["mcp__docs__search", { query: "permissions" }],
+  ] as const) {
+    for (let i = 0; i < 3; i++) assert.equal(await call(instance.toolCall, tool, input, ctx), undefined)
+  }
+  assert.equal(prompts, 0)
+  assert.equal((await call(instance.toolCall, "bash", { command: "sudo true" }, ctx)).block, true)
+  assert.equal((await call(instance.toolCall, "read", { path: ".env" }, ctx)).block, true)
+  const abort = new AbortController(); abort.abort()
+  assert.equal((await call(instance.toolCall, "bash", { command: "pwd" }, { ...ctx, signal: abort.signal })).block, true)
+  await instance.command("off", ctx)
+  assert.equal(instance.queryAuto(), false)
+  assert.equal((await call(instance.toolCall, "bash", { command: "pwd" }, ctx)).block, true)
+  for (const lifecycle of ["session_start", "session_tree", "session_shutdown"]) {
+    await instance.command("on", ctx)
+    await instance.lifecycle(lifecycle, ctx)
+    assert.equal(instance.queryAuto(), false)
+    assert.equal((await call(instance.toolCall, "bash", { command: "pwd" }, ctx)).block, true)
+  }
+}
+for (const defaultDecision of ["ask", "deny"]) {
+  const instance = harness(autoPolicy({ defaultDecision, rules: [
+    { tools: ["bash"], patterns: ["*"], decision: "deny" },
+    { tools: ["bash"], patterns: ["*"], decision: "ask" },
+  ] }), { realpath: async (path: string) => path }, false)
+  await instance.command("on")
+  assert.equal((await call(instance.toolCall, "bash", { command: "pwd" })).block, true)
+  if (defaultDecision === "deny") assert.equal((await call(instance.toolCall, "read", { path: "README.md" })).block, true)
+}
+const liveConfig = { value: autoPolicy({ auto: { enable: true } }) }
+const liveAuto = harness(liveConfig.value, { readFile: async () => liveConfig.value }, false)
+await liveAuto.command("on")
+assert.equal(await call(liveAuto.toolCall, "bash", { command: "pwd" }), undefined)
+liveConfig.value = autoPolicy({ auto: { enable: false } })
+assert.equal((await call(liveAuto.toolCall, "bash", { command: "pwd" })).block, true)
+liveConfig.value = "invalid"
+assert.equal((await call(liveAuto.toolCall, "bash", { command: "pwd" })).block, true)
+
+// MCP child approvals reuse the policy client, never a second transport reader.
+let forwardedApprovals = 0
+const forwarding = harness(autoPolicy(), {
+  env: { PI_WORKFLOW_CHILD: "1" },
+  approvalClient: {
+    close() {},
+    async ask(summary: string, timeout: number, signal: AbortSignal) {
+      forwardedApprovals++
+      assert.equal(summary, "MCP tool: docs/search")
+      assert.equal(timeout, 1000)
+      assert.equal(signal.aborted, false)
+      return true
+    },
+  },
+}, false)
+assert.equal(await forwarding.requestApproval(context({ hasUI: false })), true)
+assert.equal(forwardedApprovals, 1)
+assert.equal(await forwarding.requestApproval(context(), "x".repeat(4001)), false)
+assert.equal(await forwarding.requestApproval(context(), "MCP tool: docs/search", 0), false)
+await forwarding.lifecycle("session_shutdown")
+assert.equal(await forwarding.requestApproval(context()), false)
+assert.equal(forwardedApprovals, 1)
+assert.equal(await harness(autoPolicy(), {}, false).requestApproval(context()), false, "main MCP keeps its local approval UI")
 
 console.log("pi policy extension tests passed")

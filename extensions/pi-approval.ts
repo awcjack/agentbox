@@ -144,7 +144,7 @@ export function openApprovalClient(env: NodeJS.ProcessEnv = process.env) {
 }
 
 // One broker per workflow extension instance, shared across concurrent task.execute calls.
-export function createApprovalBroker() {
+export function createApprovalBroker(isAutoEnabled: () => boolean = () => false) {
   const queue: Array<() => Promise<void>> = []
   let active = false
   let pendingCount = 0
@@ -176,7 +176,9 @@ export function createApprovalBroker() {
         queue.push(async () => {
           try {
             const title = `${APPROVAL_TITLE_PREFIX}${JSON.stringify({ version: 1, ...identity, requestId: frame.id })}\n${frame.summary.replace(/[\u0000-\u001f\u007f]/g, " ")}`
-            const allow = await selectApproval(ctx, title, frame.deadline, controller.signal)
+            // Query live when dequeued, never turn auto approval into a reusable grant.
+            const allow = !controller.signal.aborted && Date.now() < frame.deadline
+              && (isAutoEnabled() === true || await selectApproval(ctx, title, frame.deadline, controller.signal))
             await onClosed?.(frame.id)
             wire.send({ version: 1, type: "reply", id: frame.id,
               decision: allow && !controller.signal.aborted && Date.now() < frame.deadline ? "Allow once" : "Deny" })

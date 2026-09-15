@@ -812,9 +812,25 @@ export function createPiMcpExtension(dependencies = {}) {
           if (requestSignal.aborted) return textResult(`MCP tool ${tool.name} was cancelled.`, { server: server.name, tool: tool.name }, true)
 
           if (requiresApproval(server.policy, tool)) {
-            let approved = false
+            // Ask at each decision: no env/transcript authority or persisted grants.
+            let autoEnabled = false
             try {
-              approved = await requestApproval({
+              pi.events.emit("agentbox:auto-query", { reply: (enabled) => { autoEnabled = enabled === true } })
+            } catch { autoEnabled = false }
+            let approved = autoEnabled
+            try {
+              if (!approved && (environment.PI_WORKFLOW_CHILD === "1" || environment.PI_WORKFLOW_APPROVAL_VERSION !== undefined)) {
+                approved = await withDeadline(async (approvalSignal) => {
+                  let answer = Promise.resolve(false)
+                  pi.events.emit("agentbox:approval-request", {
+                    context: { ...context, signal: approvalSignal },
+                    summary: `MCP tool: ${server.name}/${tool.name}\n${description}`.slice(0, 4_000),
+                    timeout: server.callTimeoutMs,
+                    reply: (result) => { answer = Promise.resolve(result) },
+                  })
+                  return await answer === true
+                }, server.callTimeoutMs, requestSignal, `MCP approval ${server.name}/${tool.name}`)
+              } else if (!approved) approved = await requestApproval({
                 context,
                 server: server.name,
                 tool,

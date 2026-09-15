@@ -7,7 +7,7 @@ let shutdown: any
 createPiPolicyExtension({
   readFile: async () => JSON.stringify({ version: 1, defaultDecision: "ask", timeout: 2000, rules: [] }),
   realpath: async (path) => path,
-})({ registerCommand: () => {}, on: (name: string, callback: any) => {
+})({ events: { on: () => {} }, registerCommand: () => {}, on: (name: string, callback: any) => {
   if (name === "tool_call") handler = callback
   if (name === "session_shutdown") shutdown = callback
 } } as any)

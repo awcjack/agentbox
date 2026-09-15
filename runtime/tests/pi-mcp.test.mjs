@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert"
 import { createServer } from "node:http"
 import test from "node:test"
+import { EventEmitter } from "node:events"
 
 import {
   createSecureFetch,
@@ -19,6 +20,7 @@ function makePi() {
     handlers,
     tools,
     api: {
+      events: new EventEmitter(),
       on(name, handler) {
         handlers.set(name, [...(handlers.get(name) ?? []), handler])
       },
@@ -184,6 +186,82 @@ test("uses deterministic collision-safe names", async () => {
   assert.equal(names.length, 2)
   assert.equal(new Set(names).size, 2)
   assert.equal(names.every((name) => /^mcp__a_b__run__[a-f0-9]{10}$/.test(name)), true)
+})
+
+for (const approval of ["always", "destructive"]) {
+  test(`live auto bypasses ${approval} MCP prompts without widening tool access`, async () => {
+    let calls = 0
+    let prompts = 0
+    const runtime = await setup(config({ server: stdio("server", {
+      policy: { allow: ["change", "denied"], deny: ["denied"], approval },
+    }) }), { server: {
+      listTools: async () => ({ tools: ["change", "denied", "not_allowed"].map((name) => ({
+        name, inputSchema: { type: "object" }, annotations: { destructiveHint: true },
+      })) }),
+      callTool: async () => { calls++; return { content: [{ type: "text", text: "ok" }] } },
+    } }, { requestApproval: async () => { prompts++; return false }, env: { PI_AUTO: "1" } })
+    assert.deepEqual([...runtime.tools.keys()], ["mcp__server__change"])
+    const tool = runtime.tools.get("mcp__server__change")
+    const execute = (signal) => tool.execute("call", {}, signal, undefined, { hasUI: false })
+    assert.equal((await execute()).isError, true)
+    let enabled = "true"
+    runtime.api.events.on("agentbox:auto-query", ({ reply }) => reply(enabled))
+    assert.equal((await execute()).isError, true)
+    enabled = true
+    assert.equal((await execute()).isError, undefined)
+    assert.equal((await execute()).isError, undefined)
+    assert.equal(prompts, 2)
+    enabled = false
+    assert.equal((await execute()).isError, true)
+    assert.equal(prompts, 3)
+    enabled = true
+    assert.equal((await execute(AbortSignal.abort())).isError, true)
+    assert.equal(calls, 2)
+    await runtime.handlers.get("session_shutdown")[0]()
+    assert.equal((await execute()).isError, true)
+    assert.equal(calls, 2)
+  })
+}
+
+test("asynchronous auto replies do not approve MCP calls", async () => {
+  const runtime = await setup(config({ server: stdio("server", { policy: { approval: "always" } }) }), {
+    server: {
+      listTools: async () => ({ tools: [{ name: "change", inputSchema: { type: "object" } }] }),
+      callTool: async () => { throw new Error("must not execute") },
+    },
+  })
+  runtime.api.events.on("agentbox:auto-query", ({ reply }) => { queueMicrotask(() => reply(true)) })
+  const result = await runtime.tools.get("mcp__server__change").execute("call", {}, undefined, undefined, { hasUI: false })
+  assert.equal(result.details.approval, "denied")
+})
+
+test("MCP children forward approval through the policy event, failing closed without a reply", async () => {
+  let calls = 0, prompts = 0, requests = 0
+  const runtime = await setup(config({ child: stdio("child", { policy: { approval: "always", deny: ["blocked"] } }) }), {
+    child: {
+      listTools: async () => ({ tools: ["change", "blocked"].map((name) => ({ name, inputSchema: { type: "object" } })) }),
+      callTool: async () => { calls++; return { content: [] } },
+    },
+  }, { env: { PI_WORKFLOW_CHILD: "1" }, requestApproval: async () => { prompts++; return true } })
+  assert.equal(runtime.tools.has("mcp__child__blocked"), false)
+  const execute = (signal) => runtime.tools.get("mcp__child__change").execute("call", {}, signal, undefined, { hasUI: false })
+  assert.equal((await execute()).details.approval, "denied")
+  let answer = true
+  runtime.api.events.on("agentbox:approval-request", ({ context, summary, timeout, reply }) => {
+    requests++
+    assert.ok(context.signal instanceof AbortSignal)
+    assert.match(summary, /MCP tool: child\/change/)
+    assert.ok(timeout > 0)
+    reply(Promise.resolve(answer))
+  })
+  assert.equal((await execute()).isError, undefined)
+  answer = false
+  assert.equal((await execute()).details.approval, "denied")
+  assert.equal((await execute(AbortSignal.abort())).isError, true)
+  assert.equal(requests, 2)
+  assert.equal(calls, 1)
+  assert.equal(prompts, 0)
+  await runtime.handlers.get("session_shutdown")[0]()
 })
 
 test("fails approval closed without an affirmative approver", async () => {

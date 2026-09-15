@@ -208,7 +208,14 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
   const getPiInvocation = dependencies.getPiInvocation ?? currentPiInvocation
 
   return function piWorkflow(pi: ExtensionAPI) {
-    const approvals = createApprovalBroker()
+    const approvals = createApprovalBroker(() => {
+      // Only the policy extension's live, synchronous reply is authoritative.
+      let enabled = false
+      try {
+        pi.events.emit("agentbox:auto-query", { reply: (value: boolean) => { enabled = value === true } })
+      } catch { return false }
+      return enabled
+    })
     let todoState: TodoState = { version: 1, nextId: 1, items: [] }
     let taskRecords = new Map<string, TaskRecord>()
     let reservedTaskIds = new Set<string>()

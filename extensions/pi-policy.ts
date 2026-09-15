@@ -22,9 +22,10 @@ type Decision = "allow" | "ask" | "deny"
 
 interface AutoConfig {
   enable: boolean
-  provider: string
-  model: string
-  timeout: number
+  // Legacy classifier settings, used only by /auto review.
+  provider?: string
+  model?: string
+  timeout?: number
 }
 
 interface PolicyRule {
@@ -154,10 +155,9 @@ function parseConfig(raw: string | Buffer, path: string): PolicyConfig {
     const candidate = value.auto
     if (!isObject(candidate) || !hasOnlyKeys(candidate, AUTO_KEYS)
       || typeof candidate.enable !== "boolean"
-      || typeof candidate.provider !== "string" || candidate.provider.length > MAX_POLICY_STRING_CHARS
-      || typeof candidate.model !== "string" || candidate.model.length > MAX_POLICY_STRING_CHARS
-      || (candidate.enable && (!candidate.provider.trim() || !candidate.model.trim()))
-      || !Number.isInteger(candidate.timeout) || (candidate.timeout as number) < 1 || (candidate.timeout as number) > MAX_TIMEOUT_MS) {
+      || (candidate.provider !== undefined && (typeof candidate.provider !== "string" || candidate.provider.length > MAX_POLICY_STRING_CHARS))
+      || (candidate.model !== undefined && (typeof candidate.model !== "string" || candidate.model.length > MAX_POLICY_STRING_CHARS))
+      || (candidate.timeout !== undefined && (!Number.isInteger(candidate.timeout) || (candidate.timeout as number) < 1 || (candidate.timeout as number) > MAX_TIMEOUT_MS))) {
       throw new Error(`${path} has invalid auto permission settings`)
     }
     auto = candidate as unknown as AutoConfig
@@ -519,14 +519,15 @@ async function selectWithTimeout(ctx: any, title: string, timeout: number) {
 }
 
 async function autoApprove(ctx: ExtensionContext, config: AutoConfig, toolName: string, input: Record<string, unknown>, targets: string[], toolCallId: string) {
-  const deadline = Date.now() + config.timeout
+  const timeout = config.timeout ?? DEFAULT_TIMEOUT_MS
+  const deadline = Date.now() + timeout
   const controller = new AbortController()
   const abort = () => controller.abort()
   ctx.signal?.addEventListener("abort", abort, { once: true })
-  const timer = setTimeout(abort, config.timeout)
+  const timer = setTimeout(abort, timeout)
   let onAbort: (() => void) | undefined
   try {
-    if (ctx.signal?.aborted) return false
+    if (ctx.signal?.aborted || !config.provider?.trim() || !config.model?.trim()) return false
     const model = ctx.modelRegistry.find(config.provider, config.model)
     if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) return false
 
@@ -660,6 +661,29 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     // Administrator configuration makes auto available; only an explicit
     // session command enables it. Never persist this choice across sessions.
     let autoEnabled = false
+    let autoAvailable = false
+    let reviewEnabled = false
+    // Other trusted extensions query the live mode instead of inheriting a stale
+    // environment flag. Review mode never bypasses their independent approvals.
+    pi.events.on("agentbox:auto-query", (request: unknown) => {
+      if (isObject(request) && typeof request.reply === "function") {
+        request.reply(autoEnabled && autoAvailable && !session.signal.aborted)
+      }
+    })
+    // MCP children share this policy's existing approval channel rather than
+    // opening a second reader on the workflow pipe. The parent decides live.
+    pi.events.on("agentbox:approval-request", (request: unknown) => {
+      if (env.PI_WORKFLOW_CHILD !== "1" && env[APPROVAL_ENV] === undefined) return
+      if (!isObject(request) || typeof request.reply !== "function"
+        || typeof request.summary !== "string" || request.summary.length > 4_000
+        || !Number.isInteger(request.timeout) || (request.timeout as number) < 1
+        || (request.timeout as number) > MAX_TIMEOUT_MS || !isObject(request.context)) return
+      const context = request.context as unknown as ExtensionContext
+      const ctx = { ...context, signal: context.signal ? AbortSignal.any([context.signal, session.signal]) : session.signal }
+      request.reply(ctx.signal.aborted ? Promise.resolve(false)
+        : askHuman(ctx, { timeout: request.timeout as number }, request.summary.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, MAX_DISPLAY_CHARS))
+          .then((result) => !ctx.signal.aborted && !result?.block, () => false))
+    })
     let modeRequest = 0
     let autoAttempt = new AbortController()
     let session = new AbortController()
@@ -671,13 +695,15 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       autoAttempt.abort()
       autoAttempt = new AbortController()
       autoEnabled = false
+      autoAvailable = false
+      reviewEnabled = false
       modeRequest++
       queue = Promise.resolve()
     }
     function showAuto(ctx: ExtensionContext, available: boolean) {
       ctx.ui.setStatus("agentbox-auto", ctx.mode === "rpc"
         ? JSON.stringify({ available, enabled: autoEnabled })
-        : available ? `Auto: ${autoEnabled ? "on" : "off"}` : undefined)
+        : available ? `Auto: ${autoEnabled ? "on" : reviewEnabled ? "review (may ask)" : "off"}` : undefined)
     }
     async function publishAuto(ctx: ExtensionContext) {
       const epoch = session
@@ -687,8 +713,10 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         available = config.auto?.enable === true
       } catch { /* Invalid policy remains fail-closed, including auto mode. */ }
       if (epoch !== session || epoch.signal.aborted) return false
+      autoAvailable = available
       if (!available) {
         autoEnabled = false
+        reviewEnabled = false
         autoAttempt.abort()
         autoAttempt = new AbortController()
       }
@@ -696,26 +724,33 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       return available
     }
     pi.registerCommand("auto", {
-      description: "Toggle session auto-approval: /auto on, /auto off, or /auto status",
+      description: "Auto-approve asks: /auto on|off|status. Optional classifier: /auto review (may ask).",
       handler: async (args, ctx) => {
         const value = args.trim().toLowerCase()
-        if (!["", "on", "off", "status"].includes(value)) {
-          ctx.ui.notify("Usage: /auto [on|off|status]", "error")
+        if (!["", "on", "off", "status", "review"].includes(value)) {
+          ctx.ui.notify("Usage: /auto [on|off|status|review]", "error")
           return
         }
         const epoch = session, request = ++modeRequest
         const available = await publishAuto(ctx)
-        if (epoch !== session || epoch.signal.aborted || request !== modeRequest || value === "status") return
+        if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
+        if (value === "status") {
+          ctx.ui.notify(`Auto: ${autoEnabled ? "on" : reviewEnabled ? "review (may ask)" : "off"}${available ? "" : " (unavailable)"}.`, "info")
+          return
+        }
         const enabled = value === "on" || (value === "" && !autoEnabled)
-        if (enabled && !available) {
+        if ((enabled || value === "review") && !available) {
           ctx.ui.notify("Auto mode is not available in the managed policy.", "warning")
           return
         }
         autoAttempt.abort()
         autoAttempt = new AbortController()
         autoEnabled = enabled
+        reviewEnabled = value === "review"
         showAuto(ctx, available)
-        ctx.ui.notify(`Auto mode ${enabled ? "on" : "off"}. Explicit approval rules and safety guards still apply.`, "info")
+        ctx.ui.notify(reviewEnabled
+          ? "Review mode: classifier checks default asks and may request human approval."
+          : `Auto mode ${enabled ? "on: approval prompts are automatically allowed" : "off"}. Managed denials and safety guards still apply.`, "info")
       },
     })
     pi.on("session_start", async (_event, ctx) => { reset(); await publishAuto(ctx) })
@@ -725,7 +760,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       approvalClient?.close()
     })
 
-    async function askHuman(ctx: ExtensionContext, config: PolicyConfig, summary: string) {
+    async function askHuman(ctx: ExtensionContext, config: Pick<PolicyConfig, "timeout">, summary: string) {
       if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) {
         if (!transportOpened) {
           transportOpened = true
@@ -773,17 +808,21 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         const decision = managedDecision(config, event.toolName, targetGroups)
         if (decision === "allow") return
         if (decision === "deny") return { block: true, reason: "Denied by managed Pi policy" }
+        // Like OpenCode auto mode: both explicit and default asks are approved.
+        // No model request, context dependency, or fallback approval prompt.
+        if (autoEnabled && config.auto?.enable) return
         if (decision === "defaultAsk" && await isInstalledSkillMarkdownRead(event.toolName, input, ctx.cwd, home, realpath)) {
           return ctx.signal.aborted ? cancelled : undefined
         }
         let autoFallback = false
-        if (autoEnabled && config.auto?.enable && decision === "defaultAsk") {
+        if (reviewEnabled && config.auto?.enable && decision === "defaultAsk") {
           const attempt = autoAttempt
           const approved = await autoApprove({ ...ctx, signal: AbortSignal.any([ctx.signal, attempt.signal]) }, config.auto, event.toolName, input, targets, event.toolCallId)
           if (ctx.signal.aborted) return cancelled
-          if (approved && autoEnabled && attempt === autoAttempt && !attempt.signal.aborted) return
+          if (approved && reviewEnabled && attempt === autoAttempt && !attempt.signal.aborted) return
           autoFallback = true
         }
+        if (autoEnabled && config.auto?.enable) return
         // A classifier rejection/error is not a policy deny. Insufficient
         // context, missing credentials, timeouts, etc. ask on the FIRST call.
         const summary = boundedDisplay(autoFallback ? `Auto could not approve; ${event.toolName}` : event.toolName, targets)

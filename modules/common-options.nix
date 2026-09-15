@@ -1265,7 +1265,7 @@ in
               "deny"
             ];
             default = "ask";
-            description = "Managed Pi decision for unmatched targets; default ask is auto eligible, unlike an effective explicit ask rule, which requires a human.";
+            description = "Managed Pi decision for unmatched targets. Auto mode approves asks; denials always block.";
           };
           timeoutMs = lib.mkOption {
             type = lib.types.ints.between 1 300000;
@@ -1275,39 +1275,35 @@ in
           auto = lib.mkOption {
             type = lib.types.submodule {
               options = {
-                enable = lib.mkEnableOption "automatic classification of unmatched Pi default ask decisions";
+                enable = lib.mkEnableOption "session-toggleable Pi auto approval of ask decisions";
                 provider = lib.mkOption {
                   type = lib.types.str;
                   default = "";
-                  description = "Pi provider for the automatic permission classifier.";
+                  description = "Optional Pi provider for /auto review; /auto on does not use a classifier.";
                 };
                 model = lib.mkOption {
                   type = lib.types.str;
                   default = "";
-                  description = "Explicit Pi model ID for the automatic permission classifier.";
+                  description = "Optional Pi model ID for /auto review; not required for /auto on.";
                 };
                 timeout = lib.mkOption {
                   type = lib.types.ints.between 1 300000;
                   default = 30000;
-                  description = "Automatic permission classifier timeout in milliseconds; failures count toward a human recovery checkpoint at 3 consecutive or 20 total denials.";
+                  description = "Classifier timeout for /auto review in milliseconds; failures ask for human approval. Unused by /auto on.";
                 };
               };
             };
             default = { };
             description = ''
-              Opt-in, fail-closed classifier for unmatched default ask decisions;
-              effective explicit ask rules still require a human. Three consecutive
-              or 20 total classifier denials/errors latch a human checkpoint for
-              the threshold-triggering and subsequent auto-eligible calls. Any allowed call resets only the
-              consecutive count, not the total or latched pause. Successful human
-              recovery approval resets both counts and resumes auto; denied,
-              cancelled, timed-out, or unavailable approval leaves it paused.
-              Headless calls block while paused. Explicit asks and recovery use
-              the same local UI or existing child approval transport; neither
-              overrides rule denials. Session start/switch/fork/tree/shutdown
-              cancels stale checks and resets per-instance state, which is neither
-              shared between parent and child nor persisted across process restarts.
-              This classifier is not a sandbox.
+              Makes /auto on available. It automatically approves both default
+              and explicit ask decisions without a classifier or fallback prompts.
+              Managed and immutable denials still block. Workflow child approvals
+              and MCP approvals consult the live parent mode. Auto starts off and
+              resets on session start/switch/fork/tree/shutdown; it is not persisted.
+              /auto off restores human approvals. Optional /auto review retains
+              conservative classification of default asks and may prompt; provider,
+              model and timeout apply only to review. Auto is not a sandbox: enabling
+              it authorizes arbitrary non-denied tool execution inside Agentbox.
             '';
           };
           rules = lib.mkOption {
@@ -1394,8 +1390,9 @@ in
               and managed-write denials run first. Among configured rules, any
               matching deny wins; otherwise the last matching allow or ask wins
               per target, and every target in a tool call must avoid denial.
-              An effective explicit ask requires human approval even with auto
-              enabled; only unmatched default ask decisions are auto eligible.
+              Auto mode approves both explicit and default asks, never denials.
+              With auto off, explicit asks require human approval (including in
+              optional review mode).
             '';
           };
         };

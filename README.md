@@ -143,9 +143,41 @@ No MCP server is enabled by default.
 
 ### Pi auto permissions
 
-Automatic permission classification is opt-in and starts **off in every session**.
-Configure a classifier to make the toggle available, for example
-`openai-codex/gpt-5.3-codex-spark`:
+**`/auto on` means auto-approve, not “ask a classifier.”** Like
+[OpenCode auto mode](https://opencode.ai/docs/permissions/#auto-mode), it allows
+both default and explicit `ask` decisions without prompting. No model, login,
+conversation evidence, or classifier timeout is involved. Managed `deny` rules,
+immutable safety guards, invalid policy, and cancellation still block execution.
+Use `deny`, not `ask`, for actions that must remain forbidden in auto mode.
+
+Enable availability declaratively:
+
+```nix
+services.agentbox.settings.piConfig.permissions.auto.enable = true;
+```
+
+Auto starts **off**. Use `/auto on`, `/auto off`, `/auto status`, or the web
+header's **Auto: off/on** button. `/auto` toggles. The mode is session-only and
+resets on session start/switch/fork/tree navigation/shutdown. Turning it off
+restores human approvals for subsequent decisions; it does not answer an already
+open approval dialog. This change requires rebuilding/redeploying Agentbox and
+starting a new Pi process; editing the source does not change a running wrapper.
+
+Workflow child approval requests are automatically answered by the parent while
+its auto mode is on. MCP approval checks consult the same live mode; MCP children
+forward required approvals through the policy's existing parent transport.
+Tool allowlists and denials still apply. No environment flag or saved grant is
+used to enable auto, and turning it off takes effect at the next decision.
+
+**Auto is broad authorization**, including arbitrary non-denied shell commands
+inside Agentbox—not a sandbox or a claim that each action is safe. Scope container
+mounts, credentials, network, and Docker access accordingly.
+
+### Optional Pi permission review
+
+The former classifier behavior is now explicitly selected with **`/auto review`**.
+It may ask for approval and is not what `/auto on` or the web toggle enables.
+Existing provider/model/timeout configuration remains supported for review only:
 
 ```nix
 services.agentbox.settings.piConfig.permissions = {
@@ -162,24 +194,20 @@ services.agentbox.settings.piConfig.permissions = {
 The `openai-codex` provider uses Pi's ChatGPT/Codex login. For an OpenAI API key,
 use the `openai` provider and an available model such as `gpt-4.1-mini` instead.
 Model catalog presence does not guarantee account access; verify a live request
-before deployment. Unsupported models immediately fall back to human approval.
-Setting `auto.enable = true` makes auto mode available; it does not activate it.
-Use the web header's **Auto: off/on** button or `/auto on` and `/auto off` in Pi.
-`/auto` toggles, and `/auto status` reports the current mode. With the toggle off,
-Pi follows the original managed permission rules without calling the classifier.
-The setting belongs to one Pi process, is not inherited by workflow children,
-and is not persisted. Children continue forwarding required human approvals.
-The `auto` defaults are `enable = false`, `provider = ""`, `model = ""`, and
-`timeout = 30000`; select a provider/model available in your Pi model registry.
+before using review. Unsupported or unconfigured models fall back to human
+approval in review only. Review belongs to one Pi process and is not persisted
+or inherited by workflow children. The web toggle reports auto off during review;
+`/auto status` reports the specific mode. The `auto` defaults are `enable = false`,
+`provider = ""`, `model = ""`, and `timeout = 30000`.
 
-Only unmatched `defaultDecision = "ask"` decisions are auto eligible. An effective
-explicit matching `ask` requires a human even when auto is enabled. The last
+In review, only unmatched `defaultDecision = "ask"` decisions are classified.
+An effective explicit matching `ask` requires a human in review. The last
 matching `allow` or `ask` still wins per target, and any matching `deny` always
 wins. A multi-target call with an effective explicit ask requires a human unless
 any target is denied. Existing allows and denials remain unchanged, including
-immutable sensitive-path and managed-write denials; neither auto nor human
+immutable sensitive-path and managed-write denials; neither review nor human
 approval can override denials. Rules that resolve to `allow` bypass classification.
-With auto disabled, default asks require human approval except for routine
+With both auto and review disabled, default asks require human approval except for routine
 installed skill Markdown reads. The public decision schema remains
 `allow` / `ask` / `deny`.
 
@@ -190,7 +218,7 @@ writes, or arbitrary project Markdown. Both lexical and resolved paths must stay
 within the same installed skill root; symlink escapes do not gain this exemption.
 Explicit ask/deny rules, default deny, and sensitive-file guards still apply.
 
-With auto on, Bash commands are eligible for classification, not automatically
+With review on, Bash commands are eligible for classification, not automatically
 sent to human approval. Ordinary task-related read-only inspection of clearly
 non-sensitive source/docs can be approved without naming each command or knowing
 the file contents in advance. Credential files such as `.env`, private keys, and
@@ -199,7 +227,7 @@ files; the classifier considers every command segment, flag, pipe, substitution,
 and redirect rather than trusting a command name. Unknown scripts or effects
 still fall back to human approval. Explicit policy rules and safety guards win.
 
-With auto on, the classifier focuses on the latest user instruction and recent
+With review on, the classifier focuses on the latest user instruction and recent
 follow-up context. A clear request to commit and push a repository makes the
 normal scoped Git workflow eligible for auto approval: status/diff/log, staging,
 commit with normal hooks, and push to its configured remote. It no longer rejects
@@ -241,12 +269,12 @@ approval for that **same call immediately**; there is no silent-denial budget or
 recovery threshold. The classifier cannot turn a default ask into a hard deny.
 A human answer applies to that call only. Denied, cancelled, timed-out, or
 unavailable human approval still blocks execution; headless calls without an
-approval transport fail closed. Explicit asks and auto fallbacks use the same
+approval transport fail closed. Explicit asks and review fallbacks use the same
 local approval UI or existing delegated-child approval transport. Rule denials
 are never overridden, and caller/session cancellation does not open a new prompt.
 
 Session start, switch, fork, tree navigation, and shutdown cancel stale checks
-and reset auto to off. Turning auto off cancels an in-flight classification;
+and reset review to off. Turning review off cancels an in-flight classification;
 a late classifier allow cannot authorize the call after the toggle changes.
 Changing the toggle does not answer or dismiss an existing human approval.
 

@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url"
 import { createApprovalBroker, createApprovalClient, selectApproval, APPROVAL_TITLE_PREFIX } from "../extensions/pi-approval.ts"
 import { createPiWorkflowExtension } from "../extensions/pi-workflow.ts"
 
-const broker = createApprovalBroker()
+let autoEnabled = false
+const broker = createApprovalBroker(() => autoEnabled)
 const identity = { toolCallId: "parent-call", taskId: "parent-task", role: "scout" }
 function pair(select: any, hasUI = true, onClosed?: (requestId: string) => void | Promise<void>) {
   const requests = new PassThrough()
@@ -27,6 +28,31 @@ for (const answer of ["Allow once", "Deny", "allow", undefined]) {
   assert.equal(await p.client.ask("read: README", 1000), answer === "Allow once")
   p.close()
 }
+
+// Valid asks are unconditional in auto, even without UI. Off never reuses a grant.
+const autoPair = pair(async () => { throw new Error("must not prompt") }, false)
+autoEnabled = true
+assert.equal(await autoPair.client.ask("arbitrary ask", 1000), true)
+autoEnabled = false
+assert.equal(await autoPair.client.ask("arbitrary ask", 1000), false)
+autoPair.close()
+
+// Queued requests consult live state at decision time, not enqueue time.
+let releaseQueue!: (answer: string) => void
+const held = pair(() => new Promise((resolve) => { releaseQueue = resolve }))
+const heldAsk = held.client.ask("hold queue", 1000)
+await delay(0)
+assert.equal(typeof releaseQueue, "function")
+autoEnabled = true
+let queuedPrompts = 0
+const live = pair(async () => { queuedPrompts++; return "Deny" })
+const liveAsk = live.client.ask("queued while on", 1000)
+autoEnabled = false
+releaseQueue("Deny")
+assert.equal(await heldAsk, false)
+assert.equal(await liveAsk, false)
+assert.equal(queuedPrompts, 1)
+held.close(); live.close()
 
 let release!: (answer: string) => void
 const first = pair(() => new Promise((resolve) => { release = resolve }))
@@ -172,7 +198,10 @@ const fixture = fileURLToPath(new URL("./fixtures/pi-approval-child.ts", import.
 createPiWorkflowExtension({
   readFile: async () => JSON.stringify({ roles: { scout: {} } }),
   getPiInvocation: (args) => ({ command: "bash", args: ["-c", 'exec "$@"', "approval-wrapper", process.execPath, "--experimental-strip-types", fixture, ...args] }),
-})({ on: () => {}, registerTool: (tool: any) => tools.set(tool.name, tool), appendEntry: () => {} } as any)
+})({ events: { emit: (name: string, payload: any) => {
+  assert.equal(name, "agentbox:auto-query")
+  payload.reply(autoEnabled)
+} }, on: () => {}, registerTool: (tool: any) => tools.set(tool.name, tool), appendEntry: () => {} } as any)
 let active = 0
 let peak = 0
 const titles: string[] = []
@@ -206,6 +235,16 @@ for (const [prompt, hasUI] of [[".env", true], ["readme.txt", false]] as const) 
   })
   assert.equal(result.details.results[0].output, "denied")
 }
+autoEnabled = true
+for (const [prompt, expected] of [["deny.txt", "allowed"], [".env", "denied"]]) {
+  const result = await tools.get("task").execute("spawn-auto", { role: "scout", prompt }, undefined, undefined, {
+    ...ctx, hasUI: false, ui: { select: () => { throw new Error("auto must not prompt") } },
+  })
+  assert.equal(result.details.results[0].output, expected)
+}
+autoEnabled = false
+const offResult = await tools.get("task").execute("spawn-off", { role: "scout", prompt: "deny.txt" }, undefined, undefined, ctx)
+assert.equal(offResult.details.results[0].output, "denied")
 const spawnedAbort = new AbortController()
 const cancelledUpdates: any[] = []
 let spawnedRequestId = ""
