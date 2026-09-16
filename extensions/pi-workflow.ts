@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { spawn as nodeSpawn } from "node:child_process"
 import { existsSync, promises as fs } from "node:fs"
 import { randomUUID } from "node:crypto"
-import { isAbsolute } from "node:path"
+import { dirname, isAbsolute } from "node:path"
 import { APPROVAL_ENV, APPROVAL_VERSION, createApprovalBroker } from "./pi-approval.ts"
 import type { ApprovalContext } from "./pi-approval.ts"
 import type { Readable, Writable } from "node:stream"
@@ -61,6 +61,10 @@ interface TaskJob {
   role: string
   prompt: string
   resume?: string
+  provider?: string
+  model?: string
+  skill?: string
+  childPrompt?: string
 }
 
 interface TaskRecord {
@@ -488,8 +492,8 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
       const args = ["--mode", "json", "-p", "--exclude-tools", "task"]
       if (job.resume) args.push("--session", taskId)
       else args.push("--session-id", taskId)
-      const provider = role.provider ?? inherited.provider
-      const model = role.model ?? inherited.model
+      const provider = job.provider ?? role.provider ?? inherited.provider
+      const model = job.model ?? role.model ?? inherited.model
       const thinking = role.thinking ?? inherited.thinking
       if (provider) args.push("--provider", provider)
       if (model) args.push("--model", model)
@@ -683,20 +687,27 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           parserFailure = `Failed to send workflow prompt on stdin: ${error.message}`
           terminate("failed")
         })
-        proc.stdin.end(job.prompt)
+        proc.stdin.end(job.childPrompt ?? job.prompt)
         onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
       })
+    }
+
+    const invocationProperties = {
+      provider: { type: "string", minLength: 1, maxLength: 256, description: "Child provider override; takes precedence over role then parent (per field)" },
+      model: { type: "string", minLength: 1, maxLength: 256, description: "Child model override; takes precedence over role then parent (per field)" },
+      skill: { type: "string", minLength: 1, maxLength: 256, description: "Discovered skill name (without /skill:); loads its full file into the child. Prompt supplies optional arguments." },
     }
 
     pi.registerTool({
       name: "task",
       label: "Task",
-      description: `Run one child job (role + prompt) or multiple bounded-parallel jobs (jobs). Roles and provider/model/thinking/systemPrompt/maxSteps settings come from PI_WORKFLOW_CONFIG (default ${DEFAULT_CONFIG_PATH}). Resume with a task ID returned by an earlier call on this session branch.`,
+      description: `Run one child job (role + prompt or skill) or multiple bounded-parallel jobs (jobs). Roles and provider/model/thinking/systemPrompt/maxSteps settings come from PI_WORKFLOW_CONFIG (default ${DEFAULT_CONFIG_PATH}). Override provider/model per job without changing the parent. Set skill to load a discovered skill in the child; prompt then supplies optional skill arguments. Resume with a task ID returned by an earlier call on this session branch.`,
       promptSnippet: "task: delegate isolated child jobs to managed workflow roles",
       parameters: {
         type: "object",
         additionalProperties: false,
         properties: {
+          ...invocationProperties,
           role: { type: "string", description: "Managed role name for single-job mode" },
           prompt: { type: "string", minLength: 1, maxLength: 100_000, description: "Child prompt for single-job mode" },
           resume: { type: "string", description: "Prior task ID to resume in single-job mode" },
@@ -708,21 +719,22 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               type: "object",
               additionalProperties: false,
               properties: {
+                ...invocationProperties,
                 role: { type: "string" },
                 prompt: { type: "string", minLength: 1, maxLength: 100_000 },
                 resume: { type: "string", description: "Prior task ID to resume" },
               },
-              required: ["role", "prompt"],
+              required: ["role"],
             },
           },
           concurrency: { type: "number", minimum: 1, maximum: 16, description: "Requested parallelism, capped by managed config" },
         },
       },
       async execute(_toolCallId, params: any, signal, onUpdate, ctx) {
-        const hasSingle = typeof params.role === "string" && typeof params.prompt === "string"
-        const hasJobs = Array.isArray(params.jobs) && params.jobs.length > 0
+        const hasSingle = ["role", "prompt", "resume", "provider", "model", "skill"].some((key) => params[key] !== undefined)
+        const hasJobs = params.jobs !== undefined
         if (hasSingle === hasJobs) {
-          return textResult("Provide exactly one mode: role + prompt, or jobs.", { results: [] }, true)
+          return textResult("Provide exactly one mode: role + prompt (or skill), or jobs. Put batch overrides inside each job.", { results: [] }, true)
         }
 
         const configPath = process.env.PI_WORKFLOW_CONFIG || DEFAULT_CONFIG_PATH
@@ -736,13 +748,47 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           }, true)
         }
 
-        const jobs: TaskJob[] = hasSingle
-          ? [{ role: params.role, prompt: params.prompt, resume: params.resume }]
-          : params.jobs
-        if (jobs.length > config.maxJobs) {
-          return textResult(`Too many jobs: ${jobs.length}; managed maximum is ${config.maxJobs}.`, { configPath, results: [] }, true)
+        let jobs: TaskJob[]
+        try {
+          const candidates = hasSingle ? [params] : params.jobs
+          if (!Array.isArray(candidates) || candidates.length === 0) throw new Error("jobs must be a non-empty array")
+          if (candidates.length > config.maxJobs) throw new Error(`Too many jobs: ${candidates.length}; managed maximum is ${config.maxJobs}.`)
+          // Validate the entire batch before reading skills or starting any children.
+          jobs = candidates.map((candidate, index) => {
+            if (!isObject(candidate)) throw new Error(`Job ${index + 1} must be an object`)
+            const field = (name: string, max: number): string | undefined => {
+              const value = candidate[name]
+              if (value === undefined) return undefined
+              if (typeof value !== "string" || !value.trim() || value.length > max || value.includes("\0")) {
+                throw new Error(`Job ${index + 1} ${name} must be a non-empty string of at most ${max} characters without NUL`)
+              }
+              if (["provider", "model", "skill"].includes(name) && (value !== value.trim() || /[\r\n]/.test(value) || value.startsWith("-"))) {
+                throw new Error(`Job ${index + 1} ${name} must not contain surrounding whitespace, newlines, or a leading dash`)
+              }
+              return value
+            }
+            const role = field("role", 64)
+            const prompt = field("prompt", 100_000)
+            const skill = field("skill", 256)
+            if (!role || (!prompt && !skill)) throw new Error(`Job ${index + 1} requires role and prompt or skill`)
+            return { role, prompt: prompt ?? "", skill, provider: field("provider", 256), model: field("model", 256), resume: field("resume", 256) }
+          })
+          const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          for (const job of jobs) {
+            if (!job.skill) continue
+            // Use Pi's current discovery/trust/collision decisions, not a second filesystem scan.
+            const command = pi.getCommands().find((item) => item.source === "skill" && item.name === `skill:${job.skill}`)
+            if (!command) throw new Error(`Unknown or unavailable skill: ${job.skill}. Use a discovered skill name without /skill:.`)
+            const path = command.sourceInfo.path
+            if (!isAbsolute(path)) throw new Error(`Skill ${job.skill} has no absolute source path`)
+            const content = await readFile(path, "utf8")
+            if (!content.trim() || Buffer.byteLength(content, "utf8") > MAX_CONFIG_BYTES) throw new Error(`Skill ${job.skill} must be non-empty and at most ${MAX_CONFIG_BYTES} bytes`)
+            // Send actual content, not a slash command that child settings could leave unexpanded.
+            job.childPrompt = `<skill name="${escapeAttribute(job.skill)}" location="${escapeAttribute(path)}">\nFollow these already-loaded skill instructions; do not re-read the skill file. Relative paths in this skill resolve against: ${dirname(path)}\n\n${content}\n</skill>${job.prompt ? `\n\nUser: ${job.prompt}` : ""}`
+          }
+        } catch (error) {
+          return textResult(`Invalid task: ${error instanceof Error ? error.message : String(error)}`, { configPath, results: [] }, true)
         }
-
         const requested = Number.isInteger(params.concurrency) ? params.concurrency : config.maxConcurrency
         const concurrency = Math.max(1, Math.min(requested, config.maxConcurrency, jobs.length))
         const inherited = {
@@ -751,7 +797,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           thinking: typeof ctx.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
         }
         const results: TaskResult[] = new Array(jobs.length)
-        const progress = jobs.map((job) => ({ role: job.role, prompt: job.prompt, resumed: Boolean(job.resume), taskId: job.resume, status: "queued" } as Record<string, unknown>))
+        const progress = jobs.map((job) => ({ role: job.role, prompt: job.prompt, resumed: Boolean(job.resume), provider: job.provider, model: job.model, skill: job.skill, taskId: job.resume, status: "queued" } as Record<string, unknown>))
         let next = 0
         let completed = 0
         const publish = () => onUpdate?.(textResult(`${completed}/${jobs.length} child jobs finished.`, {

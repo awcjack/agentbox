@@ -1,14 +1,21 @@
 import { strict as assert } from "node:assert"
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
 import { EventEmitter } from "node:events"
 import { createPiWorkflowExtension } from "../extensions/pi-workflow.ts"
 
 type Handler = (event: any, ctx: any) => Promise<any> | any
 
-function harness(dependencies: any = {}) {
+function harness(dependencies: any = {}, commands: any[] = []) {
   const handlers = new Map<string, Handler[]>()
   const tools = new Map<string, any>()
   const entries: any[] = []
   const pi = {
+    getCommands: () => commands,
+    setModel: () => { throw new Error("Must not change parent model") },
+    setThinkingLevel: () => { throw new Error("Must not change parent thinking") },
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler])
     },
@@ -500,6 +507,123 @@ const oversizedResult = await oversizedEvent.tools.get("task").execute(
 assert.equal(oversizedEventKill, "SIGTERM")
 assert.equal(oversizedResult.details.results[0].status, "failed")
 assert.match(oversizedResult.details.results[0].output, /JSON event exceeds 1048576 bytes/)
+
+// Per-invocation routing is independent for each field and never changes the parent.
+const parent = context()
+Object.freeze(parent.model)
+Object.freeze(parent)
+const routed = harness({
+  readFile: async () => config,
+  randomUUID: (() => { let id = 0; return () => `routing-${++id}` })(),
+  getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+  spawn: successfulSpawn,
+})
+const route = (params: any) => routed.tools.get("task").execute("routing", params, undefined, undefined, parent)
+const flag = (call: SpawnCall, name: string) => call.args[call.args.indexOf(name) + 1]
+const firstRoute = await route({ role: "reviewer", prompt: "override", provider: "custom-provider", model: "vendor/model:v2" })
+assert.equal(flag(spawnCalls.at(-1)!, "--provider"), "custom-provider")
+assert.equal(flag(spawnCalls.at(-1)!, "--model"), "vendor/model:v2")
+assert.equal(flag(spawnCalls.at(-1)!, "--thinking"), "high")
+const batchStart = spawnCalls.length
+await route({ jobs: [
+  { role: "reviewer", prompt: "model only", model: "other-model" },
+  { role: "scout", prompt: "provider only", provider: "other-provider" },
+  { role: "reviewer", prompt: "both", provider: "batch-provider", model: "batch-model" },
+  { role: "scout", prompt: "inherit" },
+] })
+assert.deepEqual(spawnCalls.slice(batchStart).map((call) => [flag(call, "--provider"), flag(call, "--model")]), [
+  ["anthropic", "other-model"], ["other-provider", "parent-model"], ["batch-provider", "batch-model"], ["parent-provider", "parent-model"],
+])
+const routingId = firstRoute.details.results[0].taskId
+await route({ role: "reviewer", prompt: "resume override", resume: routingId, provider: "resume-provider", model: "resume-model" })
+assert.equal(flag(spawnCalls.at(-1)!, "--session"), routingId)
+assert.equal(flag(spawnCalls.at(-1)!, "--provider"), "resume-provider")
+assert.equal(flag(spawnCalls.at(-1)!, "--model"), "resume-model")
+await route({ jobs: [{ role: "reviewer", prompt: "resume default", resume: routingId }] })
+assert.equal(flag(spawnCalls.at(-1)!, "--model"), "claude-test", "overrides are not persisted across invocations")
+assert.deepEqual(parent.model, { provider: "parent-provider", id: "parent-model" })
+assert.equal(parent.thinkingLevel, "medium")
+for (const bad of ["", " ", null, 42, " model", "model\nname", "-p", "nul\0value", "x".repeat(257)]) {
+  for (const key of ["provider", "model", "skill"]) {
+    const before = spawnCalls.length
+    const invalid = await route({ jobs: [{ role: "scout", prompt: "valid" }, { role: "scout", prompt: "invalid", [key]: bad }] })
+    assert.equal(invalid.isError, true, `${key}: ${JSON.stringify(bad)}`)
+    assert.equal(spawnCalls.length, before, "preflight must not start part of an invalid batch")
+  }
+}
+for (const invalid of [
+  { jobs: [], provider: "ignored" }, { jobs: [] }, { jobs: "bad" },
+  { jobs: [{ role: "scout", prompt: "ok" }], model: "ignored" },
+  { role: "scout" }, { jobs: [null] }, { role: "scout", prompt: " " },
+]) {
+  const before = spawnCalls.length
+  assert.equal((await route(invalid)).isError, true)
+  assert.equal(spawnCalls.length, before)
+}
+
+// Real files, with the same metadata shape supplied by Pi's discovered commands.
+const skillDir = await mkdtemp(join(tmpdir(), "pi-workflow-skill-"))
+try {
+  const skillPath = join(skillDir, "SKILL.md")
+  const content = "---\nname: test-skill\ndescription: Test skill\n---\nFollow references/guide.md and output SKILL_LOADED.\n"
+  await writeFile(skillPath, content)
+  let sourceInfo = { path: skillPath, scope: "project", source: "local", origin: "top-level", baseDir: skillDir }
+  // Nix supplies the pinned Pi module so this also checks its real discovery metadata.
+  if (process.argv[2]) {
+    const { loadSkillsFromDir } = await import(pathToFileURL(join(process.argv[2], "dist/core/skills.js")).href)
+    const discovered = loadSkillsFromDir({ dir: skillDir, source: "project" })
+    assert.equal(discovered.skills.length, 1)
+    assert.equal(discovered.skills[0].name, "test-skill", "name comes from frontmatter, not the directory")
+    sourceInfo = discovered.skills[0].sourceInfo
+    assert.equal(sourceInfo.path, skillPath)
+  }
+  const commands: any[] = [
+    { name: "skill:test-skill", source: "prompt", sourceInfo: { path: "/not-a-skill" } },
+    { name: "skill:test-skill", source: "skill", sourceInfo },
+  ]
+  const skillHarness = harness({
+    readFile: async (path: string) => path === "/managed/workflow.json" ? config : readFile(path, "utf8"),
+    randomUUID: (() => { let id = 0; return () => `skill-${++id}` })(),
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+    spawn: successfulSpawn,
+  }, commands)
+  const runSkill = (params: any) => skillHarness.tools.get("task").execute("skill", params, undefined, undefined, parent)
+  const skillResult = await runSkill({ role: "scout", skill: "test-skill", provider: "skill-provider", model: "skill-model" })
+  assert.equal(skillResult.details.results[0].status, "completed")
+  assert.ok(spawnCalls.at(-1)!.stdin!.includes(content))
+  assert.ok(spawnCalls.at(-1)!.stdin!.includes(`location="${skillPath}"`))
+  assert.ok(spawnCalls.at(-1)!.stdin!.includes(`resolve against: ${skillDir}`))
+  assert.equal(flag(spawnCalls.at(-1)!, "--provider"), "skill-provider")
+  assert.equal(flag(spawnCalls.at(-1)!, "--model"), "skill-model")
+  assert.equal(spawnCalls.at(-1)!.args.some((arg) => arg.includes(content)), false)
+  await runSkill({ jobs: [{ role: "scout", skill: "test-skill", prompt: "review file.ts", resume: skillResult.details.results[0].taskId, model: "new-skill-model" }] })
+  assert.ok(spawnCalls.at(-1)!.stdin!.endsWith("User: review file.ts"))
+  assert.equal(flag(spawnCalls.at(-1)!, "--model"), "new-skill-model")
+  for (const name of ["missing", "../test-skill", "/skill:test-skill", skillPath]) {
+    const before = spawnCalls.length
+    const result = await runSkill({ role: "scout", skill: name })
+    assert.equal(result.isError, true)
+    assert.equal(spawnCalls.length, before)
+  }
+  // Discovery metadata is queried on each call, so reload/removal is respected.
+  commands.pop()
+  assert.equal((await runSkill({ role: "scout", skill: "test-skill" })).isError, true)
+  commands.push({ name: "skill:test-skill", source: "skill", sourceInfo: { path: "relative/SKILL.md" } })
+  assert.equal((await runSkill({ role: "scout", skill: "test-skill" })).isError, true)
+  commands.at(-1).sourceInfo.path = skillPath
+  for (const body of ["", "x".repeat(1024 * 1024 + 1)]) {
+    await writeFile(skillPath, body)
+    const before = spawnCalls.length
+    assert.equal((await runSkill({ role: "scout", skill: "test-skill" })).isError, true)
+    assert.equal(spawnCalls.length, before)
+  }
+  await rm(skillPath)
+  const before = spawnCalls.length
+  assert.equal((await runSkill({ role: "scout", skill: "test-skill" })).isError, true)
+  assert.equal(spawnCalls.length, before)
+} finally {
+  await rm(skillDir, { recursive: true, force: true })
+}
 
 const originalChild = process.env.PI_WORKFLOW_CHILD
 process.env.PI_WORKFLOW_CHILD = "1"

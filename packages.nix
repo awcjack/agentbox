@@ -100,7 +100,8 @@ in
       '';
     in
     pkgs.runCommand "pi-workflow-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
-      node --experimental-strip-types ${testSource}/tests/pi-workflow.ts
+      node --experimental-strip-types ${testSource}/tests/pi-workflow.ts \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
       node --experimental-strip-types ${testSource}/tests/pi-approval.ts
       touch $out
     '';
