@@ -674,6 +674,7 @@ let
     cp ${./extensions/pi-workflow.ts} $out/pi-workflow.ts
     cp ${./extensions/pi-policy.ts} $out/pi-policy.ts
     cp ${./extensions/pi-approval.ts} $out/pi-approval.ts
+    cp ${./extensions/pi-codex-accounts.ts} $out/pi-codex-accounts.ts
   '';
   piWorkflowExtension = "${piAgentboxExtensions}/pi-workflow.ts";
   piPolicyExtension = "${piAgentboxExtensions}/pi-policy.ts";
@@ -706,6 +707,7 @@ let
       -e ${piAgentboxExtensions}/pi-agentbox.ts \
       -e ${piWorkflowExtension} \
       -e ${piMcpExtension} \
+      -e ${piAgentboxExtensions}/pi-codex-accounts.ts \
       -e ${piPolicyExtension} \
       "$@"
   '';

@@ -34,6 +34,23 @@ in
     pi-agentbox-mcp-runtime
     ;
 
+  pi-codex-wrapper-test = import ./tests/pi-codex-wrapper.nix { inherit pkgs; };
+
+  pi-codex-accounts-test =
+    let
+      testSource = pkgs.runCommand "pi-codex-accounts-test-source" { } ''
+        mkdir -p $out/tests $out/extensions
+        cp ${./tests/pi-codex-accounts.mjs} $out/tests/pi-codex-accounts.mjs
+        cp ${./extensions/pi-codex-accounts.ts} $out/extensions/pi-codex-accounts.ts
+      '';
+    in
+    pkgs.runCommand "pi-codex-accounts-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+      node ${testSource}/tests/pi-codex-accounts.mjs \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
+      touch $out
+    '';
+
   # The OCI image. Linux-only (docker images are Linux). Codex is auto-filled
   # from nixpkgs; OpenCode and Pi are supplied above so they can be pinned
   # independently. Any further agents stay null.
