@@ -48,10 +48,10 @@ Auth directly.
 
 Pi runs through an immutable wrapper that rejects `-e`/`--extension`, disables
 extension discovery, and force-loads trusted Agentbox extensions in this order:
-core integration, workflow, MCP, and final managed policy. Delegated workflow
-jobs and RPC sessions re-enter the same wrapper. Pi's positional package/config/
-auth management commands remain available, but their installed extensions are
-not discovered by agent runs. The final policy fails closed
+core integration, workflow, MCP, Codex accounts, and final managed policy.
+Delegated workflow jobs and RPC sessions re-enter the same wrapper. Pi's
+positional package/config/auth management commands remain available, but their
+installed extensions are not discovered by agent runs. The final policy fails closed
 if `/etc/pi/agentbox-policy.json` is absent or invalid. Direct file targets are
 canonicalized, so safe symlinks whose destinations are allowed work, while
 aliases into sensitive paths and writes through aliases into managed/Nix-store
@@ -96,9 +96,60 @@ configured otherwise. Todo/task state follows the current session branch,
 delegation has concurrency/job/step/output limits, and `question` works in both
 the TUI and an RPC-provided UI.
 
+### Per-task models and skills
+
+Ask Pi to call `task` with child-only overrides, for example:
+
+```json
+{"role":"general","skill":"review","prompt":"Review the current diff","provider":"anthropic","model":"claude-sonnet-4-5"}
+```
+
+`skill` is the bare name of a skill discovered by the current Pi session (not a
+path or `/skill:name` command). Its full file is loaded into the child's prompt,
+with its source directory for relative references; `prompt` supplies optional
+skill arguments. Without `skill`, a non-empty `prompt` is required. Unknown,
+unreadable, empty, or oversized (>1 MiB) skill files fail before children start.
+Discovery uses Pi's existing trust and name-collision decisions, including
+package/project skills, rather than rescanning directories. Only use trusted
+skills: they can instruct the child to run tools with your permissions.
+
+Each field resolves independently: **job override → role config → active parent**.
+For a provider change, usually supply both provider and model to avoid inheriting
+an incompatible model. Pi in the child validates model availability/authentication.
+The parent model and thinking selection are never changed; role thinking, step
+limits, approval handling, and recursion restrictions remain in force.
+
+Batch jobs accept the same fields inside each entry (top-level single-job fields
+cannot be mixed with `jobs`):
+
+```json
+{"jobs":[{"role":"explore","prompt":"Find relevant tests","model":"gpt-5.4"},{"role":"general","skill":"review","provider":"anthropic","model":"claude-sonnet-4-5"}],"concurrency":2}
+```
+
+`resume` also accepts these fields. Overrides apply only to that invocation;
+omitting them on a later resume resolves role/parent defaults again. Resume still
+requires the same role, working directory, and current-branch task ID. To run a
+skill again on resume, explicitly pass `skill` again.
+
 For headless ChatGPT/Codex login, run `/login`, select `ChatGPT Plus/Pro
 (Codex)`, then choose `Device code login (headless)`. Pi stores and refreshes
 the result in `~/.pi/agent/auth.json`.
+
+For two Codex accounts in one Pi, use the built-in **ChatGPT Plus/Pro (Codex)**
+(`openai-codex`) for personal, then run `/login` for **Codex Work** (`codex-work`). Use the
+appropriate browser account/profile for each OAuth flow; headless device-code
+login is also available. Select `/model openai-codex/gpt-5.4` or
+`/model codex-work/gpt-5.4` (or another model from `/model`). The work alias has its
+own stored login and native OAuth refresh; it neither replaces nor copies the
+existing `openai-codex` login. Use interactive `/login` and `/logout` for the
+work alias, not the wrapper's extension-free `pi auth` command.
+
+**Privacy:** switching accounts in a conversation sends its existing context,
+including prior messages and tool results, to the newly selected account.
+Separate credentials are not separate workspaces or conversation sandboxes.
+Start a new session before crossing personal/work boundaries. The work alias is
+a managed extension, also used by delegated and RPC sessions; do not install
+user extensions or duplicate credentials in `models.json`.
 
 Pi slash skills (`/skill:commit optional arguments`) embed the skill instructions
 once and substitute `$ARGUMENTS` (also `$ARGUMENT`) literally with the supplied
