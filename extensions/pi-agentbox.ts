@@ -484,8 +484,17 @@ export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies =
     if (!match) return
     const command = pi.getCommands().find((item) => item.name === `skill:${match[1]}`)
     if (command?.source !== "skill") return
+    const skillName = match[1]
     const path = command.sourceInfo.path
     const args = (match[2] ?? "").trim()
+    if (skillName === "commit") {
+      const prompt = args || "Commit the changes requested in this conversation."
+      return {
+        action: "transform",
+        text: `Use the task tool exactly once to run this slash-command skill in a workflow child session. Call task with role \"simple-task\", skill \"commit\", and prompt ${JSON.stringify(prompt)}. Do not perform the commit workflow in the parent session unless the task tool fails before starting a child.`,
+        images: event.images,
+      }
+    }
     let markdown: string
     try {
       markdown = await readFile(path, "utf8")

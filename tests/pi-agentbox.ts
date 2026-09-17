@@ -73,23 +73,35 @@ assert.equal(handlers.has("agent_settled"), true)
 // Slash skills are expanded once with literal arguments, including RPC/queued
 // input. Resolve only Pi-discovered commands, never arbitrary user paths.
 const skillPath = join(root, "SKILL.md")
+const reviewSkillPath = join(root, "REVIEW_SKILL.md")
 commands.push({ name: "skill:commit", source: "skill", sourceInfo: { path: skillPath } })
-writeFileSync(skillPath, "---\r\nname: commit\r\ndescription: Commit\r\n---\r\nUse $ARGUMENTS and $ARGUMENT. Keep $ARGUMENTSuffix.\r\n")
+commands.push({ name: "skill:review", source: "skill", sourceInfo: { path: reviewSkillPath } })
+writeFileSync(skillPath, "---\r\nname: commit\r\ndescription: Commit\r\n---\r\nCommit workflow.\r\n")
+writeFileSync(reviewSkillPath, "---\r\nname: review\r\ndescription: Review\r\n---\r\nUse $ARGUMENTS and $ARGUMENT. Keep $ARGUMENTSuffix.\r\n")
 const input = handler("input")
 const images = [{ type: "image", data: "example", mimeType: "image/png" }]
 const args = "fix '$&' $ARGUMENTS `echo nope`\nsecond line"
 for (const source of ["interactive", "rpc", "extension"]) {
   for (const streamingBehavior of [undefined, "steer", "followUp"]) {
-    const expanded = await input({ text: `/skill:commit\t${args}`, source, streamingBehavior, images }, ctx)
+    const delegated = await input({ text: `/skill:commit\t${args}`, source, streamingBehavior, images }, ctx)
+    assert.equal(delegated.action, "transform")
+    assert.match(delegated.text, /Use the task tool exactly once/)
+    assert.match(delegated.text, /role "simple-task", skill "commit"/)
+    assert.match(delegated.text, /fix '\$&' \$ARGUMENTS `echo nope`\\nsecond line/)
+    assert.equal(delegated.images, images)
+    assert.equal(await input({ text: delegated.text, source }, ctx), undefined, "already delegated input is not expanded again")
+
+    const expanded = await input({ text: `/skill:review\t${args}`, source, streamingBehavior, images }, ctx)
     assert.equal(expanded.action, "transform")
-    assert.equal(expanded.text, `<skill name="commit" location="${skillPath}">\nReferences are relative to ${root}.\n\nUse ${args} and ${args}. Keep $ARGUMENTSuffix.\n</skill>\n\n${args}`)
+    assert.equal(expanded.text, `<skill name="review" location="${reviewSkillPath}">\nReferences are relative to ${root}.\n\nUse ${args} and ${args}. Keep $ARGUMENTSuffix.\n</skill>\n\n${args}`)
     assert.equal(expanded.images, images)
     assert.equal(await input({ text: expanded.text, source }, ctx), undefined, "already expanded input is not expanded again")
   }
 }
-assert.match((await input({ text: "/skill:commit" }, ctx)).text, /Use  and \. Keep \$ARGUMENTSuffix\./)
-writeFileSync(skillPath, "Updated instructions without frontmatter")
-assert.match((await input({ text: "/skill:commit scope" }, ctx)).text, /Updated instructions without frontmatter\n<\/skill>\n\nscope$/)
+assert.match((await input({ text: "/skill:commit" }, ctx)).text, /Commit the changes requested in this conversation/)
+assert.match((await input({ text: "/skill:review" }, ctx)).text, /Use  and \. Keep \$ARGUMENTSuffix\./)
+writeFileSync(reviewSkillPath, "Updated instructions without frontmatter")
+assert.match((await input({ text: "/skill:review scope" }, ctx)).text, /Updated instructions without frontmatter\n<\/skill>\n\nscope$/)
 for (const text of ["ordinary prompt", "/skill:unknown", "/skill:../../secret", "please /skill:commit"]) {
   assert.equal(await input({ text }, ctx), undefined)
 }
