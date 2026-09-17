@@ -96,7 +96,9 @@ export async function copyText(text) {
   } catch { return false; }
 }
 
-export function renderMarkdown(source) {
+// Preview fenced Markdown through the same text-node-only renderer, never HTML.
+// Nested fences stay source-only to keep preview rendering bounded.
+export function renderMarkdown(source, { previewFences = true } = {}) {
   const root = element("div", "markdown");
   function inline(parent, text) {
     for (const token of inlineTokens(text)) {
@@ -125,7 +127,27 @@ export function renderMarkdown(source) {
       heading.append(copy);
       const pre = element("pre");
       const code = element("code", "", block.text);
-      pre.append(code); wrapper.append(heading, pre); root.append(wrapper);
+      pre.append(code); wrapper.append(heading, pre);
+      if (previewFences && /^(?:md|markdown)$/i.test(block.language)) {
+        const toggle = element("button", "text-button", "Preview");
+        toggle.type = "button";
+        toggle.setAttribute("aria-pressed", "false");
+        let preview;
+        toggle.addEventListener("click", () => {
+          if (!preview) {
+            preview = renderMarkdown(block.text, { previewFences: false });
+            preview.classList.add("markdown-preview");
+            wrapper.append(preview);
+          }
+          const showing = !pre.hidden;
+          pre.hidden = showing;
+          preview.hidden = !showing;
+          toggle.textContent = showing ? "Source" : "Preview";
+          toggle.setAttribute("aria-pressed", String(showing));
+        });
+        heading.append(toggle);
+      }
+      root.append(wrapper);
     } else {
       const node = element(block.type);
       if (block.items) {

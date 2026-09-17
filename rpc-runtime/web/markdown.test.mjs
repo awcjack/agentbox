@@ -64,6 +64,41 @@ test("markdown treats HTML, entities, and image markup as text, never raw DOM", 
   } finally { globalThis.document = previous; }
 });
 
+test("fenced Markdown preview is opt-in, reversible, and uses only safe DOM", () => {
+  class Node {
+    constructor(tag) { this.tag = tag; this.children = []; this.textContent = ""; this.hidden = false; this.handlers = {}; this.attributes = {}; this.classList = { add() {} }; }
+    append(...nodes) { this.children.push(...nodes); }
+    addEventListener(name, handler) { this.handlers[name] = handler; }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    set innerHTML(_value) { throw new Error("Unsafe HTML assignment"); }
+  }
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new Node(tag), createTextNode: text => Object.assign(new Node("#text"), { textContent: text }) };
+  const all = node => [node, ...node.children.flatMap(all)];
+  try {
+    const source = '````markdown\n# Preview\n\n<script>evil()</script>\n\n![tracking](https://evil.invalid/image)\n\n[bad](javascript:evil)\n\n```md\n# Nested\n```\n````';
+    const root = renderMarkdown(source);
+    const toggle = all(root).find(node => node.textContent === "Preview" && node.tag === "button");
+    assert.ok(toggle);
+    assert.equal(all(root).some(node => node.tag === "h1"), false);
+    toggle.handlers.click();
+    assert.equal(toggle.attributes["aria-pressed"], "true");
+    assert.equal(root.children[0].children[1].hidden, true);
+    assert.ok(all(root).some(node => node.tag === "h1" && node.children[0].textContent === "Preview"));
+    assert.ok(!all(root).some(node => ["script", "img", "iframe"].includes(node.tag)));
+    assert.ok(!all(root).some(node => node.href?.startsWith("javascript:")));
+    assert.equal(all(root).filter(node => node.tag === "button" && ["Source", "Preview"].includes(node.textContent)).length, 1);
+    const count = all(root).length;
+    toggle.handlers.click();
+    assert.equal(toggle.attributes["aria-pressed"], "false");
+    assert.equal(root.children[0].children[1].hidden, false);
+    assert.equal(root.children[0].children[2].hidden, true);
+    toggle.handlers.click();
+    assert.equal(all(root).length, count);
+    assert.ok(!all(renderMarkdown('```html\n<h1>Not a preview</h1>\n```')).some(node => node.textContent === "Preview"));
+  } finally { globalThis.document = previous; }
+});
+
 test("unclosed emphasis and CRLF snapshots render without dropping text", () => {
   assert.deepEqual(markdownBlocks("hello\r\nworld\r\n\r\n**still streaming"), [{ type: "p", text: "hello\nworld" }, { type: "p", text: "**still streaming" }]);
   assert.deepEqual(inlineTokens("**still streaming"), [{ type: "text", text: "**still streaming" }]);

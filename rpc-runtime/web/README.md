@@ -28,7 +28,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
   previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
-  links, and fenced code with copy/select fallback. Raw HTML is never interpreted.
+  links, and fenced code with copy/select fallback. `md`/`markdown` fences offer a
+  Preview/Source toggle using the same safe renderer (nested fences stay source).
+  Raw HTML is never interpreted.
   Remote Markdown images are not fetched; only validated inline raster data is
   displayed. Tool input/output/details and nonempty thinking are collapsible.
 - Confirm, select, input, and editor approvals, including cancellation and
