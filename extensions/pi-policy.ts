@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { execFile as nodeExecFile } from "node:child_process"
 import { promises as fs } from "node:fs"
+import { pathToFileURL } from "node:url"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 import { APPROVAL_ENV, openApprovalClient, selectApproval } from "./pi-approval.ts"
 
@@ -50,11 +51,56 @@ interface PolicyTarget {
 }
 
 export interface PiPolicyDependencies {
+  defaultsStore?: (cwd: string) => Promise<AgentboxDefaultsStore>
   readFile?: (path: string) => Promise<string | Buffer>
   realpath?: (path: string) => Promise<string>
   signal?: (state: "waiting" | "working") => Promise<void> | void
   env?: NodeJS.ProcessEnv
   approvalClient?: ReturnType<typeof openApprovalClient>
+}
+
+export interface AgentboxDefaultsStore {
+  read(): Record<string, unknown>
+  setModel(provider: string, model: string): Promise<void>
+  setAuto(enabled: boolean): Promise<void>
+}
+
+/** Global only: project settings must never grant persistent auto authorization. */
+export async function createAgentboxDefaultsStore(
+  cwd: string,
+  loadSdk = () => import("@earendil-works/pi-coding-agent"),
+): Promise<AgentboxDefaultsStore> {
+  const sdk = await loadSdk()
+  // Pi 0.84 has no public arbitrary-key setter or FileSettingsStorage export.
+  // Reuse its storage implementation (and same proper-lockfile lock), not a
+  // second unlocked read/write path. Keep this compatibility seam tested.
+  const { FileSettingsStorage } = await import(pathToFileURL(resolve(sdk.getPackageDir(), "dist/core/settings-manager.js")).href)
+  const storage = new FileSettingsStorage(cwd, sdk.getAgentDir())
+  const parse = (text: string | undefined): Record<string, unknown> => {
+    const value: unknown = text === undefined ? {} : JSON.parse(text)
+    if (!isObject(value)) throw new Error("Global settings.json must contain an object")
+    return value
+  }
+  const read = () => {
+    let settings: Record<string, unknown> = {}
+    storage.withLock("global", (current: string | undefined) => { settings = parse(current) })
+    return settings
+  }
+  return {
+    read,
+    async setModel(provider, model) {
+      read() // Reject malformed/root-array settings before SDK migration.
+      const manager = sdk.SettingsManager.fromStorage(storage, { projectTrusted: false })
+      if (manager.drainErrors().length) throw new Error("Cannot read global settings.json")
+      manager.setDefaultModelAndProvider(provider, model)
+      await manager.flush()
+      if (manager.drainErrors().length) throw new Error("Cannot save global settings.json")
+    },
+    async setAuto(enabled) {
+      storage.withLock("global", (current: string | undefined) =>
+        JSON.stringify({ ...parse(current), agentboxAutoDefault: enabled }, null, 2) + "\n")
+    },
+  }
 }
 
 /** Input fields that identify the resource or operation governed by a tool call. */
@@ -660,8 +706,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
   return function piPolicy(pi: ExtensionAPI) {
     let approvalClient = dependencies.approvalClient
     let transportOpened = false
-    // Administrator configuration makes auto available; only an explicit
-    // session command enables it. Never persist this choice across sessions.
+    // Availability is administrator-controlled; defaults never override policy.
     let autoEnabled = false
     let autoAvailable = false
     let reviewEnabled = false
@@ -755,7 +800,76 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
           : `Auto mode ${enabled ? "on: approval prompts are automatically allowed" : "off"}. Managed denials and safety guards still apply.`, "info")
       },
     })
-    pi.on("session_start", async (_event, ctx) => { reset(); await publishAuto(ctx) })
+    pi.registerCommand("agentbox-defaults", {
+      description: "Persistent defaults: status | model current | auto on|off",
+      handler: async (args, ctx) => {
+        const value = args.trim().toLowerCase().replace(/\s+/g, " ")
+        if (!["", "status", "model current", "auto on", "auto off"].includes(value)) {
+          ctx.ui.notify("Usage: /agentbox-defaults [status|model current|auto on|auto off]", "error")
+          return
+        }
+        const epoch = session
+        try {
+          if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) {
+            ctx.ui.notify("Persistent defaults are unavailable in child sessions.", "warning")
+            return
+          }
+          if (value === "auto on") {
+            if (!ctx.hasUI || !await ctx.ui.confirm("Enable auto by default?",
+              "WARNING: Future fresh sessions will automatically approve all asks, including arbitrary non-denied shell commands. This is broad authorization, not a sandbox. Managed denials and safety guards still apply. The current session will not change.",
+              { signal: epoch.signal })) return
+          }
+          if (epoch !== session || epoch.signal.aborted) return
+          const store = await (dependencies.defaultsStore ?? createAgentboxDefaultsStore)(ctx.cwd)
+          if (epoch !== session || epoch.signal.aborted) return
+          if (value === "model current") {
+            if (!ctx.model) {
+              ctx.ui.notify("No current model to save.", "error")
+              return
+            }
+            await store.setModel(ctx.model.provider, ctx.model.id)
+          } else if (value === "auto on" || value === "auto off") {
+            await store.setAuto(value === "auto on")
+          }
+          const settings = store.read()
+          const available = await publishAuto(ctx)
+          if (epoch !== session || epoch.signal.aborted) return
+          ctx.ui.notify(`Global defaults: model ${settings.defaultProvider ?? "(unset)"}/${settings.defaultModel ?? "(unset)"}; auto ${settings.agentboxAutoDefault === true ? "on" : "off"}${available ? "" : " (unavailable in managed policy)"}. Live auto: ${autoEnabled ? "on" : "off"}. Defaults apply to future fresh sessions; current session unchanged.`, "info")
+        } catch {
+          if (epoch === session && !epoch.signal.aborted) ctx.ui.notify("Could not read/save global Pi settings.json; defaults were not confirmed saved.", "error")
+        }
+      },
+    })
+    pi.on("session_start", async (event, ctx) => {
+      reset()
+      const epoch = session, request = modeRequest
+      const available = await publishAuto(ctx)
+      if (!available || epoch !== session || epoch.signal.aborted) return
+      if (event.reason !== "startup" && event.reason !== "new") return
+      if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) return
+      try {
+        // Startup also covers CLI --resume/--continue. Inspect all entries, not
+        // just the active branch (which may have been navigated back to root).
+        if (event.reason === "startup") {
+          // Fresh Pi sessions are not flushed to disk until an assistant reply.
+          // An existing file is a restore even if it has no conversation entries.
+          const file = ctx.sessionManager.getSessionFile()
+          if (file) {
+            try { await fs.stat(file); return } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") return
+            }
+          }
+        }
+        if (ctx.sessionManager.getHeader()?.parentSession) return
+        if (ctx.sessionManager.getEntries().some((entry) =>
+          entry.type === "message" || entry.type === "compaction" || entry.type === "branch_summary")) return
+        const store = await (dependencies.defaultsStore ?? createAgentboxDefaultsStore)(ctx.cwd)
+        const enabled = store.read().agentboxAutoDefault === true
+        if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
+        autoEnabled = enabled
+        showAuto(ctx, available)
+      } catch { /* Unreadable or invalid defaults never enable auto. */ }
+    })
     pi.on("session_tree", async (_event, ctx) => { reset(); await publishAuto(ctx) })
     pi.on("session_shutdown", () => {
       reset(true)

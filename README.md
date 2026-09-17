@@ -223,9 +223,10 @@ Enable availability declaratively:
 services.agentbox.settings.piConfig.permissions.auto.enable = true;
 ```
 
-Auto starts **off**. Use `/auto on`, `/auto off`, `/auto status`, or the web
-header's **Auto: off/on** button. `/auto` toggles. The mode is session-only and
-resets on session start/switch/fork/tree navigation/shutdown. Turning it off
+Auto starts **off** unless explicitly saved as a default (see below). Use
+`/auto on`, `/auto off`, `/auto status`, or the web header's **Auto: off/on** button.
+`/auto` toggles live mode without changing saved defaults. Live mode resets on
+session start/switch/fork/tree navigation/shutdown. Turning it off
 restores human approvals for subsequent decisions; it does not answer an already
 open approval dialog. This change requires rebuilding/redeploying Agentbox and
 starting a new Pi process; editing the source does not change a running wrapper.
@@ -233,12 +234,58 @@ starting a new Pi process; editing the source does not change a running wrapper.
 Workflow child approval requests are automatically answered by the parent while
 its auto mode is on. MCP approval checks consult the same live mode; MCP children
 forward required approvals through the policy's existing parent transport.
-Tool allowlists and denials still apply. No environment flag or saved grant is
-used to enable auto, and turning it off takes effect at the next decision.
+Tool allowlists and denials still apply. Children never independently enable
+saved auto defaults; turning the parent's live mode off takes effect at the next decision.
 
 **Auto is broad authorization**, including arbitrary non-denied shell commands
 inside Agentbox—not a sandbox or a claim that each action is safe. Scope container
 mounts, credentials, network, and Docker access accordingly.
+
+### Persistent Pi defaults (CLI)
+
+- `/agentbox-defaults` or `/agentbox-defaults status`: show saved model/auto,
+  policy availability, and live auto state.
+- `/agentbox-defaults model current`: save the current provider/model pair.
+- `/agentbox-defaults auto on`: save auto-on after a broad-authorization warning
+  and explicit confirmation. Without a UI or on cancellation, nothing is saved.
+- `/agentbox-defaults auto off`: save auto-off (no confirmation needed).
+
+These commands change **future defaults**, not the current model or live auto
+mode. To stop live auto too, use `/auto off`.
+
+CLI and web settings share Pi's global `~/.pi/agent/settings.json`
+(`/home/agent/.pi/agent/settings.json` inside Agentbox), or
+`$PI_CODING_AGENT_DIR/settings.json` when that directory override is set:
+
+```json
+{
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-5.4",
+  "agentboxAutoDefault": true
+}
+```
+
+Only boolean `true` enables the auto default; strings/numbers/missing values do
+not. The policy reads it at session start, only for fresh startup/new sessions
+without restored conversation history or a parent session. Reload, resume,
+fork/clone, tree navigation, and workflow children never enable it. Managed
+`permissions.auto.enable = true` is still required, and all safety gates remain.
+Project settings cannot grant this auto default. Pi's normal model resolution
+still applies: explicit model choices, restored session models, and trusted
+project settings can override the global model default.
+
+Writes preserve unrelated global settings. Model persistence uses SDK
+`SettingsManager`; the custom auto key reuses Pi 0.84's internal
+`FileSettingsStorage` lock because the SDK has no arbitrary-key setter. Settings
+errors are reported rather than claiming success. This compatibility seam is
+covered by an installed-SDK integration test:
+
+```sh
+node --experimental-strip-types tests/pi-defaults.ts /path/to/pi-monorepo
+```
+
+Omit the package path to run only policy/command tests. Rebuild/redeploy Agentbox
+and start a new Pi process to install the updated extension.
 
 ### Optional Pi permission review
 

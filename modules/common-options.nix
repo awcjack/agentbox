@@ -1299,8 +1299,10 @@ in
               Makes /auto on available. It automatically approves both default
               and explicit ask decisions without a classifier or fallback prompts.
               Managed and immutable denials still block. Workflow child approvals
-              and MCP approvals consult the live parent mode. Auto starts off and
-              resets on session start/switch/fork/tree/shutdown; it is not persisted.
+              and MCP approvals consult the live parent mode. Auto starts off unless
+              the user saves agentboxAutoDefault=true in global Pi settings using
+              /agentbox-defaults auto on. That default applies only to fresh sessions,
+              never reload/resume/fork/children. Live mode resets on session changes.
               /auto off restores human approvals. Optional /auto review retains
               conservative classification of default asks and may prompt; provider,
               model and timeout apply only to review. Auto is not a sandbox: enabling
