@@ -46,6 +46,36 @@ are cached per selection, and can be reloaded with Refresh. TUI-only built-ins
 are not advertised. `/auto on`, `/auto off`, and `/auto status` are suggested only
 when the process actually registers `auto`.
 
+### Persistent defaults
+
+Open **Settings** in the session sidebar (the sessions drawer on mobile) with an
+idle, writable session selected. The dialog uses the policy extension's existing
+`/agentbox-defaults` command; it never writes settings files itself:
+
+- **Use current model as default** sends `model current`. To save another model,
+  first choose it in the session's model selector, then open Settings.
+- **Save default auto** sends `auto off` or `auto on`. On requires the extension's
+  explicit confirmation, shown in the normal agent-request UI after the dialog
+  closes. Cancelling or declining does not enable the default.
+- **Show saved defaults** sends `status`; the extension reports saved values in
+  the session notification. The dialog's auto selector is a proposed value, not
+  an indication of the saved default. RPC acceptance alone is not proof of saving.
+
+These are global Pi defaults for future fresh sessions, not changes to the
+selected session's live model or auto mode. Resuming a session does not apply
+fresh-session defaults. Managed policy can still make auto unavailable.
+
+Settings preserves the unsent draft and attachments and sends only a command via
+`POST /v1/sessions/:id/rpc`, with the displayed native-session precondition.
+It requires `get_commands`, `prompt`, `sessions:read`, and `sessions:write`, plus
+extension UI replies for confirmation. Unsupported/undiscoverable commands fail
+closed instead of becoming model prompts. Controls are locked while saving;
+streaming, queued work, pending UI, conversation replacement, and offline/read-only
+sessions prevent starting settings operations. Failed writes are never retried.
+Refresh retries command discovery; upgrading the extension requires a new process.
+
+### Session thinking level
+
 The thinking-level selector beside the model shows Pi's current reasoning effort.
 Available choices come from `get_available_thinking_levels` for the selected
 model, including `xhigh`/`max` only where supported. A model with only `off` shows
@@ -375,3 +405,18 @@ files, and connect over container loopback. Container root or a compromised
 container is equally trusted. Use separate containers/UIDs for mutually
 untrusted tenants, protect the Docker daemon and host, and put non-loopback
 access behind a trusted TLS reverse proxy or VPN.
+
+### Browser regression smoke test
+
+Run `npm test` for the runtime/unit suite. The optional real-browser fixture uses
+Playwright without adding a production dependency:
+
+```sh
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node web/browser-smoke.mjs
+```
+
+`SETTINGS_ONLY=1` runs just the Settings desktop/mobile regression scenarios.
+`CHROMIUM_EXECUTABLE` can select a system Chromium. The desktop/mobile smoke test
+covers Settings commands, native write headers, draft preservation, unchanged
+live model/auto, confirmation/decline, concurrent-write locks, missing command
+support, and keyboard dismissal, alongside the existing chat flows.

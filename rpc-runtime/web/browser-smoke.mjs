@@ -146,6 +146,7 @@ const server = createServer(async (request, response) => {
       const pending = session.pendingUi.find((request) => request.id === body.id);
       calls.push({ id: session.id, ui: body });
       if (!pending) return json(response, 404, { error: { code: "ui_request_not_found", message: "pending extension UI request not found" } });
+      if (pending.title === "Enable auto by default?" && body.confirmed) session.defaultAuto = true;
       resolveUi(session, body.id);
       if (pending?.method === "select" && body.value === "2. Other (type an answer)") requestUi(session, { method: "input", title: pending.title, placeholder: "Type your answer" });
       return json(response, 202, { accepted: true });
@@ -161,7 +162,7 @@ const server = createServer(async (request, response) => {
       data = { messages: session.messages };
     }
     else if (body.type === "get_available_models") data = { models };
-    else if (body.type === "get_commands") data = { commands: [{ name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
+    else if (body.type === "get_commands") data = { commands: [...(session.noDefaults ? [] : [{ name: "agentbox-defaults", description: "Persistent defaults" }]), { name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
     else if (body.type === "get_available_thinking_levels") {
       if (session.denyThinking) return json(response, 403, { error: { code: "command_forbidden", message: "Thinking discovery is forbidden" } });
       data = { levels: availableThinking(session) };
@@ -181,7 +182,15 @@ const server = createServer(async (request, response) => {
     }
     else if (body.type === "abort") { session.streaming = false; emit(session, { type: "agent_end" }); }
     else if (body.type === "prompt") {
-      if (session.streaming) {
+      if (body.message.startsWith("/agentbox-defaults ")) {
+        if (session.rejectDefaults) return json(response, 403, { error: { code: "command_forbidden", message: "Defaults prompt forbidden" } });
+        assert.deepEqual(Object.keys(body).sort(), ["message", "type"], "settings sends no draft/images or queue behavior");
+        if (session.holdDefaults) await new Promise((resolve) => { session.releaseDefaults = resolve; });
+        if (body.message.endsWith("model current")) session.defaultModel = structuredClone(session.model);
+        else if (body.message.endsWith("auto off")) session.defaultAuto = false;
+        else if (body.message.endsWith("auto on")) requestUi(session, { method: "confirm", title: "Enable auto by default?", message: "Future sessions automatically approve asks. Current session unchanged." });
+        emit(session, { type: "extension_ui_request", method: "notify", message: "Global defaults: current session unchanged.", notifyType: "info" });
+      } else if (session.streaming) {
         session.queued.push(body.message);
         emit(session, { type: "queue_update", steering: [], followUp: session.queued });
       } else {
@@ -298,6 +307,79 @@ try {
       await page.locator("#auto-mode").click();
       await until(() => page.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "false"), "auto off confirmed");
       assert.deepEqual(calls.filter((call) => call.id === session.id && call.auto).map((call) => call.auto.enabled), [true, false]);
+      const openSettings = async () => {
+        if (label === "mobile") await page.locator("#open-drawer").click();
+        await page.locator("#settings").click();
+        await page.locator("#settings-dialog").waitFor();
+      };
+      const originalModel = structuredClone(session.model), originalAuto = structuredClone(session.autoMode);
+      await page.locator("#prompt").fill("Keep my settings draft");
+      await page.locator("#image-files").setInputFiles({ name: "settings-draft.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jJ1sAAAAASUVORK5CYII=", "base64") });
+      await page.locator(".attachment img").waitFor();
+      await openSettings();
+      await until(() => page.locator("#save-default-model").isEnabled(), "defaults command discovered");
+      session.holdDefaults = true;
+      await page.locator("#save-default-model").click();
+      await until(() => session.releaseDefaults, "defaults prompt in flight");
+      for (const id of ["settings", "model", "auto-mode", "send"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true, `${id} is locked while saving defaults`);
+      const defaultsSent = calls.filter((call) => call.command?.message?.startsWith("/agentbox-defaults")).length;
+      await page.locator("#settings").evaluate((button) => button.click());
+      assert.equal(calls.filter((call) => call.command?.message?.startsWith("/agentbox-defaults")).length, defaultsSent);
+      session.holdDefaults = false; session.releaseDefaults();
+      await until(() => session.defaultModel, "default model saved");
+      assert.deepEqual(session.defaultModel, originalModel);
+      await openSettings();
+      await page.locator("#default-auto").selectOption("on");
+      await page.locator("#save-default-auto").click();
+      await page.locator(".approval").waitFor();
+      assert.equal(await page.locator("#settings-dialog").isVisible(), false, "modal does not obscure confirmation");
+      assert.equal(await page.locator("#settings").isDisabled(), true, "cannot launch concurrent settings with pending UI");
+      await page.locator(".approval button", { hasText: "Decline" }).click();
+      await until(() => session.pendingUi.length === 0, "auto declined");
+      assert.notEqual(session.defaultAuto, true);
+      await openSettings();
+      await page.locator("#default-auto").selectOption("on");
+      await page.locator("#save-default-auto").click();
+      await page.locator(".approval .approve").click();
+      await until(() => session.defaultAuto === true, "default auto confirmed");
+      await openSettings();
+      await page.locator("#save-default-auto").click();
+      await until(() => session.defaultAuto === false, "default auto off");
+      await openSettings();
+      await page.locator("#show-defaults").click();
+      await until(() => calls.some((call) => call.id === session.id && call.command?.message === "/agentbox-defaults status"), "saved defaults requested");
+      assert.deepEqual(session.model, originalModel); assert.deepEqual(session.autoMode, originalAuto);
+      assert.equal(session.streaming, false); assert.equal(session.messages.length, 0);
+      assert.equal(await page.locator("#prompt").inputValue(), "Keep my settings draft");
+      assert.equal(await page.locator(".attachment img").count(), 1, "settings preserves draft attachments");
+      await page.locator(".attachment button").click();
+      await page.locator("#prompt").fill("");
+      await page.locator("#dismiss-notice").click();
+      if (process.env.SETTINGS_ONLY === "1") {
+        // Dedicated fast regression path, independent of the transcript scenarios.
+        const refreshCatalog = async () => {
+          await openSidebar(); await page.locator("#refresh-sessions").click();
+          if (label === "mobile") await page.locator("#close-drawer").click();
+        };
+        session.noDefaults = true; await refreshCatalog(); await openSettings();
+        await until(() => page.locator("#settings-help").textContent().then((text) => text.includes("does not register")), "old extension fails closed");
+        for (const id of ["save-default-model", "save-default-auto", "show-defaults"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true);
+        await page.locator("#settings-dialog").press("Escape");
+        assert.equal(await page.locator("#settings-dialog").isVisible(), false);
+        session.noDefaults = false; await refreshCatalog(); await openSettings();
+        await until(() => page.locator("#show-defaults").isEnabled(), "discovery retried");
+        session.rejectDefaults = true;
+        const beforeFailure = calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length;
+        await page.locator("#show-defaults").click();
+        await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Defaults prompt forbidden")), "permission error visible");
+        assert.equal(await page.locator("#settings").isDisabled(), true);
+        await page.waitForTimeout(300);
+        assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length, beforeFailure + 1, "failed settings is not retried");
+        await noOverflow(page);
+        assert.deepEqual(errors, [], "No browser JS or CSP errors");
+        console.log(`${label}: PASS settings commands, current state/draft preservation, native guards, locks, confirmation/decline, unsupported command, discovery retry, forbidden/no retry, Escape`);
+        continue;
+      }
       const promptCalls = () => calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length;
       const promptsBeforeCompletion = promptCalls();
       await page.locator("#prompt").fill("/aut");
@@ -383,7 +465,7 @@ try {
       await openSidebar(); await page.locator("#refresh-sessions").click();
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Snapshot-only fixture message")), "healthy Refresh fetches new snapshot without an SSE event");
       await page.waitForTimeout(250);
-      assert.deepEqual(traffic(session), { ...healthyTraffic, metadata: healthyTraffic.metadata + 1, rpc: [...healthyTraffic.rpc, "get_messages", "get_state"] }, "healthy Refresh fetches exactly one snapshot, not models or a new stream");
+      assert.deepEqual(traffic(session), { ...healthyTraffic, metadata: healthyTraffic.metadata + 1, rpc: [...healthyTraffic.rpc, "get_messages", "get_state", "get_available_thinking_levels"] }, "healthy Refresh fetches one snapshot and refreshes thinking discovery, not models or a new stream");
       assert.deepEqual([...session.clients], [healthyStream], "Refresh keeps the original stream open");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this selected-session draft");
       assert.equal(await page.locator("#model").inputValue(), JSON.stringify(["fixture", "pi-reasoning"]));
@@ -405,7 +487,7 @@ try {
       await until(() => page.locator("#thinking-level").isDisabled(), "thinking changes disabled while agent is running");
       await until(() => page.locator("#prompt").inputValue().then((value) => value === ""), "accepted draft cleared");
       assert.equal(await page.locator("#notice").isVisible(), false, "successful prompts do not show an acceptance bar");
-      assert.equal(calls.find((call) => call.id === session.id && call.command?.type === "prompt").command.images[0].mimeType, "image/png");
+      assert.equal(calls.find((call) => call.id === session.id && call.command?.images).command.images[0].mimeType, "image/png");
       update(session, { type: "text_delta", contentIndex: 0, delta: "Inspecting " });
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Inspecting")), "first streaming delta");
       const streamingArticle = await page.locator("#messages .assistant").last().elementHandle();
@@ -801,7 +883,7 @@ try {
     } finally { await context.close(); }
   }
   assert.deepEqual(serverErrors, []);
-  console.log(`Screenshots: ${join(output, "pi-workspace-desktop.png")} and ${join(output, "pi-workspace-mobile.png")}`);
+  if (process.env.SETTINGS_ONLY !== "1") console.log(`Screenshots: ${join(output, "pi-workspace-desktop.png")} and ${join(output, "pi-workspace-mobile.png")}`);
 } finally {
   await browser.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
 }

@@ -29,3 +29,5 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 }
 @media(min-width:721px) and (max-width:1000px){.workspace{--sidebar-default-width:225px}}
 @media(min-width:1500px){.workspace{--sidebar-default-width:285px}}
+
+#settings{border:1px solid var(--border);border-radius:6px;text-align:left;font-size:13px;padding:10px 13px;margin:-17px 0 20px;color:var(--text)}#settings-model{overflow-wrap:anywhere}

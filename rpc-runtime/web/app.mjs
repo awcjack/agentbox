@@ -15,7 +15,7 @@ const api = createTransport(() => token);
 let token = "", auth = new AbortController(), epoch = 0, selection = 0, listVersion = 0;
 let current = null, sessions = [], profiles = [], history = [], readOnly = false, createDenied = false, createBusy = false;
 let endTarget = null, deleteDenied = false;
-let conversationTarget = null;
+let conversationTarget = null, settingsTarget = null;
 const records = new Map();
 const baseTitle = document.title;
 const attention = createAttentionTracker();
@@ -60,13 +60,26 @@ function setNetwork(status, label) {
   $("connection-label").textContent = label;
 }
 function canWrite(ctx, command = "prompt") {
-  return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running" && !ctx.record.ending && !ctx.record.conversationBusy && !ctx.replacing && !ctx.meta.conversationReplacing && !readOnly && !ctx.record.forbidden.has(command));
+  return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running" && !ctx.record.ending && !ctx.record.conversationBusy && !ctx.replacing && !ctx.meta.conversationReplacing && !readOnly && (!ctx.record.settingsBusy || command === "ui") && !ctx.record.forbidden.has(command));
 }
 function canChangeConversation(ctx) {
   return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.record.autoModeBusy && !ctx.modelBusy && !ctx.thinkingBusy;
 }
 function updateControls() {
   const ctx = current;
+  $("settings").disabled = !canChangeConversation(ctx) || ctx.record.settingsBusy;
+  if ($("settings-dialog").open) {
+    if (settingsTarget?.ctx !== ctx || settingsTarget?.nativeId !== ctx?.meta.nativeSessionId || !canWrite(ctx)) {
+      $("settings-dialog").close(); settingsTarget = null;
+    } else {
+      const supported = ctx.commands?.some((command) => command.name === "agentbox-defaults");
+      const disabled = !supported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
+      for (const id of ["save-default-model", "save-default-auto", "show-defaults", "default-auto"]) $(id).disabled = disabled;
+      $("save-default-model").disabled ||= !ctx.state.model;
+      $("settings-model").textContent = `Current model: ${ctx.state.model ? `${ctx.state.model.provider}/${ctx.state.model.id}` : "unavailable"}`;
+      $("settings-help").textContent = ctx.commandLoading ? "Checking command support..." : supported ? "Results appear in the session's notifications. No chat draft or attachments are sent." : ctx.commandError || "This Pi process does not register /agentbox-defaults. Deploy the updated policy extension and start a new session. Nothing will be sent to the model.";
+    }
+  }
   const streaming = Boolean(ctx?.state.isStreaming);
   const draft = ctx?.record.draft;
   const answering = Boolean(ctx?.meta?.pendingUi?.some((request) => dialogMethods.has(request.method)));
@@ -134,7 +147,7 @@ async function loadCommands(ctx) {
       : "Could not load commands. Use Refresh to try again.";
   } finally {
     ctx.commandLoading = false;
-    if (active(ctx)) renderCommandSuggestions();
+    if (active(ctx)) updateControls();
   }
 }
 function renderCommandSuggestions() {
@@ -863,6 +876,39 @@ function openNew() {
   $("new-dialog").showModal(); $("new-name").focus();
 }
 
+$("settings").addEventListener("click", () => {
+  const ctx = current;
+  if (!canChangeConversation(ctx) || ctx.record.settingsBusy) return;
+  settingsTarget = { ctx, nativeId: ctx.meta.nativeSessionId };
+  drawer(false);
+  $("default-auto").value = "off";
+  $("settings-dialog").showModal();
+  if (ctx.commands === undefined && !ctx.commandLoading) loadCommands(ctx);
+  updateControls();
+});
+$("close-settings").addEventListener("click", () => $("settings-dialog").close());
+$("settings-dialog").addEventListener("close", () => { settingsTarget = null; });
+async function saveDefaults(args) {
+  const target = settingsTarget, ctx = target?.ctx, ownEpoch = epoch;
+  if (!ctx || target.nativeId !== ctx.meta.nativeSessionId || !canChangeConversation(ctx) || ctx.record.settingsBusy
+    || !ctx.commands?.some((command) => command.name === "agentbox-defaults")) return;
+  // Share the prompt lock without touching the composer draft. Close the modal
+  // before dispatch so extension select/confirm requests remain accessible.
+  ctx.record.settingsBusy = true; ctx.record.sending = true;
+  $("settings-dialog").close(); updateControls();
+  try {
+    await rpc(ctx, { type: "prompt", message: `/agentbox-defaults ${args}` }, true);
+  } catch (error) {
+    if (ownEpoch === epoch) report(error, ctx, { write: true, command: "prompt", ambiguous: true });
+  } finally {
+    ctx.record.settingsBusy = false; ctx.record.sending = false;
+    if (ownEpoch === epoch && current?.record === ctx.record) { updateControls(); requestRefresh(current); }
+  }
+}
+$("save-default-model").addEventListener("click", () => saveDefaults("model current"));
+$("save-default-auto").addEventListener("click", () => saveDefaults($("default-auto").value === "on" ? "auto on" : "auto off"));
+$("show-defaults").addEventListener("click", () => saveDefaults("status"));
+
 $("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
   const ctx = current;
@@ -1032,6 +1078,7 @@ function logout(message = "") {
   current = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
   conversationTarget = null; $("conversation-action-dialog").close(); $("copy-dialog").close();
+  settingsTarget = null; $("settings-dialog").close(); $("settings-model").textContent = ""; $("settings-help").textContent = "";
   $("copy-text").value = ""; $("conversation-action-preview").textContent = "";
   $("create-session").disabled = false; $("end-description").textContent = "";
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";

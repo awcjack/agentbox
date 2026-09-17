@@ -17,6 +17,7 @@
     <aside class="sidebar" id="sidebar" aria-label="Session navigation">
       <div class="brand"><span class="brand-mark" aria-hidden="true">pi</span><span>Pi agent<span class="brand-sub">AGENTBOX</span></span><button id="close-drawer" class="icon-button mobile-only" aria-label="Close sessions">&times;</button></div>
       <button id="new-session" class="new-session" disabled><span aria-hidden="true">+</span> New session <kbd>N</kbd></button>
+      <button id="settings" class="text-button" type="button" title="Default model and default auto for future sessions" disabled>Settings</button>
       <label class="section-label" for="profile-filter">PROFILE</label>
       <select id="profile-filter" disabled aria-label="Filter sessions by profile"><option value="">All profiles</option></select>
       <div class="section-heading"><span class="section-label">SESSIONS</span><button id="refresh-sessions" class="text-button" disabled>Refresh</button></div>
@@ -74,6 +75,22 @@
       <button id="login-submit" class="primary-button" type="submit">Open workspace <span aria-hidden="true">&rarr;</span></button>
       <span class="dialog-bottom">Same-origin connection. No SSH. No stored credentials.</span>
     </form>
+  </dialog>
+  <dialog id="settings-dialog" aria-labelledby="settings-title">
+    <div class="dialog-body">
+      <div class="dialog-heading"><span class="dialog-eyebrow">GLOBAL PI DEFAULTS</span><button id="close-settings" class="icon-button" type="button" aria-label="Close settings">&times;</button></div>
+      <h2 id="settings-title">Settings</h2>
+      <p>Defaults apply to future fresh sessions. The current session's model and auto mode are unchanged. Resumed sessions keep their own state.</p>
+      <p id="settings-model"></p>
+      <button id="save-default-model" class="primary-button" type="button">Use current model as default</button>
+      <p class="field-note">To save a different model with this command, first select it in a session's model selector.</p>
+      <label for="default-auto">Default auto for future sessions</label>
+      <select id="default-auto"><option value="off">Off</option><option value="on">On (requires confirmation)</option></select>
+      <p class="field-note">This is a proposed value, not the saved setting. Auto on broadly authorizes asks; managed denials and safety guards still apply.</p>
+      <button id="save-default-auto" class="primary-button" type="button">Save default auto</button>
+      <button id="show-defaults" class="text-button" type="button">Show saved defaults</button>
+      <p id="settings-help" class="field-note" role="status"></p>
+    </div>
   </dialog>
   <dialog id="new-dialog" aria-labelledby="new-title">
     <form id="new-form" class="dialog-body">
