@@ -56,6 +56,7 @@ export interface PiPolicyDependencies {
   realpath?: (path: string) => Promise<string>
   signal?: (state: "waiting" | "working") => Promise<void> | void
   env?: NodeJS.ProcessEnv
+  argv?: string[]
   approvalClient?: ReturnType<typeof openApprovalClient>
 }
 
@@ -89,12 +90,12 @@ export async function createAgentboxDefaultsStore(
   return {
     read,
     async setModel(provider, model) {
-      read() // Reject malformed/root-array settings before SDK migration.
-      const manager = sdk.SettingsManager.fromStorage(storage, { projectTrusted: false })
-      if (manager.drainErrors().length) throw new Error("Cannot read global settings.json")
-      manager.setDefaultModelAndProvider(provider, model)
-      await manager.flush()
-      if (manager.drainErrors().length) throw new Error("Cannot save global settings.json")
+      // Pi's set_model/cycle_model (also used by conversation restore) overwrite
+      // defaultProvider/defaultModel. Keep the explicit user choice separately,
+      // atomically with the ordinary defaults, under Pi's own storage lock.
+      storage.withLock("global", (current: string | undefined) =>
+        JSON.stringify({ ...parse(current), defaultProvider: provider, defaultModel: model,
+          agentboxDefaultModel: { provider, model } }, null, 2) + "\n")
     },
     async setAuto(enabled) {
       storage.withLock("global", (current: string | undefined) =>
@@ -128,6 +129,13 @@ const RULE_KEYS = new Set(["tools", "patterns", "decision"])
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function savedDefaultModel(settings: Record<string, unknown>) {
+  const value = settings.agentboxDefaultModel
+  return isObject(value) && typeof value.provider === "string" && value.provider.trim()
+    && typeof value.model === "string" && value.model.trim()
+    ? { provider: value.provider, model: value.model } : undefined
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: Set<string>) {
@@ -702,6 +710,9 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
   const realpath = dependencies.realpath ?? ((path: string) => fs.realpath(path))
   const signal = dependencies.signal ?? defaultSignal
   const env = dependencies.env ?? process.env
+  // Explicit CLI/profile model selection takes precedence over saved defaults.
+  const modelOverride = (dependencies.argv ?? process.argv.slice(2)).some(arg =>
+    /^(?:--provider|--model|--models)(?:=|$)/.test(arg))
 
   return function piPolicy(pi: ExtensionAPI) {
     let approvalClient = dependencies.approvalClient
@@ -834,7 +845,8 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
           const settings = store.read()
           const available = await publishAuto(ctx)
           if (epoch !== session || epoch.signal.aborted) return
-          ctx.ui.notify(`Global defaults: model ${settings.defaultProvider ?? "(unset)"}/${settings.defaultModel ?? "(unset)"}; auto ${settings.agentboxAutoDefault === true ? "on" : "off"}${available ? "" : " (unavailable in managed policy)"}. Live auto: ${autoEnabled ? "on" : "off"}. Defaults apply to future fresh sessions; current session unchanged.`, "info")
+          const model = savedDefaultModel(settings)
+          ctx.ui.notify(`Global defaults: model ${model?.provider ?? settings.defaultProvider ?? "(unset)"}/${model?.model ?? settings.defaultModel ?? "(unset)"}; auto ${settings.agentboxAutoDefault === true ? "on" : "off"}${available ? "" : " (unavailable in managed policy)"}. Live auto: ${autoEnabled ? "on" : "off"}. Defaults apply to future fresh sessions; current session unchanged.`, "info")
         } catch {
           if (epoch === session && !epoch.signal.aborted) ctx.ui.notify("Could not read/save global Pi settings.json; defaults were not confirmed saved.", "error")
         }
@@ -844,7 +856,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       reset()
       const epoch = session, request = modeRequest
       const available = await publishAuto(ctx)
-      if (!available || epoch !== session || epoch.signal.aborted) return
+      if (epoch !== session || epoch.signal.aborted) return
       if (event.reason !== "startup" && event.reason !== "new") return
       if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) return
       try {
@@ -864,9 +876,22 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         if (ctx.sessionManager.getEntries().some((entry) =>
           entry.type === "message" || entry.type === "compaction" || entry.type === "branch_summary")) return
         const store = await (dependencies.defaultsStore ?? createAgentboxDefaultsStore)(ctx.cwd)
-        const enabled = store.read().agentboxAutoDefault === true
+        const settings = store.read()
+        if (epoch !== session || epoch.signal.aborted) return
+        const model = savedDefaultModel(settings)
+        if (model && !modelOverride
+          && (ctx.model?.provider !== model.provider || ctx.model?.id !== model.model)) {
+          try {
+            const selected = ctx.modelRegistry.find(model.provider, model.model)
+            if (!selected || !await pi.setModel(selected)) throw new Error("Saved model unavailable")
+          } catch {
+            if (epoch === session && !epoch.signal.aborted) {
+              ctx.ui.notify("Saved default model is unavailable; keeping Pi's selected model. The saved default was not changed.", "warning")
+            }
+          }
+        }
         if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
-        autoEnabled = enabled
+        autoEnabled = available && settings.agentboxAutoDefault === true
         showAuto(ctx, available)
       } catch { /* Unreadable or invalid defaults never enable auto. */ }
     })
