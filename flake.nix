@@ -38,7 +38,13 @@
           inherit system;
           config.allowUnfree = true; # google-cloud-sdk is unfree
         };
-      piPackageFor = system: nixpkgs-unstable.legacyPackages.${system}.pi-coding-agent;
+      piPackageFor =
+        system:
+        nixpkgs-unstable.legacyPackages.${system}.pi-coding-agent.overrideAttrs (old: {
+          # Keep startup's awaited catalog/auth refresh authoritative: detached
+          # per-registration refreshes can otherwise race session restoration.
+          patches = (old.patches or [ ]) ++ [ ./patches/pi-startup-provider-refresh.patch ];
+        });
       opencodePackageFor =
         system:
         opencode.packages.${system}.default.overrideAttrs (old: {

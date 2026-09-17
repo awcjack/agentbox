@@ -1,0 +1,57 @@
+--- a/packages/coding-agent/src/core/model-runtime.ts
++++ b/packages/coding-agent/src/core/model-runtime.ts
+@@ -730,16 +730,16 @@
+ 		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
+ 	}
+ 
+-	registerNativeProvider(provider: Provider): void {
++	registerNativeProvider(provider: Provider, options: { refresh?: boolean } = {}): void {
+ 		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
+ 		this.extensionProviders.delete(provider.id);
+ 		this.nativeExtensionProviders.set(provider.id, provider);
+ 		this.recomposeProvider(provider.id);
+ 		this.updateModelSnapshot();
+-		void this.refresh({ allowNetwork: false });
+-	}
+-
+-	registerProvider(providerId: string, config: ProviderConfigInput): void {
++		if (options.refresh !== false) void this.refresh({ allowNetwork: false });
++	}
++
++	registerProvider(providerId: string, config: ProviderConfigInput, options: { refresh?: boolean } = {}): void {
+ 		// Validate the incoming registration on its own, like the legacy registry:
+ 		// a broken re-registration must throw without touching the stored config.
+ 		validateExtensionProvider(providerId, this.builtins.get(providerId), this.config.getProvider(providerId), config);
+@@ -774,7 +774,7 @@
+ 				available: this.snapshot.all.filter((model) => configuredProviders.has(model.provider)),
+ 			};
+ 		}
+-		void this.refresh({ allowNetwork: false });
++		if (options.refresh !== false) void this.refresh({ allowNetwork: false });
+ 	}
+ 
+ 	unregisterProvider(providerId: string): void {
+--- a/packages/coding-agent/src/core/agent-session-services.ts
++++ b/packages/coding-agent/src/core/agent-session-services.ts
+@@ -155,9 +155,11 @@
+ 
+ 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+ 	const extensionsResult = resourceLoader.getExtensions();
++	// Batch startup registrations. Background refreshes can supersede the awaited
++	// refresh below and leave auth availability stale during model restoration.
+ 	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
+ 		try {
+-			modelRuntime.registerProvider(name, config);
++			modelRuntime.registerProvider(name, config, { refresh: false });
+ 		} catch (error) {
+ 			const message = error instanceof Error ? error.message : String(error);
+ 			diagnostics.push({
+@@ -169,7 +171,7 @@
+ 	extensionsResult.runtime.pendingProviderRegistrations = [];
+ 	for (const { provider, extensionPath } of extensionsResult.runtime.pendingNativeProviderRegistrations) {
+ 		try {
+-			modelRuntime.registerNativeProvider(provider);
++			modelRuntime.registerNativeProvider(provider, { refresh: false });
+ 		} catch (error) {
+ 			const message = error instanceof Error ? error.message : String(error);
+ 			diagnostics.push({

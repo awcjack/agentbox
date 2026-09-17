@@ -144,11 +144,15 @@ own stored login and native OAuth refresh; it neither replaces nor copies the
 existing `openai-codex` login. Use interactive `/login` and `/logout` for the
 work alias, not the wrapper's extension-free `pi auth` command.
 
-Once the session starts, the work alias mirrors the native provider's effective
-model catalog, including cached remote models and `models.json` model metadata.
-Credentials and configured auth headers remain separate. In Pi 0.84, initial CLI
-model resolution precedes this registry access: select remote-only alias models
-with `/model` inside the session rather than cold-starting with `--model`.
+The work alias loads the native provider's local catalog (cached remote models
+and `models.json` metadata) before CLI/default/session model resolution, then
+mirrors the live registry after startup. Credentials and configured auth headers
+remain separate; catalog bootstrap performs no network requests or token refresh.
+Agentbox patches Pi 0.84.2 to batch startup provider registrations before one
+awaited catalog/auth refresh, preventing intermittent account fallback on resume.
+Both changes require rebuilding the image; refreshing the browser alone does not
+update the Pi executable/extensions. Browser reconnect reads the running child's
+model state; reply badges show the model/provider recorded on each old reply.
 
 **Privacy:** switching accounts in a conversation sends its existing context,
 including prior messages and tool results, to the newly selected account.

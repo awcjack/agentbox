@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   cleanupSessionResources,
+  InMemoryCredentialStore,
   lazyStream,
   registerSessionResourceCleanup,
   type AssistantMessageEvent,
@@ -9,9 +10,9 @@ import {
   type StreamOptions,
 } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ModelRuntime, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export default function codexAccounts(pi: ExtensionAPI) {
+export default async function codexAccounts(pi: ExtensionAPI) {
   // Use Pi's loader-supported entrypoint, not a second bundled copy of pi-ai.
   const native = builtinProviders().find((provider) => provider.id === "openai-codex");
   if (!native) throw new Error("This Pi build has no native OpenAI Codex provider");
@@ -73,7 +74,18 @@ export default function codexAccounts(pi: ExtensionAPI) {
         }
       })();
     });
-  let getModels = () => native.getModels();
+  // Pi resolves CLI/default/restored models BEFORE session_start. Bootstrap the
+  // local catalog here, using Pi's own cache + models.json composition instead
+  // of only the bundled list. No login, token refresh or network is needed.
+  // The managed CLI uses PI_CODING_AGENT_DIR for both this and its main runtime.
+  const catalog = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    allowModelNetwork: false,
+    refreshOnCreate: false,
+  });
+  await catalog.refresh({ providers: [native.id], allowNetwork: false });
+  const initialModels = catalog.getProvider(native.id)?.getModels() ?? native.getModels();
+  let getModels = () => initialModels;
   const provider: Provider = {
     id,
     name: "Codex Work",
