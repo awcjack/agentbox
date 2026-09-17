@@ -1238,6 +1238,7 @@ in
             );
             default = {
               simple-task = {
+                model = "gpt-5.6-luna";
                 thinking = "minimal";
                 systemPrompt = "Complete the small, well-scoped task directly and report the result concisely.";
                 maxSteps = 8;
