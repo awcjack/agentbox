@@ -1,5 +1,8 @@
 // Offline contract test against the packaged Pi, including its real extension loader.
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const root = process.argv[2];
@@ -9,6 +12,9 @@ const { loadExtensions } = await load("dist/core/extensions/loader.js");
 const ai = await load("node_modules/@earendil-works/pi-ai/dist/index.js");
 const { openaiCodexProvider } = await load("node_modules/@earendil-works/pi-ai/dist/providers/openai-codex.js");
 const { getOpenAICodexWebSocketDebugStats } = await load("node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js");
+const { ModelRuntime } = await load("dist/core/model-runtime.js");
+const { ModelRegistry } = await load("dist/core/model-registry.js");
+const { InMemoryCodingAgentModelsStore } = await load("dist/core/models-store.js");
 const extension = new URL("../extensions/pi-codex-accounts.ts", import.meta.url).pathname;
 const loaded = await loadExtensions([extension], process.cwd());
 assert.deepEqual(loaded.errors, []);
@@ -198,6 +204,75 @@ try {
   assert.ok(await models.getAuth(native.id));
   assert.deepEqual(await credentials.read(native.id), original);
 
+  // Exercise the coding-agent layer, not just pi-ai's bundled provider catalog.
+  const directory = await mkdtemp(join(tmpdir(), "pi-codex-catalog-"));
+  try {
+    const modelsPath = join(directory, "models.json");
+    const configured = {
+      models: [{ id: "configured-codex", name: "Configured Codex", contextWindow: 234567 }],
+      modelOverrides: { "gpt-6-astra": { maxTokens: 12345 } },
+      headers: { "X-Personal-Only": "synthetic-header" },
+    };
+    await writeFile(modelsPath, JSON.stringify({ providers: { [native.id]: configured } }));
+    const store = new InMemoryCodingAgentModelsStore();
+    // Synthetic metadata, not claims about Astra's actual limits or pricing.
+    const astra = { ...native.getModels()[0], id: "gpt-6-astra", name: "Astra (fixture)",
+      contextWindow: 345678, thinkingLevelMap: { high: "high", xhigh: "xhigh" } };
+    const cache = (entries) => store.write(native.id, {
+      models: entries, checkedAt: Date.now(), lastModified: Date.now() + 86_400_000,
+    });
+    await cache([astra]);
+    const catalogCredentials = new ai.InMemoryCredentialStore();
+    await catalogCredentials.modify("codex-work", async () => credential("work"));
+    const runtime = await ModelRuntime.create({
+      credentials: catalogCredentials, modelsPath, modelsStore: store, allowModelNetwork: false,
+    });
+    const registry = new ModelRegistry(runtime);
+    loaded.runtime.registerNativeProvider = (provider) => registry.registerProvider(provider);
+    registry.registerProvider(aliases[0]);
+    await registry.refresh({ allowNetwork: false });
+    for (const handler of loaded.extensions[0].handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, { modelRegistry: registry });
+    }
+    await registry.refresh({ allowNetwork: false });
+    assert.equal(registry.getError(), undefined);
+    assert.ok(registry.find("codex-work", astra.id), "work alias must include Astra from the runtime catalog");
+    const assertCatalog = () => assert.deepEqual(
+      registry.getAll().filter((model) => model.provider === "codex-work"),
+      registry.getProvider(native.id).getModels().map((model) => ({ ...model, provider: "codex-work" })),
+    );
+    assertCatalog();
+    assert.equal(registry.find("codex-work", astra.id).maxTokens, 12345);
+    assert.equal(registry.find("codex-work", astra.id).contextWindow, astra.contextWindow);
+    assert.equal(registry.find("codex-work", "configured-codex").contextWindow, 234567);
+    assert.ok(registry.getAvailable().some((model) => model.provider === "codex-work" && model.id === astra.id),
+      "Astra is available with only the work login configured");
+    assert.equal(registry.getProvider("codex-work").auth, aliases[0].auth);
+    const astraResult = await runtime.streamSimple(registry.find("codex-work", astra.id), { messages: [] },
+      { transport: "sse" }).result();
+    assert.equal(astraResult.stopReason, "stop", astraResult.errorMessage);
+    assert.equal(astraResult.provider, "codex-work");
+    assert.equal(requests.at(-1).get("authorization"), `Bearer ${token("work")}`);
+    assert.equal(requests.at(-1).get("x-personal-only"), null, "native configured auth headers stay native");
+
+    // Both a changed cache and models.json recompose must be visible without a new session.
+    await cache([{ ...astra, contextWindow: 456789 }, { ...astra, id: "later-codex" }]);
+    configured.models = [{ id: "replacement-codex" }];
+    await writeFile(modelsPath, JSON.stringify({ providers: { [native.id]: configured } }));
+    await registry.refresh({ allowNetwork: false });
+    assertCatalog();
+    assert.equal(registry.find("codex-work", astra.id).contextWindow, 456789);
+    assert.ok(registry.find("codex-work", "later-codex"));
+    assert.ok(registry.find("codex-work", "replacement-codex"));
+    assert.equal(registry.find("codex-work", "configured-codex"), undefined);
+    await cache([]);
+    await registry.refresh({ allowNetwork: false });
+    assertCatalog();
+    assert.equal(registry.find("codex-work", astra.id), undefined, "removed catalog entries do not linger");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+
   ai.cleanupSessionResources("shared-session");
   assert.ok(sockets.every((socket) => socket.readyState === 3), "cleanup closes all scoped sockets");
   await credentials.modify("codex-work", async () => credential("work"));
@@ -205,7 +280,7 @@ try {
   assert.equal(sockets.length, 5);
   for (const handler of loaded.extensions[0].handlers.get("session_shutdown")) await handler({}, {});
   assert.ok(sockets.every((socket) => socket.readyState === 3), "shutdown closes remaining sockets");
-  console.log("Native personal Codex + work alias: real loader, catalogs, isolated auth/refresh/logout, native SSE/WebSocket, history, cache isolation/cleanup and errors passed");
+  console.log("Native personal Codex + work alias: real loader, bundled/remote/configured catalogs, Astra, isolated auth/refresh/logout, native SSE/WebSocket, history, cache isolation/cleanup and errors passed");
 } finally {
   globalThis.fetch = originalFetch;
   globalThis.WebSocket = originalWebSocket;

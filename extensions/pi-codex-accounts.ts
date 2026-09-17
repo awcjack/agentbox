@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   cleanupSessionResources,
-  createProvider,
   lazyStream,
   registerSessionResourceCleanup,
   type AssistantMessageEvent,
+  type Provider,
   type ProviderStreams,
   type StreamOptions,
 } from "@earendil-works/pi-ai";
@@ -73,12 +73,21 @@ export default function codexAccounts(pi: ExtensionAPI) {
         }
       })();
     });
-  pi.registerProvider(createProvider({
+  let getModels = () => native.getModels();
+  const provider: Provider = {
     id,
     name: "Codex Work",
     baseUrl: native.baseUrl,
     auth: native.auth,
-    models: native.getModels().map((model) => ({ ...model, provider: id })),
-    api: { stream: adapt("stream"), streamSimple: adapt("streamSimple") },
-  }));
+    getModels: () => getModels().map((model) => ({ ...model, provider: id })),
+    stream: adapt("stream"),
+    streamSimple: adapt("streamSimple"),
+  };
+  pi.registerProvider(provider);
+  pi.on("session_start", (_event, ctx) => {
+    // The runtime adds remote catalogs and models.json overlays to the builtin.
+    // Resolve on every read so refresh/recomposition cannot leave a stale list.
+    getModels = () => ctx.modelRegistry.getProvider(native.id)?.getModels() ?? native.getModels();
+    pi.registerProvider(provider);
+  });
 }

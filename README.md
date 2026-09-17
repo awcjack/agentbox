@@ -144,6 +144,12 @@ own stored login and native OAuth refresh; it neither replaces nor copies the
 existing `openai-codex` login. Use interactive `/login` and `/logout` for the
 work alias, not the wrapper's extension-free `pi auth` command.
 
+Once the session starts, the work alias mirrors the native provider's effective
+model catalog, including cached remote models and `models.json` model metadata.
+Credentials and configured auth headers remain separate. In Pi 0.84, initial CLI
+model resolution precedes this registry access: select remote-only alias models
+with `/model` inside the session rather than cold-starting with `--model`.
+
 **Privacy:** switching accounts in a conversation sends its existing context,
 including prior messages and tool results, to the newly selected account.
 Separate credentials are not separate workspaces or conversation sandboxes.
