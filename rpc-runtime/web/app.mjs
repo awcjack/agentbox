@@ -27,6 +27,30 @@ const dialogMethods = new Set(["confirm", "select", "input", "editor"]);
 const conversation = $("conversation");
 let followBottom = true, renderPending = false;
 let commandItems = [], commandIndex = 0, commandKey = "", dismissedCommands = null;
+const composeArea = document.querySelector(".compose-area");
+let promptExpanded = false;
+function setComposerCompact(compact) {
+  composeArea.classList.toggle("compact", compact);
+  updatePromptExpansion();
+  if (compact) hideCommandSuggestions();
+}
+function updatePromptExpansion() {
+  const expanded = promptExpanded && !composeArea.classList.contains("compact");
+  composeArea.classList.toggle("expanded", expanded);
+  $("expand-prompt").setAttribute("aria-expanded", String(expanded));
+  $("expand-prompt").setAttribute("aria-label", expanded ? "Collapse message box" : "Expand message box");
+  $("expand-prompt").title = expanded ? "Collapse message box" : "Expand message box";
+  $("expand-prompt").textContent = expanded ? "⤡" : "⤢";
+}
+$("expand-prompt").addEventListener("click", () => {
+  promptExpanded = !composeArea.classList.contains("expanded");
+  setComposerCompact(false);
+  $("prompt").focus();
+});
+// Keep the jump control above the composer at every size, including approvals.
+new ResizeObserver(() => {
+  document.querySelector(".main").style.setProperty("--compose-height", `${composeArea.offsetHeight}px`);
+}).observe(composeArea);
 
 function record(id) {
   if (!records.has(id)) records.set(id, { draft: { text: "", images: [], version: 0 }, messages: [], models: [], uiDrafts: new Map(), forbidden: new Set(), sending: false, notice: null });
@@ -832,7 +856,7 @@ function activate(meta, { reconnect = false } = {}) {
   selection++;
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, ready: false, online: false, cursor: 0 };
-  current = ctx; followBottom = true;
+  current = ctx; followBottom = true; setComposerCompact(false);
   $("approvals").replaceChildren(); restoreDraft(); renderMessages(); renderSessions(); renderModels(ctx); drawer(false);
   showNotice(ctx.record.notice?.message || "", ctx.record.notice?.error);
   runSession(ctx);
@@ -935,9 +959,9 @@ $("composer").addEventListener("submit", async (event) => {
     else ctx.record.notice = { message: `${error.message} Your draft was kept. The message may have been accepted; inspect this session before resending.`, error: true };
   } finally { if (ownEpoch === epoch) { ctx.record.sending = false; if (current?.record === ctx.record) { updateControls(); requestRefresh(current); } } }
 });
-$("prompt").addEventListener("input", () => { dismissedCommands = null; if (current) { current.record.draft.text = $("prompt").value; current.record.draft.version++; updateControls(); } });
-$("prompt").addEventListener("focus", () => renderCommandSuggestions());
-$("prompt").addEventListener("click", () => renderCommandSuggestions());
+$("prompt").addEventListener("input", () => { setComposerCompact(false); dismissedCommands = null; if (current) { current.record.draft.text = $("prompt").value; current.record.draft.version++; updateControls(); } });
+$("prompt").addEventListener("focus", () => { setComposerCompact(false); renderCommandSuggestions(); });
+$("prompt").addEventListener("click", () => { setComposerCompact(false); renderCommandSuggestions(); });
 $("prompt").addEventListener("blur", () => hideCommandSuggestions());
 $("prompt").addEventListener("keydown", (event) => {
   if (commandKeydown(event)) return;
@@ -1125,8 +1149,20 @@ $("dismiss-notice").addEventListener("click", () => { showNotice(""); if (curren
 $("open-drawer").addEventListener("click", () => drawer(true));
 $("close-drawer").addEventListener("click", () => { drawer(false); $("open-drawer").focus(); });
 $("drawer-shade").addEventListener("click", () => drawer(false));
-conversation.addEventListener("scroll", () => { followBottom = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight < 100; $("jump-latest").hidden = followBottom || !$("messages").childElementCount; }, { passive: true });
-$("jump-latest").addEventListener("click", () => { followBottom = true; conversation.scrollTop = conversation.scrollHeight; $("jump-latest").hidden = true; });
+let lastConversationTop = conversation.scrollTop;
+conversation.addEventListener("scroll", () => {
+  const gap = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
+  const scrollingUp = conversation.scrollTop < lastConversationTop;
+  followBottom = gap < 100;
+  // Leave enough distance for the enlarged viewport, even from expanded mode,
+  // so collapsing cannot immediately trigger the near-bottom restore threshold.
+  // Do not hide a toolbar control that currently has keyboard focus.
+  if (gap > composeArea.offsetHeight + 100 && scrollingUp && !document.activeElement?.closest(".composer-toolbar")) setComposerCompact(true);
+  else if (gap < 40) setComposerCompact(false);
+  lastConversationTop = conversation.scrollTop;
+  $("jump-latest").hidden = followBottom || !$("messages").childElementCount;
+}, { passive: true });
+$("jump-latest").addEventListener("click", () => { setComposerCompact(false); followBottom = true; conversation.scrollTop = conversation.scrollHeight; $("jump-latest").hidden = true; });
 for (const button of document.querySelectorAll(".starter")) button.addEventListener("click", () => {
   if (!current) { openNew(); return; }
   current.record.draft.text = button.dataset.prompt; current.record.draft.version++; restoreDraft(); $("prompt").focus();

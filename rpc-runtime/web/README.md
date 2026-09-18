@@ -27,6 +27,10 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   control independently of write access. Successful empty `204` responses work.
 - Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
   previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
+- Single-line prompt box with an accessible expand/collapse button. Scrolling
+  into older messages reduces the composer to a compact row; clicking or typing
+  in the prompt, or returning to the latest messages, restores its previous size.
+  Drafts are preserved, Send/Stop remain available, and agent requests stay visible.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
   links, pipe tables (including column alignment), and fenced code with copy/select fallback. `md`/`markdown` fences offer a
   Preview/Source toggle using the same safe renderer (nested fences stay source).
