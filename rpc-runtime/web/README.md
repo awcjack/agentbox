@@ -28,7 +28,7 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
   previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
-  links, and fenced code with copy/select fallback. `md`/`markdown` fences offer a
+  links, pipe tables (including column alignment), and fenced code with copy/select fallback. `md`/`markdown` fences offer a
   Preview/Source toggle using the same safe renderer (nested fences stay source).
   Raw HTML is never interpreted.
   Remote Markdown images are not fetched; only validated inline raster data is
@@ -169,7 +169,7 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
 - Oversized snapshot responses (HTTP 413) stop automatic reconnect attempts;
   the session can still be ended. Transcript pagination is not provided by Pi's
   `get_messages` command. Read snapshots are not duplicated in SSE replay.
-- Markdown is deliberately a small safe subset, not full CommonMark: no tables,
+- Markdown is deliberately a small safe subset, not full CommonMark: no
   nested-list parsing, syntax highlighting, or raw HTML. No external fonts/CDNs.
 - The runtime does not expose token capabilities up front. Read-only and command
   restrictions are learned from explicit scope/allowlist errors, then controls

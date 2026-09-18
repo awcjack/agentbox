@@ -17,6 +17,47 @@ test("fenced code preserves raw code and incomplete streaming fences", () => {
   assert.deepEqual(markdownBlocks("````md\n```\n````\nDone"), [{ type: "code", language: "md", text: "```" }, { type: "p", text: "Done" }]);
 });
 
+test("pipe tables support borders, alignment, escaped pipes, and uneven rows", () => {
+  assert.deepEqual(markdownBlocks("Intro\n| Setting | Value |\n|---|---|\n| Type | CLI Tool / MCP stdio |\n| Binary | `/run/current-system/sw/bin/oracle-use-brian-ops-mcp` |\n\nDone"), [
+    { type: "p", text: "Intro" },
+    { type: "table", headers: ["Setting", "Value"], align: [null, null], rows: [["Type", "CLI Tool / MCP stdio"], ["Binary", "`/run/current-system/sw/bin/oracle-use-brian-ops-mcp`"]] },
+    { type: "p", text: "Done" },
+  ]);
+  assert.deepEqual(markdownBlocks("Left | Center | Right\r\n:--- | :---: | ---:\r\n a\\|b | `c\\|d` | e | ignored\r\n| short |\r\n# Next"), [
+    { type: "table", headers: ["Left", "Center", "Right"], align: ["left", "center", "right"], rows: [["a|b", "`c|d`", "e"], ["short", "", ""]] },
+    { type: "h1", text: "Next" },
+  ]);
+});
+
+test("invalid or streaming table delimiters remain text; fenced tables remain code", () => {
+  for (const text of ["a | b\n--- | --", "a | b\n--- | --- | ---", "a | b\nnot | a delimiter"]) {
+    assert.deepEqual(markdownBlocks(text), [{ type: "p", text }]);
+  }
+  assert.equal(markdownBlocks("| a |\n|---|")[0].type, "table");
+  assert.deepEqual(markdownBlocks("```md\n| a |\n|---|\n```"), [{ type: "code", language: "md", text: "| a |\n|---|" }]);
+});
+
+test("tables render semantic safe DOM with inline formatting and alignment", () => {
+  class Node {
+    constructor(tag) { this.tag = tag; this.children = []; this.style = {}; }
+    append(...nodes) { this.children.push(...nodes); }
+    set innerHTML(_value) { throw new Error("Unsafe HTML assignment"); }
+  }
+  const previous = globalThis.document;
+  globalThis.document = { createElement: tag => new Node(tag), createTextNode: text => Object.assign(new Node("#text"), { textContent: text }) };
+  const all = node => [node, ...node.children.flatMap(all)];
+  try {
+    const nodes = all(renderMarkdown("| **Setting** | Value |\n|:---|---:|\n| `<script>` | [bad](javascript:evil) |\n| <img src=x onerror=evil> | [docs](https://example.com) |"));
+    for (const tag of ["table", "thead", "tbody", "strong", "code"]) assert.ok(nodes.some(node => node.tag === tag));
+    assert.equal(nodes.filter(node => node.tag === "tr").length, 3);
+    assert.deepEqual(nodes.filter(node => node.tag === "th").map(node => [node.scope, node.style.textAlign]), [["col", "left"], ["col", "right"]]);
+    assert.equal(nodes.filter(node => node.tag === "td").length, 4);
+    assert.ok(nodes.some(node => node.textContent === "<img src=x onerror=evil>"));
+    assert.ok(!nodes.some(node => ["script", "img"].includes(node.tag)));
+    assert.deepEqual(nodes.filter(node => node.tag === "a").map(node => node.href), ["https://example.com"]);
+  } finally { globalThis.document = previous; }
+});
+
 test("inline formatting is limited to explicit safe token types", () => {
   assert.deepEqual(inlineTokens("a **bold** _italic_ `code` [docs](https://example.com)"), [
     { type: "text", text: "a " }, { type: "strong", text: "bold" }, { type: "text", text: " " },

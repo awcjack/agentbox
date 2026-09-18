@@ -30,5 +30,6 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 @media(min-width:721px) and (max-width:1000px){.workspace{--sidebar-default-width:225px}}
 @media(min-width:1500px){.workspace{--sidebar-default-width:285px}}
 
+.markdown-table{max-width:100%;overflow-x:auto;margin:15px 0}.markdown-table table{width:100%;border-collapse:collapse;font-size:inherit}.markdown-table th,.markdown-table td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top;min-width:100px}.markdown-table th{background:var(--raised);font-weight:600}.markdown-table tr:nth-child(even){background:#211f1c}
 .markdown-preview{padding:14px}.code-heading>span{margin-right:auto}
 #settings{border:1px solid var(--border);border-radius:6px;text-align:left;font-size:13px;padding:10px 13px;margin:-17px 0 20px;color:var(--text)}#settings-model{overflow-wrap:anywhere}

@@ -26,6 +26,30 @@ export function inlineTokens(text) {
   return tokens;
 }
 
+// Split on unescaped pipes, including optional leading/trailing borders.
+function tableCells(line) {
+  const cells = [""];
+  let pipes = 0;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === "\\" && i + 1 < line.length) {
+      const next = line[++i];
+      cells[cells.length - 1] += next === "|" ? next : `\\${next}`;
+    } else if (line[i] === "|") { cells.push(""); pipes++; }
+    else cells[cells.length - 1] += line[i];
+  }
+  if (!pipes) return null;
+  if (!cells[0].trim()) cells.shift();
+  if (cells.length && !cells.at(-1).trim()) cells.pop();
+  return cells.map(cell => cell.trim());
+}
+
+function tableHeader(line, delimiter = "") {
+  const headers = tableCells(line);
+  const markers = tableCells(delimiter);
+  if (!headers?.length || markers?.length !== headers.length || !markers.every(cell => /^:?-{3,}:?$/.test(cell))) return null;
+  return { type: "table", headers, align: markers.map(cell => cell.startsWith(":") ? (cell.endsWith(":") ? "center" : "left") : cell.endsWith(":") ? "right" : null), rows: [] };
+}
+
 export function markdownBlocks(source) {
   const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
   const blocks = [];
@@ -59,8 +83,20 @@ export function markdownBlocks(source) {
       while (i < lines.length && (next = itemPattern.exec(lines[i]))) { items.push(next[1]); i++; }
       blocks.push({ type: ordered ? "ol" : "ul", start: ordered ? Number.parseInt(list[1], 10) : undefined, items }); continue;
     }
+    const table = tableHeader(line, lines[i]);
+    if (table) {
+      i++; // delimiter row
+      while (i < lines.length && !startsBlock(lines[i])) {
+        const cells = tableCells(lines[i]);
+        if (!cells) break;
+        table.rows.push(table.headers.map((_, index) => cells[index] ?? ""));
+        i++;
+      }
+      blocks.push(table);
+      continue;
+    }
     const content = [line];
-    while (i < lines.length && !startsBlock(lines[i])) content.push(lines[i++]);
+    while (i < lines.length && !startsBlock(lines[i]) && !tableHeader(lines[i], lines[i + 1])) content.push(lines[i++]);
     blocks.push({ type: "p", text: content.join("\n") });
   }
   return blocks;
@@ -147,6 +183,27 @@ export function renderMarkdown(source, { previewFences = true } = {}) {
         });
         heading.append(toggle);
       }
+      root.append(wrapper);
+    } else if (block.type === "table") {
+      const wrapper = element("div", "markdown-table");
+      const table = element("table");
+      const head = element("thead");
+      const body = element("tbody");
+      function row(cells, header = false) {
+        const tr = element("tr");
+        cells.forEach((text, index) => {
+          const cell = element(header ? "th" : "td");
+          if (header) cell.scope = "col";
+          if (block.align[index]) cell.style.textAlign = block.align[index];
+          inline(cell, text);
+          tr.append(cell);
+        });
+        return tr;
+      }
+      head.append(row(block.headers, true));
+      for (const cells of block.rows) body.append(row(cells));
+      table.append(head, body);
+      wrapper.append(table);
       root.append(wrapper);
     } else {
       const node = element(block.type);
