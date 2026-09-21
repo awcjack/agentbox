@@ -1342,3 +1342,63 @@ test("LF parser rejects overlong unterminated records", async () => {
   assert.equal(errors.length, 1);
   assert.match(errors[0].message, /unterminated record/);
 });
+
+test("uploads enforce auth, identity, profile, bounds and generated private paths", async (t) => {
+  const { baseUrl, runtime } = await fixture(t);
+  const session = (await request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  const endpoint = `/v1/sessions/${session.id}/uploads`;
+  const options = { method: "POST", headers: { "X-Pi-Session-Id": session.nativeSessionId }, body: { profile: "default", data: "AP9BQgo=" } };
+  assert.equal((await request(baseUrl, endpoint, { ...options, auth: false })).response.status, 401);
+  assert.equal((await request(baseUrl, endpoint, { ...options, headers: {} })).response.status, 400);
+  assert.equal((await request(baseUrl, endpoint, { ...options, headers: { "X-Pi-Session-Id": RESUME_ID } })).response.status, 409);
+  for (const body of [{ ...options.body, profile: "other" }, { ...options.body, path: "../../escape" }, { ...options.body, name: "../../escape" }, { ...options.body, data: "!!!" }, { ...options.body, data: "AB==" }]) {
+    assert.equal((await request(baseUrl, endpoint, { ...options, body })).response.status, 400);
+  }
+  assert.equal((await request(baseUrl, endpoint, { ...options, body: { ...options.body, data: "A".repeat(2048) } })).response.status, 413);
+  const result = await request(baseUrl, endpoint, options);
+  assert.equal(result.response.status, 201);
+  const directory = join(result.body.path, "..");
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.match(result.body.path, /\/pi-upload-[^/]+\/file$/);
+  assert.deepEqual(await readFile(result.body.path), Buffer.from(options.body.data, "base64"));
+  assert.equal((await stat(result.body.path)).mode & 0o777, 0o600);
+  assert.equal((await stat(directory)).mode & 0o777, 0o700);
+  const owned = runtime.sessions.get(session.id);
+  owned.uploadCount = 100;
+  assert.equal((await request(baseUrl, endpoint, options)).body.error.code, "upload_quota");
+  owned.uploadCount = 0; owned.conversationLocked = true;
+  assert.equal((await request(baseUrl, endpoint, options)).response.status, 409);
+  owned.conversationLocked = false;
+  owned.profile.allowedCommands.delete("prompt");
+  assert.equal((await request(baseUrl, endpoint, options)).response.status, 403);
+  assert.equal((await fetch(`${baseUrl}/attachments.mjs`)).status, 200);
+});
+
+test("uploads reject read-only credentials", async (t) => {
+  const readToken = "read-only-upload-token";
+  const { baseUrl } = await fixture(t, config({ auth: { tokens: [
+    { sha256: TOKEN_HASH, scopes: ALL_SCOPES },
+    { sha256: createHash("sha256").update(readToken).digest("hex"), scopes: ["sessions:read"] },
+  ] } }));
+  const session = (await request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  assert.equal((await request(baseUrl, `/v1/sessions/${session.id}/uploads`, { method: "POST", token: readToken,
+    headers: { "X-Pi-Session-Id": session.nativeSessionId }, body: { profile: "default", data: "" } })).response.status, 403);
+});
+
+test("uploads enforce decoded size and separate session storage", async (t) => {
+  const { baseUrl } = await fixture(t, config({ limits: { maxBodyBytes: 8 * 1024 * 1024 } }));
+  const create = async () => (await request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  const a = await create(), b = await create();
+  const upload = (session, data, native = session.nativeSessionId) => request(baseUrl, `/v1/sessions/${session.id}/uploads`, {
+    method: "POST", headers: { "X-Pi-Session-Id": native }, body: { profile: "default", data },
+  });
+  assert.equal((await upload(b, "AA==", a.nativeSessionId)).response.status, 409);
+  const oversized = await upload(a, Buffer.alloc(5 * 1024 * 1024 + 1).toString("base64"));
+  assert.equal(oversized.body.error.code, "upload_too_large");
+  const first = await upload(a, "AA=="), second = await upload(b, "AA==");
+  for (const result of [first, second]) {
+    assert.equal(result.response.status, 201);
+    t.after(() => rm(join(result.body.path, ".."), { recursive: true, force: true }));
+  }
+  assert.notEqual(first.body.path, second.body.path);
+});

@@ -1,6 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, realpathSync } from "node:fs";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
 import { archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
@@ -9,6 +12,7 @@ import { messageTitle } from "./web/session-title.mjs";
 
 const WEB_ASSETS = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/attachments.mjs", ["attachments.mjs", "text/javascript; charset=utf-8"]],
   ["/app.mjs", ["app.mjs", "text/javascript; charset=utf-8"]],
   ["/transport.mjs", ["transport.mjs", "text/javascript; charset=utf-8"]],
   ["/markdown.mjs", ["markdown.mjs", "text/javascript; charset=utf-8"]],
@@ -1068,7 +1072,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|auto))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|auto|uploads))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
@@ -1244,6 +1248,45 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         sessions.delete(session.id);
         response.statusCode = 204;
         return response.end();
+      }
+      if (action === "uploads" && request.method === "POST") {
+        authenticate(request, config, "sessions:write");
+        const validate = () => {
+          if (!request.headers["x-pi-session-id"]) throw new HttpError(400, "invalid_session_precondition", "X-Pi-Session-Id is required for uploads");
+          checkNativePrecondition(request, session, sessions.get(session.id));
+          if (session.status !== "running") throw new HttpError(409, "session_not_running", "session is not running");
+          if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
+          if (!session.profile.allowedCommands.has("prompt")) throw new HttpError(403, "command_forbidden", "uploads require allowed command prompt");
+        };
+        validate();
+        const body = await readJson(request, Math.min(config.limits.maxBodyBytes, 7 * 1024 * 1024));
+        validate();
+        if (!body || Array.isArray(body) || Object.keys(body).some((key) => !["profile", "data"].includes(key))
+          || body.profile !== session.profileName || typeof body.data !== "string"
+          || !/^[A-Za-z0-9+/]*={0,2}$/.test(body.data)) {
+          throw new HttpError(400, "invalid_upload", "upload requires the session profile and canonical base64 data; filenames and paths are not accepted");
+        }
+        const bytes = Buffer.from(body.data, "base64");
+        if (bytes.toString("base64") !== body.data) throw new HttpError(400, "invalid_upload", "invalid base64 data");
+        if (bytes.length > 5 * 1024 * 1024) throw new HttpError(413, "upload_too_large", "upload exceeds 5 MiB");
+        session.uploadBytes ??= 0; session.uploadCount ??= 0;
+        if (session.uploadBytes + bytes.length > 50 * 1024 * 1024 || session.uploadCount >= 100) throw new HttpError(413, "upload_quota", "session upload quota exceeded (50 MiB / 100 files)");
+        // Reserve before filesystem awaits so concurrent requests cannot bypass quotas.
+        session.uploadBytes += bytes.length; session.uploadCount++;
+        let directory;
+        try {
+          // mkdtemp creates a private 0700 directory; never use client path components.
+          directory = await mkdtemp(join(tmpdir(), "pi-upload-"));
+          const path = join(directory, "file");
+          await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
+          validate();
+          session.touch();
+          return json(response, 201, { path, size: bytes.length, nativeSessionId: session.nativeSessionId });
+        } catch (error) {
+          session.uploadBytes -= bytes.length; session.uploadCount--;
+          if (directory) await rm(directory, { recursive: true, force: true });
+          throw error;
+        }
       }
       if (action === "auto" && request.method === "POST") {
         authenticate(request, config, "sessions:write");
