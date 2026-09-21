@@ -6,6 +6,7 @@ import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
+import { readAttachments, attachmentMessage, uploadAttachments } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
 
 initSidebarResize();
@@ -535,11 +536,13 @@ function restoreDraft() {
   $("attachments").replaceChildren();
   for (const image of current?.record.draft.images || []) {
     const attachment = element("div", "attachment");
-    const preview = element("img"); preview.src = imageSource(image); preview.alt = image.name;
+    const preview = element(image.type === "file" ? "span" : "img");
+    if (image.type === "file") preview.textContent = "FILE";
+    else { preview.src = imageSource(image); preview.alt = image.name; }
     const remove = element("button", "icon-button", "\u00d7"); remove.type = "button"; remove.setAttribute("aria-label", `Remove ${image.name}`);
     const ctx = current;
     remove.addEventListener("click", () => {
-      if (!active(ctx)) return;
+      if (!active(ctx) || ctx.record.sending) return;
       ctx.record.draft.images = ctx.record.draft.images.filter((item) => item !== image); ctx.record.draft.version++; restoreDraft();
     });
     attachment.append(preview, element("span", "", image.name), remove); $("attachments").append(attachment);
@@ -937,17 +940,23 @@ $("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
   const ctx = current;
   if (!canWrite(ctx) || $("composer").hidden || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy) return;
-  const draft = ctx.record.draft, text = draft.text.trim(), images = draft.images.slice(), version = draft.version, ownEpoch = epoch;
-  if (!text && !images.length) return;
+  const draft = ctx.record.draft, text = draft.text.trim(), attachments = draft.images.slice(), version = draft.version, ownEpoch = epoch;
+  const images = attachments.filter((file) => file.type !== "file");
+  if (!text && !attachments.length) return;
   if (/^\/auto(?:\s|$)/.test(text) && !ctx.meta.autoMode) {
     showNotice("This Pi session has not reported the new /auto command. Deploy the updated policy extension and start a new session. Nothing was sent to the model.", true); return;
   }
   if (images.length && ctx.state.model?.input && !ctx.state.model.input.includes("image")) { showNotice("The selected model does not accept images. Choose a vision-capable model or remove the attachments.", true); return; }
-  const command = { type: "prompt", message: text, streamingBehavior: $("send-mode").value };
-  if (images.length) command.images = images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
-  if (new TextEncoder().encode(JSON.stringify(command)).length > 7.5 * 1024 * 1024) { showNotice("This message is too large. Keep text and encoded attachments below 7.5 MiB.", true); return; }
+  const nativeId = ctx.state.sessionId || ctx.meta.nativeSessionId;
+  const streamingBehavior = $("send-mode").value;
   ctx.record.sending = true; updateControls();
   try {
+    await uploadAttachments(attachments, nativeId, (data) => api.request(path(ctx, "/uploads"), {
+      body: { profile: ctx.meta.profile, data }, nativeSessionId: nativeId, signal: auth.signal,
+    }), () => active(ctx) && ownEpoch === epoch && (ctx.state.sessionId || ctx.meta.nativeSessionId) === nativeId);
+    const command = { type: "prompt", message: attachmentMessage(text, attachments), streamingBehavior };
+    if (images.length) command.images = images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
+    if (new TextEncoder().encode(JSON.stringify(command)).length > 7.5 * 1024 * 1024) throw new Error("This message is too large. Keep text and encoded attachments below 7.5 MiB.");
     await rpc(ctx, command, true);
     if (ownEpoch !== epoch) return;
     if (draft.version === version) { draft.text = ""; draft.images = []; draft.version++; }
@@ -1064,7 +1073,7 @@ $("image-files").addEventListener("change", () => {
   const files = [...$("image-files").files]; $("image-files").value = ""; attachImages(files);
 });
 $("prompt").addEventListener("paste", (event) => {
-  const files = [...(event.clipboardData?.items || [])].filter((item) => item.kind === "file" && item.type.startsWith("image/")).map((item) => item.getAsFile()).filter(Boolean);
+  const files = [...(event.clipboardData?.items || [])].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
   if (!files.length) return;
   // Leave ordinary text paste alone, including text accompanying an image.
   if (!event.clipboardData.getData("text/plain")) event.preventDefault();
@@ -1073,19 +1082,11 @@ $("prompt").addEventListener("paste", (event) => {
 async function attachImages(files) {
   const ctx = current, ownEpoch = epoch;
   if (!files.length || !ctx || readOnly || ctx.record.ending || ctx.record.sending) return;
-  if (ctx.record.readingImages) { showNotice("Wait for the current images to finish loading before adding more."); return; }
+  if (ctx.record.readingImages) { showNotice("Wait for the current attachments to finish loading before adding more."); return; }
   ctx.record.readingImages = true; updateControls();
   try {
-    const existing = ctx.record.draft.images.reduce((total, image) => total + image.size, 0);
-    if (files.some((file) => !/^image\/(png|jpeg|webp|gif)$/.test(file.type))) throw new Error("Attach PNG, JPEG, WebP, or GIF images only.");
-    if (existing + files.reduce((total, file) => total + file.size, 0) > 5 * 1024 * 1024) throw new Error("Keep image attachments below 5 MiB total (before base64 encoding).");
-    const images = await Promise.all(files.map((file) => new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
-      reader.onload = () => resolve({ name: file.name, size: file.size, mimeType: file.type, data: String(reader.result).split(",")[1] });
-      reader.readAsDataURL(file);
-    })));
-    if (ownEpoch !== epoch) return;
+    const images = await readAttachments(files, ctx.record.draft.images);
+    if (ownEpoch !== epoch || !active(ctx)) return;
     ctx.record.draft.images.push(...images); ctx.record.draft.version++;
     if (current?.record === ctx.record) restoreDraft();
   } catch (error) { if (ownEpoch === epoch) report(error, ctx); }

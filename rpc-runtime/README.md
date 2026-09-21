@@ -420,3 +420,43 @@ PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node web/browser-smoke.
 covers Settings commands, native write headers, draft preservation, unchanged
 live model/auto, confirmation/decline, concurrent-write locks, missing command
 support, and keyboard dismissal, alongside the existing chat flows.
+
+### Browser file attachments
+
+The composer accepts arbitrary files (5 MiB combined per draft). PNG, JPEG,
+WebP and GIF retain previews and native Pi image sending; a vision-capable model
+is still required. Other files, including text, PDF, audio, video and archives,
+are uploaded when Send is pressed. The prompt contains their original display
+names and generated absolute filesystem paths, not native binary model blocks.
+The agent needs appropriate filesystem tools/parsers to use those files; model
+support for these formats is not implied. Treat file contents as untrusted.
+
+`POST /v1/sessions/:id/uploads` is part of this authenticated HTTP wrapper, not Pi
+RPC. It requires `sessions:write`, an allowed `prompt` command in the session's
+profile, and a mandatory matching `X-Pi-Session-Id` native UUID. JSON body:
+`{"profile":"default","data":"<canonical base64>"}`. No client filename or path
+is accepted. Response: `{path, size, nativeSessionId}`. Origin policy applies as
+for other writes. Stopped, changing, mismatched-profile and stale sessions are
+rejected, including a second identity check after asynchronous storage.
+
+Limits: 5 MiB decoded per file, the smaller of `maxBodyBytes` and 7 MiB for JSON,
+and 50 MiB / 100 files per runtime session (including concurrent reservations).
+Smaller configured body limits also constrain uploads. Each file has a fresh
+server-generated private `pi-upload-*` directory in the runtime's OS temporary
+directory (0700), with an exclusively created `file` (0600). No upload download,
+list, overwrite, or delete API is exposed. Files live in the same environment as
+Pi. API session isolation is **not an OS sandbox**: Pi processes running as the
+same Unix user can access one another's files if they discover their paths, just
+as they can access other shared filesystem state. Tokens retain the wrapper's
+existing scope model, not per-user session ownership.
+
+Removing an unsent file prevents its upload. Failed sends keep the draft and
+reuse completed uploads in that native conversation; switching conversations
+while uploading prevents automatic sending. Failed partial storage is removed.
+Successful uploads (including abandoned drafts or ambiguous network failures)
+are retained so sent references and resumed history remain usable until the OS
+or administrator removes them. They are not deleted on session end or runtime
+shutdown. Temporary storage may be ephemeral; archive important files elsewhere.
+Administrators should budget/clean `pi-upload-*` storage: quotas are per runtime
+session, not durable global/user disk quotas, and reset on session replacement
+or runtime restart. Only trusted authenticated writers should have access.
