@@ -1,4 +1,4 @@
-import { ApiError, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
+import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
 import { initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
@@ -335,6 +335,27 @@ function renderModels(ctx) {
   updateControls();
 }
 
+// Independent of SSE and routine transcript reconciliation. Each request owns its
+// retries, and cancellation also guards against fetch implementations resolving late.
+function cancelModels(ctx) { ctx.modelController?.abort(); }
+function refreshModels(ctx) {
+  cancelModels(ctx);
+  const controller = new AbortController(), nativeId = ctx.meta.nativeSessionId;
+  ctx.modelController = controller;
+  const abort = () => controller.abort();
+  ctx.controller.signal.addEventListener("abort", abort, { once: true });
+  const valid = () => active(ctx) && !controller.signal.aborted && ctx.meta.nativeSessionId === nativeId;
+  retryCatalogRead(() => api.request(path(ctx, "/rpc"), {
+    body: { type: "get_available_models" }, signal: controller.signal,
+  }), controller.signal).then((value) => {
+    if (!valid()) return;
+    ctx.record.models = value?.data?.models || [];
+    renderModels(ctx);
+  }).catch((error) => {
+    if (valid()) report(error, ctx, { command: "get_available_models" });
+  }).finally(() => ctx.controller.signal.removeEventListener("abort", abort));
+}
+
 function renderThinking(ctx) {
   const root = $("thinking-level"), currentLevel = ctx?.state.thinkingLevel;
   const catalog = ctx?.thinkingCatalog;
@@ -619,6 +640,7 @@ function renderApprovals(ctx) {
 
 function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
+    cancelModels(ctx); ctx.modelsRequested = true; ctx.record.models = [];
     ctx.record.messages = []; ctx.partial = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
     ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
     ctx.commands = undefined; ctx.commandError = null; ctx.thinkingCatalog = null;
@@ -634,6 +656,7 @@ async function snapshot(ctx, initial = false) {
   const uiRevision = ctx.uiRevision;
   let { session: meta } = await api.request(path(ctx), { signal: ctx.controller.signal });
   while (meta.conversationReplacing && active(ctx)) {
+    cancelModels(ctx);
     ctx.replacing = true; updateControls();
     await new Promise((resolve) => setTimeout(resolve, 150));
     ({ session: meta } = await api.request(path(ctx), { signal: ctx.controller.signal }));
@@ -659,6 +682,7 @@ async function snapshot(ctx, initial = false) {
   for (const message of ctx.record.messages) if (message.role === "toolResult") ctx.tools.delete(message.toolCallId);
   ctx.ready = true;
   if (freshState) refreshThinkingLevels(ctx, initial);
+  if (initial || ctx.modelsRequested) { ctx.modelsRequested = false; refreshModels(ctx); }
   renderModels(ctx); renderSessions(); scheduleRender();
   return cursor;
 }
@@ -722,9 +746,11 @@ function handleEvent(ctx, frame) {
     else if (event.method === "setStatus" && event.statusKey === "agentbox-auto") requestRefresh(ctx);
   } else if (type === "supervisor") {
     if (["conversation_replacing", "conversation_source_exited"].includes(event.event)) {
+      cancelModels(ctx);
       ctx.replacing = true; ctx.ready = false; ctx.stateRevision++; ctx.uiRevision++;
       ctx.reset = true; ctx.streamController.abort(); updateControls();
     } else if (["conversation_changed", "conversation_replace_failed"].includes(event.event)) {
+      cancelModels(ctx);
       ctx.ready = false; ctx.reset = true; ctx.streamController.abort(); updateControls();
     } else if (["extension_ui_expired", "extension_ui_resolved"].includes(event.event)) {
       ctx.uiRevision++;
@@ -751,6 +777,7 @@ async function runSession(ctx) {
   let failures = 0;
   while (active(ctx)) {
     clearTimeout(ctx.refreshTimer); ctx.refreshTimer = null;
+    cancelModels(ctx);
     ctx.connecting = true; ctx.online = false; ctx.ready = false; ctx.partial = null; ctx.tools.clear();
     setNetwork("reconnecting", failures ? "Reconnecting" : "Connecting"); updateControls();
     try {
@@ -859,14 +886,11 @@ function activate(meta, { reconnect = false } = {}) {
   selection++;
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, ready: false, online: false, cursor: 0 };
+  ctx.record.models = [];
   current = ctx; followBottom = true; setComposerCompact(false);
   $("approvals").replaceChildren(); restoreDraft(); renderMessages(); renderSessions(); renderModels(ctx); drawer(false);
   showNotice(ctx.record.notice?.message || "", ctx.record.notice?.error);
   runSession(ctx);
-  rpc(ctx, { type: "get_available_models" }).then((data) => {
-    if (!active(ctx)) return;
-    ctx.record.models = data?.models || []; renderModels(ctx);
-  }).catch((error) => { if (active(ctx) && meta.status === "running") report(error, ctx, { command: "get_available_models" }); });
 }
 
 async function createSession(body) {
@@ -1140,7 +1164,7 @@ $("new-session").addEventListener("click", openNew);
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
 $("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ profile: $("new-profile").value, ...(name ? { name } : {}) }); });
 $("refresh-sessions").addEventListener("click", () => {
-  if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; }
+  if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; current.modelsRequested = true; cancelModels(current); }
   refreshSessions();
   if (current?.online && current.ready) requestRefresh(current);
   else if (current) activate(current.meta, { reconnect: true });

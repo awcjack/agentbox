@@ -161,7 +161,13 @@ const server = createServer(async (request, response) => {
       }
       data = { messages: session.messages };
     }
-    else if (body.type === "get_available_models") data = { models };
+    else if (body.type === "get_available_models") {
+      if (session.modelFailures > 0) {
+        session.modelFailures--;
+        return json(response, 503, { error: { code: "unavailable", message: "Transient catalog read failure" } });
+      }
+      data = { models: session.catalog || models };
+    }
     else if (body.type === "get_commands") data = { commands: [...(session.noDefaults ? [] : [{ name: "agentbox-defaults", description: "Persistent defaults" }]), { name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
     else if (body.type === "get_available_thinking_levels") {
       if (session.denyThinking) return json(response, 403, { error: { code: "command_forbidden", message: "Thinking discovery is forbidden" } });
@@ -282,7 +288,8 @@ try {
       await until(() => [...sessions.values()].some((session) => session.name === sessionName && session.releaseSnapshot), "initial get_messages reached fixture gate");
       const session = [...sessions.values()].find((session) => session.name === sessionName);
       assert.ok(session);
-      await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_state") && calls.some((call) => call.id === session.id && call.command?.type === "get_available_models"), "other initial RPCs arrived");
+      await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_state"), "initial state RPC arrived");
+      assert.equal(calls.some((call) => call.id === session.id && call.command?.type === "get_available_models"), false, "catalog waits for initial snapshot");
       const initialTraffic = traffic(session);
       await page.locator("#prompt").fill("Draft while syncing");
       for (let click = 0; click < 3; click++) {
@@ -497,12 +504,14 @@ try {
       assert.deepEqual(traffic(session), healthyTraffic, "healthy same-session clicks send no snapshot/model RPCs, metadata reads, SSE connections, or creation POSTs");
       assert.deepEqual([...session.clients], [healthyStream], "same-session clicks keep the original stream open");
 
+      session.catalog = [...models, { provider: "new-provider", id: "new-model", name: "New catalog model" }];
       session.messages.push({ role: "user", content: [{ type: "text", text: "Snapshot-only fixture message" }], timestamp: ++tick });
       await openSidebar(); await page.locator("#refresh-sessions").click();
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Snapshot-only fixture message")), "healthy Refresh fetches new snapshot without an SSE event");
       await page.waitForTimeout(250);
-      assert.deepEqual(traffic(session), { ...healthyTraffic, metadata: healthyTraffic.metadata + 1, rpc: [...healthyTraffic.rpc, "get_messages", "get_state", "get_available_thinking_levels"] }, "healthy Refresh fetches one snapshot and refreshes thinking discovery, not models or a new stream");
+      assert.deepEqual(traffic(session), { ...healthyTraffic, metadata: healthyTraffic.metadata + 1, rpc: [...healthyTraffic.rpc, "get_messages", "get_state", "get_available_thinking_levels", "get_available_models"] }, "healthy Refresh fetches one snapshot and refreshes catalogs without a new stream");
       assert.deepEqual([...session.clients], [healthyStream], "Refresh keeps the original stream open");
+      assert.ok((await page.locator("#model").textContent()).includes("New catalog model"), "Refresh discovers newly available providers");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this selected-session draft");
       assert.equal(await page.locator("#model").inputValue(), JSON.stringify(["fixture", "pi-reasoning"]));
       if (label === "mobile") await page.locator("#close-drawer").click();
@@ -646,9 +655,13 @@ try {
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "idle after stop");
       assert.equal(await page.locator("article.assistant").count(), 1);
       assert.equal(await page.locator("#messages script").count(), 0);
+      session.modelFailures = 1;
+      session.catalog = [...models, { provider: "reconnected", id: "new-model", name: "Reconnect model" }];
       const before = session.subscriptions; disconnect(session);
       await until(() => session.subscriptions > before, "EOF reconnect");
       await until(() => page.locator("#connection-label").textContent().then((text) => text === "Connected"), "EOF ready");
+      await until(() => page.locator("#model").textContent().then((text) => text.includes("Reconnect model")), "reconnect reloads catalog after transient failure");
+      assert.equal(session.subscriptions, before + 1, "catalog retry does not reconnect SSE");
       assert.equal(await page.locator("article.assistant").count(), 1);
 
       // An ambiguous accepted write must keep its draft and must not be retried.

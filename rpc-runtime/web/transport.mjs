@@ -177,3 +177,25 @@ export function updatePartial(partial, event) {
   if (event.usage) message.usage = event.usage;
   return message;
 }
+
+// Catalog reads only: never use this for writes or successful-but-empty catalogs.
+export async function retryCatalogRead(read, signal, delays = [250, 1000]) {
+  for (let attempt = 0; ; attempt++) {
+    signal.throwIfAborted();
+    try {
+      const value = await read();
+      signal.throwIfAborted();
+      return value;
+    } catch (error) {
+      signal.throwIfAborted();
+      const transient = [408, 429, 500, 502, 503, 504].includes(error.status)
+        || (!error.status && ["network_error", "timeout"].includes(error.code));
+      if (!transient || attempt >= delays.length) throw error;
+      await new Promise((resolve, reject) => {
+        const abort = () => { clearTimeout(timer); reject(signal.reason); };
+        const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, delays[attempt]);
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    }
+  }
+}

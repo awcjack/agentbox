@@ -110,6 +110,15 @@ stream; unavailable connections and browser network recovery explicitly reconnec
 Selecting a different session changes the browser subscription, not the running
 Pi process.
 
+Model discovery runs after the initial/reconnect snapshot and on explicit Refresh,
+without another SSE connection. Routine transcript snapshots do not poll models.
+Transient network/timeouts and HTTP 408/429/500/502/503/504 failures get at most two
+retries (250 ms, then 1 s); auth/command denials are not retried. Successful catalogs,
+including empty or incomplete lists, are accepted without retries. Selection changes,
+native conversation replacement and newer refreshes cancel obsolete catalog reads
+and retry delays. Deploy the current Agentbox image to include its Pi startup
+provider-registration patch; browser refresh alone cannot fix an older Pi build.
+
 Writes retain their original session identity, and only clear an unchanged draft
 after acceptance.
 An ambiguous network failure preserves the draft and warns that acceptance is

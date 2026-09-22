@@ -149,10 +149,13 @@ and `models.json` metadata) before CLI/default/session model resolution, then
 mirrors the live registry after startup. Credentials and configured auth headers
 remain separate; catalog bootstrap performs no network requests or token refresh.
 Agentbox patches Pi 0.84.2 to batch startup provider registrations before one
-awaited catalog/auth refresh, preventing intermittent account fallback on resume.
-Both changes require rebuilding the image; refreshing the browser alone does not
-update the Pi executable/extensions. Browser reconnect reads the running child's
-model state; reply badges show the model/provider recorded on each old reply.
+awaited catalog/auth refresh, preventing intermittent account fallback on resume
+and missing aliases in new-session model lists. The web model picker loads after
+startup synchronization, retries transient read failures, and reloads on Refresh
+or reconnect without restarting Pi. Rebuild and redeploy the image to pick up the
+patched executable and web assets; browser refresh alone cannot update Pi in an
+older image. Start a new session or resume into a new process after deployment.
+Reply badges show the model/provider recorded on each old reply.
 
 **Privacy:** switching accounts in a conversation sends its existing context,
 including prior messages and tool results, to the newly selected account.
