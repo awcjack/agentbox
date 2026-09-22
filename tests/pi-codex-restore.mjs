@@ -1,6 +1,7 @@
 // Offline real-process regression: model resolution happens BEFORE session_start.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,7 +22,7 @@ async function state(args) {
       PI_CODING_AGENT_DIR: directory, PI_OFFLINE: "1", PI_TELEMETRY: "0" },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  let output = "", stderr = "", timer;
+  let output = "", stderr = "", timer, initialState, initialModels;
   const events = [];
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   try {
@@ -36,10 +37,15 @@ async function state(args) {
           let record;
           try { record = JSON.parse(line); } catch { events.push(line); continue; }
           if (record.type === "extension_error") events.push(record);
-          if (record.id === "state") resolve({ ...record, diagnostics: { stderr, events, args } });
+          if (record.id === "state") initialState = record;
+          if (record.id === "models") initialModels = record;
+          if (initialState && initialModels) resolve({ ...initialState, initialModels, diagnostics: { stderr, events, args } });
         }
       });
-      child.stdin.write(JSON.stringify({ id: "state", type: "get_state" }) + "\n");
+      // Queue the web model-picker request before startup finishes; checking only
+      // get_state misses a catalog that is temporarily missing an authenticated alias.
+      child.stdin.write(JSON.stringify({ id: "models", type: "get_available_models" }) + "\n"
+        + JSON.stringify({ id: "state", type: "get_state" }) + "\n");
     });
   } finally {
     clearTimeout(timer);
@@ -57,6 +63,11 @@ const expect = (result, provider, id) => {
   assert.equal(result.success, true, JSON.stringify(result.diagnostics));
   assert.equal(result.data.model?.provider, provider, `real RPC state for ${id}: ${JSON.stringify(result.diagnostics)}`);
   assert.equal(result.data.model.id, id);
+  assert.equal(result.initialModels.success, true, JSON.stringify(result.diagnostics));
+  for (const account of ["openai-codex", "codex-work"]) {
+    assert.ok(result.initialModels.data.models.some((model) => model.provider === account && model.id === id),
+      `${account}/${id} must appear in the first web model-picker response: ${JSON.stringify(result.diagnostics)}`);
+  }
 };
 try {
   const native = openaiCodexProvider();
@@ -135,9 +146,15 @@ try {
   }
   expect(await state(["--session", sessionPath, "--provider", native.id, "--model", "gpt-5.4"]), native.id, "gpt-5.4");
   expect(await state(["--no-session", "--provider", "codex-work", "--model", remote.id]), "codex-work", remote.id);
-  await settings("codex-work", remote.id);
-  expect(await state(["--no-session"]), "codex-work", remote.id);
-  console.log("Codex real RPC: bundled/cached/configured alias restoration, repeated restart, thinking, explicit override, fresh defaults and deterministic startup refresh barrier passed");
+  for (const modelId of ["gpt-5.4", remote.id, "configured-codex"]) {
+    await settings("codex-work", modelId);
+    // The web supervisor creates persistent sessions with --session-id. Exercise
+    // simultaneous cold starts as well as the no-session CLI path, offline.
+    expect(await state(["--no-session"]), "codex-work", modelId);
+    const fresh = await Promise.all([0, 1, 2].map(() => state(["--session-id", randomUUID()])));
+    for (const result of fresh) expect(result, "codex-work", modelId);
+  }
+  console.log("Codex real RPC: bundled/cached/configured alias restoration, repeated restart, thinking, explicit override, concurrent fresh sessions, first web model catalog and deterministic startup refresh barrier passed");
 } finally {
   await rm(directory, { recursive: true, force: true });
 }
