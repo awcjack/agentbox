@@ -8,10 +8,20 @@ import { commandQuery, commandSuggestions } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
+import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
+
+let preferenceStorage;
+try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
+const hiddenModels = readHiddenModels(preferenceStorage);
 
 initSidebarResize();
 
 const $ = (id) => document.getElementById(id);
+const hideProfileKey = "agentbox.pi.hide-profile.v1";
+let hideProfile = false;
+try { hideProfile = preferenceStorage?.getItem(hideProfileKey) === "true"; } catch { /* Use the default. */ }
+$("profile-section").hidden = hideProfile;
+$("hide-profile-section").checked = hideProfile;
 const api = createTransport(() => token);
 let token = "", auth = new AbortController(), epoch = 0, selection = 0, listVersion = 0;
 let current = null, sessions = [], profiles = [], history = [], readOnly = false, createDenied = false, createBusy = false;
@@ -323,7 +333,7 @@ function renderModels(ctx) {
   if (!active(ctx)) return;
   const root = $("model"); root.replaceChildren();
   const model = ctx.state.model;
-  const models = ctx.record.models.slice();
+  const models = visibleModels(ctx.record.models, hiddenModels, model);
   if (model && !models.some((item) => item.id === model.id && item.provider === model.provider)) models.unshift(model);
   if (!models.length) root.append(element("option", "", "No model available"));
   for (const item of models) {
@@ -333,6 +343,31 @@ function renderModels(ctx) {
     root.append(option);
   }
   updateControls();
+}
+
+function renderModelVisibility(ctx) {
+  const root = $("model-visibility-list"); root.replaceChildren();
+  const query = $("model-visibility-search").value.trim().toLowerCase();
+  const models = ctx.record.models.slice();
+  if (ctx.state.model && !models.some((model) => modelKey(model) === modelKey(ctx.state.model))) models.unshift(ctx.state.model);
+  for (const model of models) {
+    const title = `${model.name || model.id} / ${model.provider} (${model.id})`;
+    if (!title.toLowerCase().includes(query)) continue;
+    const row = element("label", "model-visibility-row");
+    const checkbox = document.createElement("input"); checkbox.type = "checkbox";
+    checkbox.checked = !hiddenModels.has(modelKey(model));
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) hiddenModels.delete(modelKey(model)); else hiddenModels.add(modelKey(model));
+      persistModelVisibility(ctx);
+    });
+    row.append(checkbox, document.createTextNode(title)); root.append(row);
+  }
+  if (!root.childElementCount) root.append(element("p", "field-note", "No matching models."));
+}
+function persistModelVisibility(ctx) {
+  const saved = saveHiddenModels(preferenceStorage, hiddenModels);
+  $("model-visibility-status").textContent = saved ? "Saved in this browser." : "Applied for this page only; browser storage is unavailable.";
+  renderModels(ctx);
 }
 
 // Independent of SSE and routine transcript reconciliation. Each request owns its
@@ -351,6 +386,7 @@ function refreshModels(ctx) {
     if (!valid()) return;
     ctx.record.models = value?.data?.models || [];
     renderModels(ctx);
+    if ($("settings-dialog").open && settingsTarget?.ctx === ctx) renderModelVisibility(ctx);
   }).catch((error) => {
     if (valid()) report(error, ctx, { command: "get_available_models" });
   }).finally(() => ctx.controller.signal.removeEventListener("abort", abort));
@@ -933,9 +969,33 @@ $("settings").addEventListener("click", () => {
   settingsTarget = { ctx, nativeId: ctx.meta.nativeSessionId };
   drawer(false);
   $("default-auto").value = "off";
+  $("model-visibility-search").value = "";
+  $("model-visibility-status").textContent = "";
+  renderModelVisibility(ctx);
   $("settings-dialog").showModal();
   if (ctx.commands === undefined && !ctx.commandLoading) loadCommands(ctx);
   updateControls();
+});
+$("hide-profile-section").addEventListener("change", () => {
+  hideProfile = $("hide-profile-section").checked;
+  $("profile-section").hidden = hideProfile;
+  try {
+    preferenceStorage.setItem(hideProfileKey, String(hideProfile));
+    $("sidebar-preference-status").textContent = "Saved in this browser. Hidden Profile shows sessions from all profiles.";
+  } catch {
+    $("sidebar-preference-status").textContent = "Applied for this page only; browser storage is unavailable.";
+  }
+  if (hideProfile) {
+    $("profile-filter").value = "";
+    renderSessions(); refreshSessions();
+  }
+});
+$("model-visibility-search").addEventListener("input", () => {
+  if (settingsTarget?.ctx) renderModelVisibility(settingsTarget.ctx);
+});
+$("show-all-models").addEventListener("click", () => {
+  if (!settingsTarget?.ctx) return;
+  hiddenModels.clear(); persistModelVisibility(settingsTarget.ctx); renderModelVisibility(settingsTarget.ctx);
 });
 $("close-settings").addEventListener("click", () => $("settings-dialog").close());
 $("settings-dialog").addEventListener("close", () => { settingsTarget = null; });

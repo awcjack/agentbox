@@ -17,9 +17,11 @@
     <aside class="sidebar" id="sidebar" aria-label="Session navigation">
       <div class="brand"><span class="brand-mark" aria-hidden="true">pi</span><span>Pi agent<span class="brand-sub">AGENTBOX</span></span><button id="close-drawer" class="icon-button mobile-only" aria-label="Close sessions">&times;</button></div>
       <button id="new-session" class="new-session" disabled><span aria-hidden="true">+</span> New session <kbd>N</kbd></button>
-      <button id="settings" class="text-button" type="button" title="Default model and default auto for future sessions" disabled>Settings</button>
-      <label class="section-label" for="profile-filter">PROFILE</label>
-      <select id="profile-filter" disabled aria-label="Filter sessions by profile"><option value="">All profiles</option></select>
+      <button id="settings" class="text-button" type="button" title="Model visibility and defaults for future sessions" disabled>Settings</button>
+      <div id="profile-section">
+        <label class="section-label" for="profile-filter">PROFILE</label>
+        <select id="profile-filter" disabled aria-label="Filter sessions by profile"><option value="">All profiles</option></select>
+      </div>
       <div class="section-heading"><span class="section-label">SESSIONS</span><button id="refresh-sessions" class="text-button" disabled>Refresh</button></div>
       <div id="sessions" class="session-list"><p class="sidebar-empty">Connect to find your sessions.</p></div>
       <div class="sidebar-footer"><span class="connection-dot" id="connection-dot"></span><span id="connection-label">Not connected</span><button class="text-button" id="logout" disabled>Log out</button></div>
@@ -90,6 +92,16 @@
       <button id="save-default-auto" class="primary-button" type="button">Save default auto</button>
       <button id="show-defaults" class="text-button" type="button">Show saved defaults</button>
       <p id="settings-help" class="field-note" role="status"></p>
+      <h3>Sidebar</h3>
+      <label class="model-visibility-row"><input id="hide-profile-section" type="checkbox">Hide Profile section</label>
+      <p id="sidebar-preference-status" class="field-note" role="status">Saved only in this browser. Hiding the section shows sessions from all profiles.</p>
+      <h3>Models shown in selector</h3>
+      <p class="field-note">Uncheck models to hide them. Saved only in this browser, separately for each provider/account. The current model always remains visible. This does not change Pi defaults or model access.</p>
+      <label for="model-visibility-search">Filter models</label>
+      <input id="model-visibility-search" type="search" placeholder="Model or provider">
+      <div id="model-visibility-list" class="model-visibility-list" role="group" aria-label="Models shown in selector"></div>
+      <button id="show-all-models" class="text-button" type="button">Show all models</button>
+      <p id="model-visibility-status" class="field-note" role="status"></p>
     </div>
   </dialog>
   <dialog id="new-dialog" aria-labelledby="new-title">

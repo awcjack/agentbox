@@ -110,6 +110,16 @@ stream; unavailable connections and browser network recovery explicitly reconnec
 Selecting a different session changes the browser subscription, not the running
 Pi process.
 
+Settings includes browser-local display preferences (no credentials are stored):
+- **Models shown in selector:** search and uncheck models to hide them by provider
+  and model ID. The current model remains visible; **Show all models** clears the
+  hidden list. New models are visible by default. This does not change model access,
+  Pi defaults, or other browsers.
+- **Hide Profile section:** hides the sidebar filter and resets it to All profiles.
+  The new-session profile picker remains available.
+Preferences persist across page reloads when local storage is available; if storage
+is blocked, the UI reports that changes apply only to the current page.
+
 Model discovery runs after the initial/reconnect snapshot and on explicit Refresh,
 without another SSE connection. Routine transcript snapshots do not poll models.
 Transient network/timeouts and HTTP 408/429/500/502/503/504 failures get at most two
