@@ -14,7 +14,7 @@ const { FileModelsStore } = await import(pathToFileURL(`${root}/dist/core/models
 const { openaiCodexProvider } = await import(pathToFileURL(`${root}/node_modules/@earendil-works/pi-ai/dist/providers/openai-codex.js`));
 const extension = new URL("../extensions/pi-codex-accounts.ts", import.meta.url).pathname;
 const directory = await mkdtemp(join(tmpdir(), "pi-codex-restore-"));
-async function state(args) {
+async function state(args, updateCatalog) {
   const child = spawn(process.execPath, [`${root}/dist/cli.js`, "--mode", "rpc", "--offline",
     "--no-extensions", "-e", extension, "--no-skills", "--no-prompt-templates",
     "--no-themes", "--no-context-files", "--no-tools", ...args], {
@@ -22,7 +22,7 @@ async function state(args) {
       PI_CODING_AGENT_DIR: directory, PI_OFFLINE: "1", PI_TELEMETRY: "0" },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  let output = "", stderr = "", timer, initialState, initialModels;
+  let output = "", stderr = "", timer, initialState, initialModels, awaitingRefresh = false;
   const events = [];
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   try {
@@ -39,7 +39,18 @@ async function state(args) {
           if (record.type === "extension_error") events.push(record);
           if (record.id === "state") initialState = record;
           if (record.id === "models") initialModels = record;
-          if (initialState && initialModels) resolve({ ...initialState, initialModels, diagnostics: { stderr, events, args } });
+          if (record.id === "refreshed") {
+            resolve({ ...initialState, initialModels, refreshedModels: record, diagnostics: { stderr, events, args } });
+          } else if (initialState && initialModels && !awaitingRefresh) {
+            if (updateCatalog) {
+              awaitingRefresh = true;
+              const update = updateCatalog;
+              updateCatalog = undefined;
+              Promise.resolve().then(update).then(() => {
+                child.stdin.write(JSON.stringify({ id: "refreshed", type: "get_available_models" }) + "\n");
+              }).catch(reject);
+            } else resolve({ ...initialState, initialModels, diagnostics: { stderr, events, args } });
+          }
         }
       });
       // Queue the web model-picker request before startup finishes; checking only
@@ -154,7 +165,17 @@ try {
     const fresh = await Promise.all([0, 1, 2].map(() => state(["--session-id", randomUUID()])));
     for (const result of fresh) expect(result, "codex-work", modelId);
   }
-  console.log("Codex real RPC: bundled/cached/configured alias restoration, repeated restart, thinking, explicit override, concurrent fresh sessions, first web model catalog and deterministic startup refresh barrier passed");
+  const added = { ...remote, id: "published-after-web-start", name: "New published model" };
+  const live = await state(["--no-session"], () => new FileModelsStore(join(directory, "models-store.json")).write(native.id, {
+    models: [remote, added], checkedAt: Date.now(), lastModified: Date.now() + 86_400_000,
+  }));
+  assert.equal(live.refreshedModels.success, true);
+  for (const provider of [native.id, "codex-work"]) {
+    assert.ok(!live.initialModels.data.models.some((model) => model.provider === provider && model.id === added.id));
+    assert.ok(live.refreshedModels.data.models.some((model) => model.provider === provider && model.id === added.id),
+      `${provider}: web catalog read must reload models published after process startup`);
+  }
+  console.log("Codex real RPC: live catalog refresh, bundled/cached/configured alias restoration, repeated restart, thinking, explicit override, concurrent fresh sessions, first web model catalog and deterministic startup refresh barrier passed");
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

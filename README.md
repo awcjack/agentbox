@@ -152,7 +152,10 @@ Agentbox patches Pi 0.84.2 to batch startup provider registrations before one
 awaited catalog/auth refresh, preventing intermittent account fallback on resume
 and missing aliases in new-session model lists. The web model picker loads after
 startup synchronization, retries transient read failures, and reloads on Refresh
-or reconnect without restarting Pi. Rebuild and redeploy the image to pick up the
+or reconnect without restarting Pi. Agentbox also patches RPC catalog reads to
+reload the local model cache: run `agentbox exec pi update --models` on the host,
+then click Refresh in the web UI to discover newly published models in an existing
+process. The picker itself does not force a network catalog refresh. Rebuild and redeploy the image to pick up the
 patched executable and web assets; browser refresh alone cannot update Pi in an
 older image. Start a new session or resume into a new process after deployment.
 Reply badges show the model/provider recorded on each old reply.

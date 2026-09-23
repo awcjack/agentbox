@@ -43,7 +43,10 @@
         nixpkgs-unstable.legacyPackages.${system}.pi-coding-agent.overrideAttrs (old: {
           # Keep startup's awaited catalog/auth refresh authoritative: detached
           # per-registration refreshes can otherwise race session restoration.
-          patches = (old.patches or [ ]) ++ [ ./patches/pi-startup-provider-refresh.patch ];
+          patches = (old.patches or [ ]) ++ [
+            ./patches/pi-startup-provider-refresh.patch
+            ./patches/pi-rpc-model-refresh.patch
+          ];
         });
       opencodePackageFor =
         system:

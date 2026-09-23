@@ -1,0 +1,12 @@
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -484,6 +484,9 @@
+ 			}
+ 
+ 			case "get_available_models": {
++				// Reload catalogs updated by `pi update --models` in other processes.
++				// Keep picker reads local: remote refresh retains its own lifecycle.
++				await session.modelRuntime.refresh({ allowNetwork: false });
+ 				const models = session.modelRuntime.getAvailableSnapshot();
+ 				return success(id, "get_available_models", { models });
+ 			}
