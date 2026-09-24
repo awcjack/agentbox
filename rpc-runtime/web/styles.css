@@ -16,12 +16,27 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .auto-toggle{flex-shrink:0;border:1px solid var(--border);border-radius:5px;padding:7px 8px;font:10px var(--mono);color:var(--muted);white-space:nowrap}.auto-toggle[aria-pressed="true"]{border-color:#745144;color:var(--accent);background:var(--accent-soft)}
 .command-picker{position:relative;z-index:5}.command-suggestions{position:absolute;bottom:4px;left:0;right:0;max-height:min(260px,30vh);overflow:auto;background:var(--raised);border:1px solid #59483b;border-radius:8px;padding:5px;box-shadow:0 8px 25px #0005}.command-option{display:flex;align-items:baseline;gap:12px;width:100%;text-align:left;padding:9px 10px;border-radius:4px}.command-option[aria-selected="true"],.command-option:hover{background:var(--accent-soft)}.command-option strong{font:11px var(--mono);color:var(--accent);flex:0 1 auto;overflow-wrap:anywhere;min-width:0}.command-option span{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}.command-empty{font-size:12px;color:var(--muted);padding:12px;overflow-wrap:anywhere}
 #model{flex:1;min-width:0;width:auto}#thinking-level{flex:0 1 135px;width:135px;max-width:45%;min-width:0;font-size:11px}@media(max-width:720px){#thinking-level{flex-basis:120px;width:120px;font-size:10px}}
+.session-item[data-activity="running"]{--aura:#9bb79c}
+.session-item[data-activity="finished"]{--aura:#91bdff}
+.session-item[data-activity="waiting_reply"]{--aura:#e7c577}
+.session-item[data-activity="waiting_action"]{--aura:#ed987a}
+.session-item:is([data-activity="starting"],[data-activity="stopping"]){--aura:#bf9fe8}
+.session-item[data-activity="exited"]{--aura:#ee9c92}
+.session-item[data-activity="finished"] :is(.session-symbol,.session-copy small){color:var(--aura)}
 .sidebar-resizer{display:none}
 .clipboard-copy{position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;pointer-events:none;font-size:16px}
 .message-header{flex-wrap:wrap}.message-model{font-size:9px;color:var(--dim);overflow-wrap:anywhere;max-width:100%}.message-actions{display:flex;gap:4px;margin:10px 0 0 26px}.message-actions button{font-size:10px}.message-actions button:hover:not(:disabled){color:var(--accent)}#conversation-action-preview{max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:6px}#copy-text{width:100%;font:12px/1.6 var(--mono)}
 @media(min-width:721px){
-  .workspace{--sidebar-default-width:260px;grid-template-columns:clamp(220px,var(--sidebar-width,var(--sidebar-default-width)),min(480px,calc(100vw - 420px))) minmax(0,1fr)}
+  .workspace{--sidebar-default-width:260px;grid-template-columns:clamp(64px,var(--sidebar-width,var(--sidebar-default-width)),min(480px,calc(100vw - 420px))) minmax(0,1fr)}
   .sidebar{position:relative;min-width:0}
+  /* Let the transcript and composer follow the grid throughout a drag. */
+  .messages,.compose-area{max-width:none;width:100%}
+  .sidebar-collapsed .sidebar{padding:18px 6px 0}
+  .sidebar-collapsed .sidebar>:not(.session-list):not(.sidebar-resizer){display:none}
+  .sidebar-collapsed .session-list{margin:0;padding:6px 0;overflow-x:hidden}
+  .sidebar-collapsed :is(.list-heading,.session-copy,.sidebar-empty){display:none}
+  .sidebar-collapsed .session-item{justify-content:center;padding:9px 0;margin-bottom:8px}
+  .sidebar-collapsed .session-symbol{display:grid;place-items:center;width:30px;height:30px;padding:0;border-radius:50%;border:1px solid currentColor;color:var(--aura,var(--dim));background:var(--surface);box-shadow:0 0 10px 2px color-mix(in srgb,var(--aura,var(--dim)) 35%,transparent)}
   .sidebar-resizer{display:block;position:absolute;inset:0 -4px 0 auto;width:9px;z-index:2;cursor:col-resize;touch-action:none}
   .sidebar-resizer::after{content:"";position:absolute;inset:0 4px;background:var(--border)}
   .sidebar-resizer:hover::after,.sidebar-resizer:focus-visible::after,.sidebar-resizing .sidebar-resizer::after{background:var(--accent)}

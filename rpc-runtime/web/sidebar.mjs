@@ -3,7 +3,8 @@ const activitySymbols = new Map([
   ["running", "▶"],
   ["waiting_reply", "?"],
   ["waiting_action", "!"],
-  ["idle", "✓"],
+  ["finished", "✓"],
+  ["idle", "○"],
   ["stopping", "■"],
   ["exited", "×"],
   ["history", "/"],
@@ -37,14 +38,17 @@ export function initSidebarResize(doc = document) {
       return;
     }
     const max = Math.min(480, win.innerWidth - 420);
-    const current = Math.round(Math.max(220, Math.min(max, width ?? preferredWidth ?? sidebar.getBoundingClientRect().width)));
+    const requested = width ?? preferredWidth ?? sidebar.getBoundingClientRect().width;
+    const collapsed = requested < 180;
+    const current = collapsed ? 64 : Math.round(Math.max(220, Math.min(max, requested)));
+    workspace.classList.toggle("sidebar-collapsed", collapsed);
     if (width !== undefined) preferredWidth = current;
     // Keep the user's desktop preference across temporary viewport constraints.
     if (preferredWidth !== undefined) workspace.style.setProperty("--sidebar-width", `${current}px`);
-    separator.setAttribute("aria-valuemin", "220");
+    separator.setAttribute("aria-valuemin", "64");
     separator.setAttribute("aria-valuemax", String(max));
     separator.setAttribute("aria-valuenow", String(current));
-    separator.setAttribute("aria-valuetext", `${current} pixels`);
+    separator.setAttribute("aria-valuetext", collapsed ? "Collapsed conversation rail" : `${current} pixels`);
   }
 
   separator.addEventListener("pointerdown", (event) => {
@@ -67,7 +71,7 @@ export function initSidebarResize(doc = document) {
     if (mobile.matches || event.altKey || event.ctrlKey || event.metaKey) return;
     const width = sidebar.getBoundingClientRect().width;
     const step = event.shiftKey ? 40 : 10;
-    const next = { ArrowLeft: width - step, ArrowRight: width + step, Home: 220, End: 480 }[event.key];
+    const next = { ArrowLeft: width <= 220 ? 64 : width - step, ArrowRight: width < 220 ? 220 : width + step, Home: 64, End: 480 }[event.key];
     if (next === undefined) return;
     event.preventDefault();
     update(next);

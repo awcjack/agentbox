@@ -5,7 +5,7 @@ import { initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
 test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
   const expected = {
     starting: "◷", running: "▶", waiting_reply: "?", waiting_action: "!",
-    idle: "✓", stopping: "■", exited: "×", history: "/",
+    finished: "✓", idle: "○", stopping: "■", exited: "×", history: "/",
   };
   for (const [activity, symbol] of Object.entries(expected)) {
     assert.equal(sessionActivitySymbol(activity), symbol);
@@ -18,7 +18,7 @@ test("session icons distinguish every activity and retain history and unknown fa
 test("session icons follow transitions into and out of waiting states", () => {
   assert.deepEqual(
     ["starting", "running", "waiting_action", "running", "waiting_reply", "idle", "exited"].map(sessionActivitySymbol),
-    ["◷", "▶", "!", "▶", "?", "✓", "×"],
+    ["◷", "▶", "!", "▶", "?", "○", "×"],
   );
 });
 
@@ -30,8 +30,8 @@ function setup(viewport = 1200) {
   win.matchMedia = () => mobile;
   const classes = new Set();
   const properties = new Map();
-  const workspace = { classList: { add: (name) => classes.add(name), remove: (name) => classes.delete(name) }, style: { setProperty: (name, value) => properties.set(name, value) } };
-  const sidebar = { getBoundingClientRect: () => ({ width: Math.min(Math.max(220, parseFloat(properties.get("--sidebar-width")) || (win.innerWidth >= 1500 ? 285 : win.innerWidth <= 1000 ? 225 : 260)), Math.min(480, win.innerWidth - 420)) }) };
+  const workspace = { classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name), add: (name) => classes.add(name), remove: (name) => classes.delete(name) }, style: { setProperty: (name, value) => properties.set(name, value) } };
+  const sidebar = { getBoundingClientRect: () => ({ width: Math.min(Math.max(64, parseFloat(properties.get("--sidebar-width")) || (win.innerWidth >= 1500 ? 285 : win.innerWidth <= 1000 ? 225 : 260)), Math.min(480, win.innerWidth - 420)) }) };
   const separator = new EventTarget();
   const attrs = new Map();
   const captured = new Set();
@@ -64,6 +64,9 @@ test("keyboard resizing exposes pixel values and clamps to viewport bounds", () 
   assert.equal(attrs.get("aria-valuenow"), "230");
   fire("keydown", { key: "Home" });
   fire("keydown", { key: "ArrowLeft" });
+  assert.equal(attrs.get("aria-valuenow"), "64");
+  assert.equal(attrs.get("aria-valuetext"), "Collapsed conversation rail");
+  fire("keydown", { key: "ArrowRight" });
   assert.equal(attrs.get("aria-valuenow"), "220");
   fire("keydown", { key: "End" });
   assert.equal(attrs.get("aria-valuetext"), "480 pixels");
@@ -87,10 +90,13 @@ test("pointer capture resizes by delta, ignores other pointers, and cleans up", 
     fire("pointermove", { pointerId: 1, clientX: 900 });
     assert.equal(attrs.get("aria-valuenow"), "480");
     fire("pointermove", { pointerId: 1, clientX: -900 });
-    assert.equal(attrs.get("aria-valuenow"), "220");
+    assert.equal(attrs.get("aria-valuenow"), "64");
+    assert.equal(classes.has("sidebar-collapsed"), true);
     fire(ending, { pointerId: 1 }, ending === "blur" ? win : undefined);
     assert.equal(captured.size, 0);
-    assert.equal(classes.size, 0);
+    assert.equal(classes.has("sidebar-resizing"), false);
+    fire("keydown", { key: "ArrowRight" });
+    assert.equal(classes.has("sidebar-collapsed"), false);
   }
 });
 

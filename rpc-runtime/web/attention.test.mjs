@@ -49,6 +49,21 @@ test("new idle sessions, running sessions and notifications are not unread compl
   assert.deepEqual(tracker.update([waiting]), { action: 1, finished: 0 }, "action takes priority over completion");
 });
 
+test("sidebar distinguishes unread completion, read idle, and restart idle", () => {
+  const tracker = createAttentionTracker();
+  const item = session("a", { settledEventId: 2 });
+  tracker.update([item]);
+  assert.equal(tracker.activity(item), "finished");
+  tracker.update([item], "a");
+  assert.equal(tracker.activity(item), "idle");
+  item.settledEventId = 3;
+  tracker.update([item]);
+  assert.equal(tracker.activity(item), "finished");
+  const restarted = session("new-runtime-slot");
+  tracker.update([restarted]);
+  assert.equal(tracker.activity(restarted), "idle");
+});
+
 test("ending, conversation replacement and logout clean up acknowledgement state", () => {
   const tracker = createAttentionTracker();
   const item = session("a", { settledEventId: 2 });

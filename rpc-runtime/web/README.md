@@ -18,6 +18,12 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   profile filtering, named sessions, and persisted-history resume.
 - Drag the desktop sidebar's right edge to resize it. The focused separator also
   supports Left/Right arrows, Shift for larger steps, and Home/End for limits.
+  The transcript and composer resize with it. Drag below 180px (or press Home)
+  to collapse to a 64px conversation-bubble rail; drag right or press Right to
+  expand. Bubbles have status-colored auras and title/status tooltips.
+- Unread completed runs show **Finished (unread)** in blue, distinct from neutral
+  **Idle** after viewing the conversation in a focused tab or restarting Agentbox.
+  Running is green, reply-needed yellow, and action-needed peach.
 - Bearer token/password input, held only in memory and cleared on logout or
   page exit. No cookies, local/session storage, IndexedDB, or service worker.
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,

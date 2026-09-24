@@ -264,9 +264,10 @@ function renderSessions() {
   function row(session, historical) {
     const button = element("button", `session-item${!historical && current?.id === session.id ? " active" : ""}`);
     button.dataset.sessionKey = `${historical ? session.profile : "runtime"}:${session.id}`;
-    button.dataset.activity = historical ? "history" : session.activity || session.status;
+    button.dataset.activity = historical ? "history" : attention.activity(session);
     if (!historical && current?.id === session.id) button.setAttribute("aria-current", "page");
-    button.title = historical ? `Resume ${session.name || session.id}\n${session.cwd || session.profile}` : `${session.name || session.id}\n${session.profile}`;
+    button.title = `${displayTitle(session)}\n${historical ? "Resume" : activityLabel(session)} / ${session.profile}`;
+    button.setAttribute("aria-label", button.title);
     const symbol = element("span", "session-symbol", sessionActivitySymbol(button.dataset.activity));
     symbol.setAttribute("aria-hidden", "true");
     button.append(symbol);
@@ -291,7 +292,7 @@ function renderSessions() {
   if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "A clean slate. Create a session to start building." : "Connect to find your sessions."));
 }
 function activityLabel(session) {
-  return ({ starting: "Starting agent", running: "Running", waiting_reply: "Waiting for user reply", waiting_action: "Waiting for user action", idle: "Idle (finished)", stopping: "Stopping", exited: "Ended" })[session.activity] || session.status;
+  return ({ starting: "Starting agent", running: "Running", waiting_reply: "Waiting for user reply", waiting_action: "Waiting for user action", finished: "Finished (unread)", idle: "Idle", stopping: "Stopping", exited: "Ended" })[attention.activity(session)] || session.status;
 }
 // One lightweight list request updates every session, not one SSE connection or
 // expensive transcript/history scan per sidebar row. Do not overlap polls.
@@ -1262,8 +1263,8 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key.toLowerCase() === "n" && !event.ctrlKey && !event.altKey && !event.metaKey && !event.target.closest("input, textarea, select, [contenteditable], dialog")) openNew();
 });
-window.addEventListener("focus", () => updateTabTitle());
-document.addEventListener("visibilitychange", () => updateTabTitle());
+window.addEventListener("focus", () => renderSessions());
+document.addEventListener("visibilitychange", () => renderSessions());
 window.addEventListener("offline", () => { if (current) { current.online = false; current.streamController?.abort(); updateControls(); } setNetwork("reconnecting", "Offline"); });
 window.addEventListener("online", () => { if (token) { if (current) activate(current.meta, { reconnect: true }); else setNetwork("online", "Connected"); refreshSessions(); } });
 window.addEventListener("pagehide", () => logout());

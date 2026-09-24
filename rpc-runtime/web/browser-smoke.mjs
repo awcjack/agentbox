@@ -274,11 +274,18 @@ try {
       if (label === "desktop") {
         const handle = page.locator("#sidebar-resizer"), box = await handle.boundingBox();
         const before = await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width);
+        const contentBefore = await page.locator(".compose-area").evaluate((node) => node.getBoundingClientRect().width);
         await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
         await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 60, box.y + box.height / 2); await page.mouse.up();
         assert.equal(await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width), before + 60);
+        assert.equal(await page.locator(".compose-area").evaluate((node) => node.getBoundingClientRect().width), contentBefore - 60);
         await handle.press("ArrowLeft");
         assert.equal(await handle.getAttribute("aria-valuenow"), String(before + 50));
+        await handle.press("Home");
+        assert.equal(await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width), 64);
+        await noOverflow(page);
+        await handle.press("ArrowRight");
+        assert.equal(await handle.getAttribute("aria-valuenow"), "220");
         await noOverflow(page);
       } else assert.equal(await page.locator("#sidebar-resizer").isVisible(), false);
       await openSidebar(); await page.locator("#new-session").click();
@@ -735,7 +742,7 @@ try {
       assert.equal(await page.title(), "1! | Pi Agent | Agentbox");
       resolveUi(resumed, backgroundApproval); resumed.streaming = false;
       emit(resumed, { type: "agent_settled" });
-      await until(() => backgroundRow.textContent().then((text) => text.includes("Idle (finished)")), "background finished status");
+      await until(() => backgroundRow.textContent().then((text) => text.includes("Finished (unread)")), "background finished status");
       assert.equal(await page.title(), "1 | Pi Agent | Agentbox", "unread background completion updates the tab");
       assert.equal(resumed.clients.size, 0, "background progress does not consume SSE connections");
       if (label === "mobile") await page.locator("#close-drawer").click();

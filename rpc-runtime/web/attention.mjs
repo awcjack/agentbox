@@ -4,10 +4,13 @@ const dialogMethods = new Set(["confirm", "select", "input", "editor"]);
 // slot. Polling the same request/completion must not resurrect a read counter.
 export function createAttentionTracker() {
   const seen = new Map();
+  const unread = new Set();
   return {
-    clear() { seen.clear(); },
+    clear() { seen.clear(); unread.clear(); },
+    activity(session) { return unread.has(session.id) ? "finished" : session.activity || session.status; },
     update(sessions, viewedId = null) {
       let action = 0, finished = 0;
+      unread.clear();
       const live = new Set();
       for (const session of sessions) {
         const key = `${session.id}:${session.nativeSessionId}`;
@@ -25,7 +28,10 @@ export function createAttentionTracker() {
         }
         if (session.status !== "running") continue;
         if ([...requests].some((id) => !entry.requests.has(id))) action++;
-        else if (!requests.size && session.activity === "idle" && settled !== null && settled > (entry.settled ?? 0)) finished++;
+        else if (!requests.size && session.activity === "idle" && settled !== null && settled > (entry.settled ?? 0)) {
+          finished++;
+          unread.add(session.id);
+        }
       }
       for (const key of seen.keys()) if (!live.has(key)) seen.delete(key);
       return { action, finished };
