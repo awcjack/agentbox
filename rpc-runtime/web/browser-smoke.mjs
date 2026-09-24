@@ -284,6 +284,14 @@ try {
         await handle.press("Home");
         assert.equal(await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width), 64);
         await noOverflow(page);
+        const newSession = page.getByRole("button", { name: "New session", exact: true });
+        assert.equal(await newSession.isVisible(), true, "collapsed rail keeps New session visible");
+        const bubble = await newSession.boundingBox();
+        assert.equal(bubble.width, bubble.height, "collapsed New session is a circular bubble");
+        await newSession.click();
+        assert.equal(await page.locator("#new-dialog").isVisible(), true);
+        assert.equal(await page.locator("#sidebar").evaluate((node) => node.getBoundingClientRect().width), 64, "creating a session needs no sidebar expansion");
+        await page.locator("#cancel-new").click();
         await handle.press("ArrowRight");
         assert.equal(await handle.getAttribute("aria-valuenow"), "220");
         await noOverflow(page);
