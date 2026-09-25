@@ -14,7 +14,7 @@ const models = [
   { provider: "fixture", id: "pi-fast", name: "Pi Fast", input: ["text", "image"] },
   { provider: "fixture", id: "pi-reasoning", name: "Pi Reasoning", input: ["text", "image"] },
 ];
-const sessions = new Map(), saved = new Map(), calls = [], serverErrors = [];
+const sessions = new Map(), saved = new Map(), archived = new Set(), calls = [], serverErrors = [];
 const availableThinking = (session) => session.model?.id === "pi-reasoning" ? ["off", "minimal", "low", "medium", "high", "xhigh", "max"] : ["off"];
 const entryIds = new WeakMap();
 function conversationSnapshot(session) {
@@ -72,7 +72,7 @@ const server = createServer(async (request, response) => {
       body = JSON.parse(Buffer.concat(chunks).toString());
     }
     if (url.pathname === "/v1/profiles") return json(response, 200, { profiles: ["default"] });
-    if (url.pathname === "/v1/history") return json(response, 200, { sessions: [...saved.values()].map((session) => ({ id: session.nativeSessionId, name: session.name, profile: "default", cwd: "/workspace/project", modifiedAt: session.modifiedAt })) });
+    if (url.pathname === "/v1/history") return json(response, 200, { sessions: [...saved.values()].filter((session) => url.searchParams.get("includeArchived") === "true" || !archived.has(session.nativeSessionId)).map((session) => ({ id: session.nativeSessionId, name: session.name, profile: "default", cwd: "/workspace/project", modifiedAt: session.modifiedAt, archived: archived.has(session.nativeSessionId) })) });
     if (url.pathname === "/v1/sessions") {
       if (request.method === "GET") return json(response, 200, { sessions: [...sessions.values()].map(meta) });
       calls.push({ method: "POST", path: url.pathname, body });
@@ -130,6 +130,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === "DELETE") {
       calls.push({ id: session.id, method: "DELETE" });
+      archived.add(session.nativeSessionId);
       disconnect(session); sessions.delete(session.id);
       response.writeHead(204); response.end(); return;
     }
@@ -714,15 +715,28 @@ try {
       const historical = page.locator(".session-item").filter({ hasText: session.name });
       await page.locator("#refresh-sessions").click();
       await new Promise((resolve) => setTimeout(resolve, 1700));
-      assert.equal(await historical.count(), 0, "ended session stays removed after history refresh and polling");
+      assert.equal(await page.locator("#sessions > .session-item").filter({ hasText: session.name }).count(), 0, "ended session stays out of ordinary history");
+      await page.locator(".archived-sessions summary").click();
+      await historical.waitFor();
       assert.ok(saved.has(session.nativeSessionId), "ending does not delete saved history");
       await page.locator("#logout").click();
       await page.locator("#token").fill("smoke-token"); await page.locator("#login-submit").click();
-      await openSidebar(); await historical.waitFor();
+      await openSidebar();
+      await page.locator(".archived-sessions summary").click();
+      await historical.waitFor();
       await historical.click();
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "history resumed");
-      const resumed = [...sessions.values()].find((entry) => entry.nativeSessionId === session.nativeSessionId);
+      let resumed = [...sessions.values()].find((entry) => entry.nativeSessionId === session.nativeSessionId);
       assert.ok(resumed && resumed.id !== session.id);
+      assert.equal(await page.locator("article.assistant").count(), 1);
+      // Re-archive the reopened conversation and retrieve it once more.
+      await page.locator("#end-session").click(); await page.locator("#end-form button[type=submit]").click();
+      await until(() => !sessions.has(resumed.id), "re-archive frees resumed process");
+      await openSidebar();
+      await historical.waitFor();
+      await historical.click();
+      await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "archived conversation reopened again");
+      resumed = [...sessions.values()].find((entry) => entry.nativeSessionId === session.nativeSessionId);
       assert.equal(await page.locator("article.assistant").count(), 1);
       await noOverflow(page);
       if (label === "mobile") {

@@ -258,10 +258,12 @@ function renderSessions() {
   updateTabTitle();
   const root = $("sessions");
   const focusedKey = root.contains(document.activeElement) ? document.activeElement.dataset.sessionKey : null;
+  const archiveOpen = root.querySelector("details")?.open || false;
+  const archiveFocused = document.activeElement === root.querySelector("summary");
   root.replaceChildren();
   const filter = $("profile-filter").value;
   const live = sessions.filter((session) => !filter || session.profile === filter);
-  function row(session, historical) {
+  function row(session, historical, container = root) {
     const button = element("button", `session-item${!historical && current?.id === session.id ? " active" : ""}`);
     button.dataset.sessionKey = `${historical ? session.profile : "runtime"}:${session.id}`;
     button.dataset.activity = historical ? "history" : attention.activity(session);
@@ -280,16 +282,29 @@ function renderSessions() {
     button.append(copy);
     button.addEventListener("click", () => historical ? resume(session) : activate(session));
     button.disabled = historical ? createDenied || createBusy : Boolean(records.get(session.id)?.ending);
-    root.append(button);
+    container.append(button);
     if (focusedKey === button.dataset.sessionKey) button.focus({ preventScroll: true });
   }
   if (live.length) root.append(element("div", "list-heading", "IN THIS RUNTIME"));
   for (const session of live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt)))) row(session, false);
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
-  const past = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`) && !endedHistory.has(`${session.profile}:${session.id}`));
+  const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
+  const isArchived = (session) => session.archived || endedHistory.has(`${session.profile}:${session.id}`);
+  const past = available.filter((session) => !isArchived(session));
   if (past.length) root.append(element("div", "list-heading", "PICK UP WHERE YOU LEFT OFF"));
   for (const session of past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))) row(session, true);
-  if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "A clean slate. Create a session to start building." : "Connect to find your sessions."));
+  if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
+  if (token) {
+    const archived = available.filter(isArchived).sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)));
+    const section = element("details", "archived-sessions");
+    section.open = archiveOpen;
+    const summary = element("summary", "list-heading", `Archived conversations (${archived.length})`);
+    section.append(summary);
+    root.append(section);
+    section.append(element("p", "sidebar-empty", archived.length ? "Reopen to read or continue. Use End & archive when done. Reopening starts a Pi process." : "No archived conversations in this profile selection."));
+    for (const session of archived) row(session, true, section);
+    if (archiveFocused) summary.focus({ preventScroll: true });
+  }
 }
 function activityLabel(session) {
   return ({ starting: "Starting agent", running: "Running", waiting_reply: "Waiting for user reply", waiting_action: "Waiting for user action", finished: "Finished (unread)", idle: "Idle", stopping: "Stopping", exited: "Ended" })[attention.activity(session)] || session.status;
@@ -319,10 +334,13 @@ async function refreshSessions() {
     if (ownEpoch !== epoch || version !== listVersion) return;
     sessions = result.sessions || []; renderSessions();
     const names = $("profile-filter").value ? [$("profile-filter").value] : profiles;
-    const results = await Promise.allSettled(names.map((profile) => api.request(`/v1/history?profile=${encodeURIComponent(profile)}`, { signal: auth.signal })));
+    const results = await Promise.allSettled(names.map((profile) => api.request(`/v1/history?profile=${encodeURIComponent(profile)}&includeArchived=true`, { signal: auth.signal })));
     if (ownEpoch !== epoch || version !== listVersion) return;
     history = results.flatMap((result) => result.status === "fulfilled" ? result.value.sessions || [] : []);
     renderSessions();
+    if (results.some((result) => result.status === "fulfilled" && result.value.truncated)) {
+      showNotice("History listing is truncated by the server. Some conversations may not be shown.", true);
+    }
     const failed = results.find((result) => result.status === "rejected");
     if (failed) {
       if (failed.reason.status === 401) report(failed.reason);
@@ -1142,7 +1160,7 @@ $("end-form").addEventListener("submit", async (event) => {
       restoreDraft(); renderMessages(); setNetwork("online", "Connected");
     }
     renderSessions(); updateControls();
-    showNotice("Session stopped and archived. Saved history is retained and stays hidden after restart.");
+    showNotice("Session stopped and archived. Reopen it from Archived conversations in the sidebar.");
     await refreshSessions();
   } catch (error) {
     if (ownEpoch !== epoch) return;

@@ -135,7 +135,15 @@ test("end stops the child and archives history across runtime restarts", async (
   const archived = await request(second.baseUrl, "/v1/history?profile=default&includeArchived=true");
   assert.equal(archived.body.sessions[0].id, created.nativeSessionId);
   assert.equal(await readFile(source, "utf8"), original);
-  assert.equal((await request(second.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: created.nativeSessionId } })).response.status, 201);
+  assert.equal(archived.body.sessions[0].archived, true);
+  const reopened = await request(second.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: created.nativeSessionId } });
+  assert.equal(reopened.response.status, 201);
+  assert.equal((await request(second.baseUrl, `/v1/sessions/${reopened.body.session.id}`, { method: "DELETE" })).response.status, 204);
+  const rearchived = await request(second.baseUrl, "/v1/history?profile=default&includeArchived=true");
+  assert.equal(rearchived.body.sessions.length, 1);
+  assert.equal(rearchived.body.sessions[0].id, created.nativeSessionId);
+  assert.equal(rearchived.body.sessions[0].archived, true);
+  assert.equal(await readFile(source, "utf8"), original);
 });
 
 test("list metadata tracks all sessions without per-session RPC or SSE subscriptions", async (t) => {

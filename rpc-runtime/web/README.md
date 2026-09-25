@@ -31,6 +31,11 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - End & archive with confirmation uses `DELETE /v1/sessions/:id` to stop the
   process and persistently hide saved history without deleting it. Delete-scope denial disables this
   control independently of write access. Successful empty `204` responses work.
+- **Archived conversations** in the sidebar lists saved archives for the selected
+  profiles, including after logout/restart. Expand it and click a conversation to
+  reopen it for reading or continuing, then End & archive again when done.
+  Reopening uses runtime capacity and requires session-creation access; it is not
+  an offline viewer. Truncated server history listings produce a visible warning.
 - Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
   previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
 - Single-line prompt box with an accessible expand/collapse button. Scrolling
@@ -76,7 +81,7 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 
 Uses the existing runtime README/RPC contract and these supervisor additions:
 
-- `GET /v1/history?profile=...` returns `{sessions:[{id,name,cwd,modifiedAt,profile}]}`.
+- `GET /v1/history?profile=...&includeArchived=true` returns `{sessions:[{id,name,cwd,modifiedAt,profile,archived}],truncated}`.
 - Session metadata includes `name`, nullable `nativeSessionId`, `latestEventId`,
   and the current `pendingUi` requests.
 - Accepted UI answers publish a `supervisor` event named `extension_ui_resolved`
@@ -209,8 +214,8 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
 - Exited children cannot answer snapshot RPCs. Cached messages and bounded
   stderr remain inspectable in this tab; resume persisted history to reload the
   conversation in a running child. End & archive releases the supervised process
-  and hides the persisted conversation across restarts. API recovery is documented
-  in the runtime README; there is no archive browser yet. Drafts are not saved into that history.
+  and moves the persisted conversation into Archived conversations across restarts.
+  Drafts are not saved into that history.
 - When first joining a delta-only stream mid-message, text before the captured
   cursor is unavailable from `get_messages`. New deltas are displayed immediately;
   completion reconciles the full message from the authoritative snapshot.

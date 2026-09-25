@@ -172,14 +172,14 @@ export async function listHistory(profile, profileName, { includeArchived = fals
     if (!NATIVE_SESSION_ID_RE.test(id)) continue;
     const path = join(root, entry.name);
     try {
-      if (!includeArchived) {
-        try {
-          await lstat(join(root, `.archived-${id.toLowerCase()}`));
-          continue;
-        } catch (error) { if (error.code !== "ENOENT") throw error; }
-      }
+      let archived = false;
+      try {
+        await lstat(join(root, `.archived-${id.toLowerCase()}`));
+        archived = true;
+      } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (archived && !includeArchived) continue;
       const info = await lstat(path);
-      if (info.isFile()) files.push({ path, id, modified: info.mtimeMs });
+      if (info.isFile()) files.push({ path, id, archived, modified: info.mtimeMs });
     } catch { /* A session can be removed while the directory is being scanned. */ }
   }
   files.sort((a, b) => b.modified - a.modified);
@@ -213,6 +213,7 @@ export async function listHistory(profile, profileName, { includeArchived = fals
       sessions.push({
         id: header.id, name: (name || firstMessage || "Untitled session").slice(0, 200),
         cwd: header.cwd, profile: profileName, modifiedAt: info.mtime.toISOString(),
+        archived: file.archived,
       });
     } catch { /* Discovery is best effort; corrupt/unreadable files are not sessions. */ }
     finally { await handle?.close(); }

@@ -252,10 +252,14 @@ failure returns `archive_failed` and retains the stopped runtime slot for an
 explicit DELETE retry. Ephemeral profiles have no history to archive.
 
 `GET /v1/history?profile=default&includeArchived=true` includes archived history
-for API recovery; the normal sidebar excludes it. An exact archived UUID can
-still be explicitly resumed (starting a new process); its archive marker remains.
+with an `archived` boolean on each history entry. The web sidebar groups these
+under **Archived conversations**, respecting the profile filter. Click an entry
+to reopen it for reading or continuing (starting a new process), then use
+**End & archive** again when done. Its archive marker remains while reopened;
+running conversations appear in the runtime list instead of the archive list.
 To restore normal history visibility, an administrator can remove that UUID's
-marker from the configured session directory. There is no archive browser yet.
+marker from the configured session directory. Listings remain bounded to 1,000
+sessions and the UI warns when the server reports truncation.
 Previously ended conversations are not retroactively archived.
 
 The tab title shows unread session counts, e.g. `1! 2 | Pi Agent | Agentbox`

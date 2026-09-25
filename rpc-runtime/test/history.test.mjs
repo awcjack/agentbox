@@ -19,10 +19,15 @@ test("archives persist without modifying history and reject unsafe markers", asy
   const { root, profile } = await fixture(t);
   const source = join(root, `${ID}.jsonl`), original = `${header()}\n`;
   await writeFile(source, original);
+  assert.equal((await listHistory(profile, "default")).sessions[0].archived, false);
+  await writeFile(join(root, `${OLD_ID}.jsonl`), `${header(OLD_ID)}\n`);
   await archiveHistory(profile, ID);
   await archiveHistory(profile, ID); // Idempotent.
-  assert.deepEqual((await listHistory({ ...profile }, "default")).sessions, []);
-  assert.equal((await listHistory(profile, "default", { includeArchived: true })).sessions[0].id, ID);
+  assert.deepEqual((await listHistory({ ...profile }, "default")).sessions.map((session) => session.id), [OLD_ID]);
+  const all = (await listHistory(profile, "default", { includeArchived: true })).sessions;
+  assert.equal(all.length, 2);
+  assert.equal(all.find((session) => session.id === ID).archived, true);
+  assert.equal(all.find((session) => session.id === OLD_ID).archived, false);
   assert.equal(await resolveHistorySession(profile, ID), source);
   assert.equal(await readFile(source, "utf8"), original);
   const marker = join(root, `.archived-${ID}`);
