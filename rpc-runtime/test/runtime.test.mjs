@@ -398,6 +398,36 @@ test("thinking levels use model-reported values and changing them requires write
   assert.equal(level, "max", "Pi rejects levels outside its model's capabilities");
 });
 
+test("conversation export preserves the complete tree and requires only read access", async (t) => {
+  const reader = "export-reader", writer = "export-writer";
+  const f = await conversationFixture(t, { auth: { tokens: [
+    { sha256: TOKEN_HASH, scopes: ALL_SCOPES },
+    { sha256: createHash("sha256").update(reader).digest("hex"), scopes: ["sessions:read"] },
+    { sha256: createHash("sha256").update(writer).digest("hex"), scopes: ["sessions:write"] },
+  ] } });
+  f.source.entries.push(
+    { id: "thinking", parentId: "a2", type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "reasoning" }, { type: "toolCall", id: "call", name: "bash", arguments: { command: "pwd" } }] } },
+    { id: "tool", parentId: "thinking", type: "message", message: { role: "toolResult", toolCallId: "call", content: [{ type: "text", text: "/workspace" }] } },
+    { id: "compact", parentId: "tool", type: "compaction", summary: "summary", firstKeptEntryId: "a2", tokensBefore: 100 },
+  );
+  const before = structuredClone(f.source.entries);
+  const route = `/v1/sessions/${f.id}/export`;
+  const result = await request(f.baseUrl, route, { token: reader });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.format, "agentbox-conversation");
+  assert.equal(result.body.version, 1);
+  assert.equal(result.body.nativeSessionId, f.source.nativeId);
+  assert.equal(result.body.leafId, "compact");
+  assert.equal(result.body.profile, "default");
+  assert.deepEqual(result.body.entries, before, "includes off-branch, pre-compaction, image, thinking, tool and metadata entries");
+  assert.deepEqual(f.source.entries, before, "export does not mutate the conversation");
+  assert.equal((await request(f.baseUrl, route, { token: writer })).response.status, 403);
+  f.source.state.isStreaming = true;
+  assert.equal((await request(f.baseUrl, route)).body.error.code, "conversation_busy");
+  f.source.state.isStreaming = false;
+  assert.equal((await request(f.baseUrl, route)).response.status, 200, "a failed export releases its lock");
+});
+
 test("conversation GET returns authoritative active-branch message IDs", async (t) => {
   const f = await conversationFixture(t);
   const result = await request(f.baseUrl, f.route);

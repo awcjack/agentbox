@@ -211,6 +211,7 @@ present, it must exactly match `allowedOrigins`.
 | `POST /v1/sessions` | `sessions:create` | Create or resume a supervised child |
 | `GET /v1/sessions` | `sessions:read` | List in-memory sessions |
 | `GET /v1/sessions/:id` | `sessions:read` | Session state and bounded stderr tail |
+| `GET /v1/sessions/:id/export` | `sessions:read` | Complete conversation tree as versioned JSON; requires an idle running child and allowed `get_state`/`get_entries` commands |
 | `DELETE /v1/sessions/:id` | `sessions:delete` | Terminate the child and persistently archive its history |
 | `POST /v1/sessions/:id/rpc` | `sessions:read` for the read commands listed below; otherwise `sessions:write` | Forward an allowed RPC command and await its response |
 | `POST /v1/sessions/:id/ui` | `sessions:write` | Answer one pending extension dialog |
@@ -261,6 +262,17 @@ To restore normal history visibility, an administrator can remove that UUID's
 marker from the configured session directory. Listings remain bounded to 1,000
 sessions and the UI warns when the server reports truncation.
 Previously ended conversations are not retroactively archived.
+
+The web **Export JSON** button downloads `GET /v1/sessions/:id/export` as
+`conversation-<native-uuid>.json`. The version-1 `agentbox-conversation` document
+contains `exportedAt`, `nativeSessionId`, `leafId`, `name`, `profile`, `cwd`, and
+all native `entries`, including inactive branches and entries preceding compaction.
+It uses the same locked, authoritative snapshot checks as conversation actions,
+without writing files or prompting Pi. Reopen archives before exporting. Read
+scope is sufficient; busy sessions and oversized RPC records fail explicitly.
+Inline attachments are preserved; external referenced files are not bundled.
+Exported messages and tool output may contain sensitive data. This is an export
+format, not an import endpoint or a raw native session JSONL file.
 
 The tab title shows unread session counts, e.g. `1! 2 | Pi Agent | Agentbox`
 means one session needs input/approval and two have finished. Entering a session

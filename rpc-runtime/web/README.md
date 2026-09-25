@@ -36,6 +36,13 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   reopen it for reading or continuing, then End & archive again when done.
   Reopening uses runtime capacity and requires session-creation access; it is not
   an offline viewer. Truncated server history listings produce a visible warning.
+- **Export JSON** downloads the entire selected conversation tree, not the rendered
+  transcript or compacted model context. Includes all branches, pre-compaction
+  entries, thinking, tool calls/results, metadata, and inline image data. Reopen
+  archived conversations first. Export requires read access and an idle running
+  session; it neither prompts the model nor changes the conversation. Runtime
+  record-size limits still apply; failures are shown without downloading partial
+  history. Referenced external files are not bundled. Exports can contain secrets.
 - Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
   previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
 - Single-line prompt box with an accessible expand/collapse button. Scrolling
@@ -82,6 +89,8 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 Uses the existing runtime README/RPC contract and these supervisor additions:
 
 - `GET /v1/history?profile=...&includeArchived=true` returns `{sessions:[{id,name,cwd,modifiedAt,profile,archived}],truncated}`.
+- `GET /v1/sessions/:id/export` returns a versioned JSON document with the complete
+  `entries` tree, `leafId`, native identity, name, profile, cwd and export time.
 - Session metadata includes `name`, nullable `nativeSessionId`, `latestEventId`,
   and the current `pendingUi` requests.
 - Accepted UI answers publish a `supervisor` event named `extension_ui_resolved`

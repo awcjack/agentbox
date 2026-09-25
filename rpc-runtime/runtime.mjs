@@ -1073,12 +1073,12 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|auto|uploads))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
       const action = match[2];
-      if (action === "conversation" && ["GET", "POST"].includes(request.method)) {
+      if ((action === "conversation" && ["GET", "POST"].includes(request.method)) || (action === "export" && request.method === "GET")) {
         authenticate(request, config, "sessions:read");
         const mutate = request.method === "POST";
         let body;
@@ -1125,6 +1125,15 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           const revision = session.revision;
           const snapshot = await readSnapshot(session);
           if (revision !== session.revision || session.pendingUi.size || session.agentBusy) throw new HttpError(409, "conversation_busy", "conversation changed while reading");
+          if (action === "export") {
+            return json(response, 200, {
+              format: "agentbox-conversation", version: 1, exportedAt: new Date().toISOString(),
+              nativeSessionId: snapshot.nativeSessionId, leafId: snapshot.data.leafId,
+              name: snapshot.state.sessionName || session.name || "Untitled session",
+              profile: session.profileName, cwd: session.profile.cwd,
+              entries: snapshot.data.entries,
+            });
+          }
           if (!mutate) {
             return json(response, 200, {
               nativeSessionId: snapshot.nativeSessionId, leafId: snapshot.data.leafId,

@@ -82,9 +82,15 @@ const server = createServer(async (request, response) => {
       sessions.set(session.id, session); saved.set(session.nativeSessionId, session);
       return json(response, 201, { session: meta(session) });
     }
-    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|auto))?$/.exec(url.pathname);
+    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|export|auto))?$/.exec(url.pathname);
     const session = match && sessions.get(match[1]);
     if (!session) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
+    if (match[2] === "export") {
+      const snapshot = conversationSnapshot(session);
+      return json(response, 200, { format: "agentbox-conversation", version: 1,
+        nativeSessionId: snapshot.nativeSessionId, leafId: snapshot.leafId,
+        entries: snapshot.messages.map(({ entryId, parentId, message }) => ({ id: entryId, parentId, type: "message", message })) });
+    }
     if (match[2] === "conversation") {
       const snapshot = conversationSnapshot(session);
       calls.push({ id: session.id, conversation: request.method, body });
@@ -729,6 +735,14 @@ try {
       let resumed = [...sessions.values()].find((entry) => entry.nativeSessionId === session.nativeSessionId);
       assert.ok(resumed && resumed.id !== session.id);
       assert.equal(await page.locator("article.assistant").count(), 1);
+      const downloadPromise = page.waitForEvent("download");
+      await page.locator("#export-conversation").click();
+      const download = await downloadPromise;
+      assert.equal(download.suggestedFilename(), `conversation-${session.nativeSessionId}.json`);
+      const exported = JSON.parse(await readFile(await download.path(), "utf8"));
+      assert.equal(exported.nativeSessionId, session.nativeSessionId);
+      assert.deepEqual(exported.entries.map((entry) => entry.message), resumed.messages);
+      await download.delete();
       // Re-archive the reopened conversation and retrieve it once more.
       await page.locator("#end-session").click(); await page.locator("#end-form button[type=submit]").click();
       await until(() => !sessions.has(resumed.id), "re-archive frees resumed process");

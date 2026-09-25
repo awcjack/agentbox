@@ -100,8 +100,17 @@ function canWrite(ctx, command = "prompt") {
 function canChangeConversation(ctx) {
   return canWrite(ctx) && !ctx.state.isStreaming && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length && !ctx.record.sending && !ctx.record.readingImages && !ctx.record.autoModeBusy && !ctx.modelBusy && !ctx.thinkingBusy;
 }
+function canExportConversation(ctx) {
+  return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running"
+    && !ctx.record.ending && !ctx.record.conversationBusy && !ctx.record.settingsBusy
+    && !ctx.replacing && !ctx.meta.conversationReplacing && !ctx.state.isStreaming
+    && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length
+    && !ctx.record.sending && !ctx.record.autoModeBusy && !ctx.modelBusy && !ctx.thinkingBusy);
+}
 function updateControls() {
   const ctx = current;
+  $("export-conversation").disabled = !canExportConversation(ctx);
+  $("export-conversation").textContent = ctx?.record.exporting ? "Exporting..." : "Export JSON";
   $("settings").disabled = !canChangeConversation(ctx) || ctx.record.settingsBusy;
   if ($("settings-dialog").open) {
     if (settingsTarget?.ctx !== ctx || settingsTarget?.nativeId !== ctx?.meta.nativeSessionId || !canWrite(ctx)) {
@@ -897,6 +906,30 @@ async function openConversationAction(ctx, message, action) {
   } catch (error) { report(error, ctx); }
   finally { ctx.record.conversationBusy = false; if (active(ctx)) { updateControls(); requestRefresh(ctx); } }
 }
+
+$("export-conversation").addEventListener("click", async () => {
+  const ctx = current;
+  if (!canExportConversation(ctx)) return;
+  const nativeId = ctx.meta.nativeSessionId;
+  ctx.record.exporting = true; ctx.record.conversationBusy = true; updateControls();
+  try {
+    const snapshot = await api.request(path(ctx, "/export"), { signal: ctx.controller.signal });
+    if (!active(ctx)) return;
+    if (snapshot.nativeSessionId !== nativeId) throw new ApiError("The conversation changed. Refresh before exporting.", 409, "conversation_stale");
+    const blob = new Blob([JSON.stringify(snapshot, null, 2) + "\n"], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = `conversation-${nativeId}.json`;
+    document.body.append(link);
+    try { link.click(); }
+    finally { link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    showNotice("Conversation exported. The file may contain sensitive messages, tool output, and embedded attachments.");
+  } catch (error) { if (active(ctx)) report(error); }
+  finally {
+    ctx.record.exporting = false; ctx.record.conversationBusy = false;
+    if (active(ctx)) { updateControls(); requestRefresh(ctx); }
+  }
+});
 
 $("cancel-conversation-action").addEventListener("click", () => { conversationTarget = null; $("conversation-action-dialog").close(); });
 $("conversation-action-dialog").addEventListener("cancel", () => { conversationTarget = null; });
