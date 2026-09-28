@@ -14,6 +14,11 @@ export function sessionActivitySymbol(activity) {
   return activitySymbols.get(activity) || ">";
 }
 
+// History timestamps are normalized UTC strings. Older servers only expose modifiedAt.
+export function compareArchivedSessions(a, b) {
+  return String(b.createdAt || b.modifiedAt || "").localeCompare(String(a.createdAt || a.modifiedAt || ""));
+}
+
 export function initSidebarResize(doc = document) {
   const win = doc.defaultView;
   const workspace = doc.getElementById("workspace");

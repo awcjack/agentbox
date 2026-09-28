@@ -32,8 +32,10 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   process and persistently hide saved history without deleting it. Delete-scope denial disables this
   control independently of write access. Successful empty `204` responses work.
 - **Archived conversations** in the sidebar lists saved archives for the selected
-  profiles, including after logout/restart. Expand it and click a conversation to
-  reopen it for reading or continuing, then End & archive again when done.
+  profiles, including after logout/restart, ordered by creation date (newest first).
+  Rows show that creation date, which does not change when a conversation is renamed
+  or resumed. Expand it and click a conversation to reopen it for reading or
+  continuing, then End & archive again when done.
   Reopening uses runtime capacity and requires session-creation access; it is not
   an offline viewer. Truncated server history listings produce a visible warning.
 - **Export JSON** downloads the entire selected conversation tree, not the rendered
@@ -88,7 +90,7 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 
 Uses the existing runtime README/RPC contract and these supervisor additions:
 
-- `GET /v1/history?profile=...&includeArchived=true` returns `{sessions:[{id,name,cwd,modifiedAt,profile,archived}],truncated}`.
+- `GET /v1/history?profile=...&includeArchived=true` returns `{sessions:[{id,name,cwd,createdAt,modifiedAt,profile,archived}],truncated}`.
 - `GET /v1/sessions/:id/export` returns a versioned JSON document with the complete
   `entries` tree, `leafId`, native identity, name, profile, cwd and export time.
 - Session metadata includes `name`, nullable `nativeSessionId`, `latestEventId`,

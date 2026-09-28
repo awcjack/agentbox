@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
+import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions } from "./commands.mjs";
@@ -272,6 +272,7 @@ function renderSessions() {
   root.replaceChildren();
   const filter = $("profile-filter").value;
   const live = sessions.filter((session) => !filter || session.profile === filter);
+  const isArchived = (session) => session.archived || endedHistory.has(`${session.profile}:${session.id}`);
   function row(session, historical, container = root) {
     const button = element("button", `session-item${!historical && current?.id === session.id ? " active" : ""}`);
     button.dataset.sessionKey = `${historical ? session.profile : "runtime"}:${session.id}`;
@@ -284,7 +285,7 @@ function renderSessions() {
     button.append(symbol);
     const copy = element("span", "session-copy");
     copy.append(element("strong", "", displayTitle(session)));
-    const date = session.modifiedAt || session.lastActivityAt || session.createdAt;
+    const date = (historical && isArchived(session) && session.createdAt) || session.modifiedAt || session.lastActivityAt || session.createdAt;
     const parsed = new Date(date);
     const when = Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     copy.append(element("small", "", `${session.profile} / ${historical ? "resume" : activityLabel(session)}${when ? ` / ${when}` : ""}`));
@@ -298,13 +299,12 @@ function renderSessions() {
   for (const session of live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt)))) row(session, false);
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
   const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
-  const isArchived = (session) => session.archived || endedHistory.has(`${session.profile}:${session.id}`);
   const past = available.filter((session) => !isArchived(session));
   if (past.length) root.append(element("div", "list-heading", "PICK UP WHERE YOU LEFT OFF"));
   for (const session of past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))) row(session, true);
   if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   if (token) {
-    const archived = available.filter(isArchived).sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)));
+    const archived = available.filter(isArchived).sort(compareArchivedSessions);
     const section = element("details", "archived-sessions");
     section.open = archiveOpen;
     const summary = element("summary", "list-heading", `Archived conversations (${archived.length})`);

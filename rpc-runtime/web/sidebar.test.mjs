@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
+import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
 
 test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
   const expected = {
@@ -20,6 +20,24 @@ test("session icons follow transitions into and out of waiting states", () => {
     ["starting", "running", "waiting_action", "running", "waiting_reply", "idle", "exited"].map(sessionActivitySymbol),
     ["◷", "▶", "!", "▶", "?", "○", "×"],
   );
+});
+
+test("archives sort newest creation first, regardless of title, modification time or profile", () => {
+  const oldest = { id: "old", name: "A session", profile: "work", createdAt: "2026-01-01T00:00:00.000Z", modifiedAt: "2026-05-01T00:00:00.000Z" };
+  const middle = { id: "middle", name: "Z session", profile: "personal", createdAt: "2026-02-01T00:00:00.000Z", modifiedAt: "2026-04-01T00:00:00.000Z" };
+  const newest = { id: "new", name: "M session", profile: "work", createdAt: "2026-03-01T00:00:00.000Z", modifiedAt: "2026-03-01T00:00:00.000Z" };
+  assert.deepEqual([middle, oldest, newest].sort(compareArchivedSessions).map((session) => session.id), ["new", "middle", "old"]);
+  oldest.name = "ZZ renamed";
+  oldest.modifiedAt = "2026-06-01T00:00:00.000Z";
+  assert.deepEqual([oldest, newest, middle].sort(compareArchivedSessions).map((session) => session.id), ["new", "middle", "old"]);
+});
+
+test("archive sorting supports older servers and keeps equal creation dates stable", () => {
+  const first = { name: "Z", createdAt: "2026-02-01T00:00:00.000Z", modifiedAt: "2026-03-01T00:00:00.000Z" };
+  const second = { name: "A", createdAt: first.createdAt, modifiedAt: "2026-04-01T00:00:00.000Z" };
+  const legacy = { modifiedAt: "2026-01-01T00:00:00.000Z" };
+  const unknown = { name: "Unknown date" };
+  assert.deepEqual([unknown, legacy, first, second].sort(compareArchivedSessions), [first, second, legacy, unknown]);
 });
 
 function setup(viewport = 1200) {
