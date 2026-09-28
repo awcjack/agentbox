@@ -17,6 +17,7 @@ on:
       - "package.nix"
       - "extensions/**"
       - "runtime/**"
+      - "goal-runtime/**"
       - "rpc-runtime/**"
       - "skills/**"
       - "scripts/**"
@@ -32,6 +33,7 @@ on:
       - "package.nix"
       - "extensions/**"
       - "runtime/**"
+      - "goal-runtime/**"
       - "rpc-runtime/**"
       - "skills/**"
       - "scripts/**"
@@ -83,6 +85,8 @@ jobs:
             pi-agentbox-extension-test \
             pi-workflow-extension-test \
             pi-policy-extension-test \
+            pi-goal-extension-test \
+            pi-codex-wrapper-test \
             pi-lsp-client-test \
             pi-mcp-runtime-test \
             pi-rpc-runtime-test \
