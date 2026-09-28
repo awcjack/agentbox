@@ -40,6 +40,38 @@ test("archives persist without modifying history and reject unsafe markers", asy
   await archiveHistory({ cwd: "/workspace" }, ID);
 });
 
+test("history exposes header creation time independently of modification, rename and archive time", async (t) => {
+  const { root, profile } = await fixture(t);
+  const source = join(root, `${ID}.jsonl`);
+  const original = `${JSON.stringify({ ...JSON.parse(header()), timestamp: "2026-01-02T11:00:00+01:00" })}\n`;
+  await writeFile(source, original);
+  await utimes(source, new Date("2026-02-03T00:00:00Z"), new Date("2026-02-03T00:00:00Z"));
+  const before = (await listHistory(profile, "default")).sessions[0];
+  assert.equal(before.createdAt, "2026-01-02T10:00:00.000Z");
+  assert.equal(before.modifiedAt, "2026-02-03T00:00:00.000Z");
+
+  await writeFile(source, `${original}${JSON.stringify({ type: "session_info", name: "Renamed session" })}\n`);
+  await utimes(source, new Date("2026-03-04T00:00:00Z"), new Date("2026-03-04T00:00:00Z"));
+  await archiveHistory(profile, ID);
+  const after = (await listHistory(profile, "default", { includeArchived: true })).sessions[0];
+  assert.equal(after.createdAt, before.createdAt);
+  assert.equal(after.modifiedAt, "2026-03-04T00:00:00.000Z");
+  assert.equal(after.name, "Renamed session");
+  assert.equal(after.archived, true);
+});
+
+test("history falls back to modification time for missing or invalid creation timestamps", async (t) => {
+  const { root, profile } = await fixture(t);
+  const source = join(root, `${ID}.jsonl`);
+  for (const timestamp of [undefined, null, "", "invalid", 123, {}]) {
+    await writeFile(source, `${JSON.stringify({ ...JSON.parse(header()), timestamp })}\n`);
+    const { sessions } = await listHistory(profile, "default");
+    assert.equal(sessions.length, 1);
+    assert.equal(sessions[0].createdAt, (await stat(source)).mtime.toISOString());
+    assert.equal(sessions[0].createdAt, sessions[0].modifiedAt);
+  }
+});
+
 test("conversation history publishes a private v3 child including compaction and metadata, never rewrites source", async (t) => {
   const { root, profile } = await fixture(t);
   const entries = [

@@ -210,9 +210,12 @@ export async function listHistory(profile, profileName, { includeArchived = fals
           firstMessage = messageTitle([entry.message]);
         }
       }
+      const created = typeof header.timestamp === "string" ? Date.parse(header.timestamp) : NaN;
       sessions.push({
         id: header.id, name: (name || firstMessage || "Untitled session").slice(0, 200),
-        cwd: header.cwd, profile: profileName, modifiedAt: info.mtime.toISOString(),
+        cwd: header.cwd, profile: profileName,
+        createdAt: Number.isFinite(created) ? new Date(created).toISOString() : info.mtime.toISOString(),
+        modifiedAt: info.mtime.toISOString(),
         archived: file.archived,
       });
     } catch { /* Discovery is best effort; corrupt/unreadable files are not sessions. */ }
