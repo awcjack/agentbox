@@ -48,7 +48,8 @@ Auth directly.
 
 Pi runs through an immutable wrapper that rejects `-e`/`--extension`, disables
 extension discovery, and force-loads trusted Agentbox extensions in this order:
-core integration, workflow, MCP, Codex accounts, and final managed policy.
+core integration, workflow, MCP, Codex accounts, upstream Goal (parent sessions
+only), and final managed policy.
 Delegated workflow jobs and RPC sessions re-enter the same wrapper. Pi's
 positional package/config/auth management commands remain available, but their
 installed extensions are not discovered by agent runs. The final policy fails closed
@@ -95,6 +96,100 @@ pinning a provider or model. Roles inherit the active Pi selection unless
 configured otherwise. Todo/task state follows the current session branch,
 delegation has concurrency/job/step/output limits, and `question` works in both
 the TUI and an RPC-provided UI.
+
+### Pi goal mode
+
+Agentbox bundles upstream [`@narumitw/pi-goal` 0.53.1](https://github.com/narumiruna/pi-extensions/tree/86a5eda01aaf271ff0865b36d1a711dc972232e9/packages/pi-goal),
+characterized against **Pi 0.84.2**, without reimplementing its workflow.
+It continues one session-owned objective at settled idle boundaries until complete,
+paused, blocked, waiting, or limited. It does not start a goal automatically in a
+fresh session.
+
+```text
+/goal --tokens 100k fix the failing test and verify it
+/goal status
+/goal pause
+/goal resume
+/goal edit verify the smaller fix first
+/goal clear
+```
+
+Bare `/goal` opens the TUI manager (including Settings). In native Pi RPC/chat,
+bare `/goal` and `status` emit notifications instead; direct commands work via
+RPC `prompt`, with replacement confirmation through the existing UI protocol.
+Print/JSON status routes are unsupported upstream. `pause` aborts current Goal
+work, `resume` preserves cumulative usage but starts a new automatic-work epoch,
+`edit` preserves usage, and `clear` removes the goal without cancelling unrelated
+work. Replacing an unfinished goal requires confirmation. Completion requires
+`goal_complete` with the current goal ID and evidence; `goal_blocked` reports a
+repeated impasse and `goal_wait` waits for an arranged external wake source.
+These checks are model guardrails, not independent proof of task completion.
+
+Defaults are **25 automatic model responses** per epoch and **3 repeated
+empty/identical tool-free automatic runs** before pausing. The response cap does
+not charge user-triggered kickoff/resume/edit or ordinary user runs. An attempted
+tool call resets the no-progress heuristic. Optional `--tokens` is cumulative
+assistant token usage on the current session branch, including cached tokens;
+it can overshoot by the final model call and is **not a dollar or whole-task cost
+cap**. Delegated task usage and other nested/tool usage are not included. Goal
+state persists with the session across reload/resume and compatible forks; a new
+session does not inherit it. Review restored active goals before leaving Pi
+unattended.
+
+Optional settings live in `~/.pi/agent/pi-goal.json` (or Pi's configured agent
+directory), not project configuration. The absent file remains absent. Settings
+use `toolVisibility: "after-first-goal"`, `rpc.enabled: false`, and
+`continuationLimits: { automaticTurns: 25, noProgressTurns: 3 }` by default.
+External edits require `/reload`; the TUI Settings menu applies changes live.
+Explicit `null` removes the corresponding limit—use cautiously. Invalid settings
+are retained, warned about, and fall back to defaults. The default-off **Managed
+run RPC** setting is an extension event-bus cooperation protocol, not the native
+Pi RPC transport, authentication, or permission authorization.
+
+**Permissions and scope:** Goal never enables `/auto` or grants tool approval.
+All its model tool calls, including `goal_*`, still pass the final managed policy
+and may ask or be denied. No policy allow rules are added. Workflow children
+(`PI_WORKFLOW_CHILD=1` or any `PI_WORKFLOW_APPROVAL_VERSION` presence) do not load
+Goal at all: their role tool scopes, recursion guard, step limits, and parent
+approval channel remain unchanged. Parent RPC sessions do load it. Agentbox's
+workflow is not an upstream Workflow Mutex participant; no cross-extension
+mutual-exclusion guarantee is claimed. Goal budgets do not replace task limits.
+
+Like all Pi extensions, this trusted code runs with full process permissions:
+policy tool hooks do **not** sandbox extension code. Reviewed behavior includes
+session entries, local settings reads/atomic menu saves, legacy
+`pi-goal-state.json` cleanup on clear, timers, prompt injection, and active-tool
+visibility changes. The reviewed Goal runtime has no direct shell execution,
+network client, or credential access; model work uses existing Pi tools and
+providers. Its TUI dependency also runs in-process. Container isolation and
+least-privilege credentials remain the security boundary.
+
+**Installation/source:** `goal-runtime/` uses `buildNpmPackage`, the checked-in
+npm lockfile and fixed `npmDepsHash`; no runtime `pi install`, floating npm
+resolution, or dependency lifecycle scripts run. The published Goal `dist/`
+(including lazy chunks) is used unchanged, with `@narumitw/pi-tui-kit` **0.57.0**,
+`grok-mermaid` **0.2.3**, and `highlight.js` **11.12.0** locked transitively. Pi and
+TypeBox peers come from Pi's loader, not another npm Pi installation.
+
+- Upstream Goal commit: `86a5eda01aaf271ff0865b36d1a711dc972232e9`.
+- npm source: `https://registry.npmjs.org/@narumitw/pi-goal/-/pi-goal-0.53.1.tgz`.
+- Goal tarball SHA-256: `sha256-t9acGqk7ZsLc/cl+fJ8jSNtc3/ulcnaCOSDPww9N43U=`.
+- Complete npm dependency cache: `sha256-ccT5bpqIaD5rNobSuF7G+5GEbJjILM/XzivJbPEtgBQ=`;
+  each tarball's SHA-512 integrity is recorded in `goal-runtime/package-lock.json`.
+
+Rebuild/redeploy the image and start a new Pi process to install this integration;
+`pi update` does not update the immutable bundle. The host `package.nix` CLI
+already launches the container wrapper and needs no separate installer.
+Focused offline checks (also run in CI):
+
+```sh
+nix build .#agentbox-pi-goal-runtime .#pi-goal-extension-test .#pi-codex-wrapper-test
+```
+
+The extension check uses Pi 0.84.2's real Jiti loader, lazy TUI/RPC routes, managed
+policy approvals, stale goal IDs, pause/resume/clear, token exhaustion and restored
+response caps. The wrapper check verifies policy-last ordering, immutable entry
+paths, rejection of user extensions, and exclusion from child sessions.
 
 ### Per-task models and skills
 
