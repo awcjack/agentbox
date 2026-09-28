@@ -20,6 +20,7 @@ let
   # Pre-configured neovim baked into the image; also exposed on its own.
   agentbox-neovim = pkgs.callPackage ./neovim.nix { };
   pi-agentbox-mcp-runtime = pkgs.callPackage ./runtime { };
+  agentbox-pi-goal-runtime = pkgs.callPackage ./goal-runtime { };
   agentbox-pi-rpc-runtime = pkgs.callPackage ./rpc-runtime { inherit pi-coding-agent; };
 in
 {
@@ -30,11 +31,29 @@ in
 
   inherit
     agentbox-neovim
+    agentbox-pi-goal-runtime
     agentbox-pi-rpc-runtime
     pi-agentbox-mcp-runtime
     ;
 
   pi-codex-wrapper-test = import ./tests/pi-codex-wrapper.nix { inherit pkgs; };
+
+  pi-goal-extension-test =
+    let
+      testSource = pkgs.runCommand "pi-goal-test-source" { } ''
+        mkdir -p $out/tests $out/extensions
+        cp ${./tests/pi-goal.mjs} $out/tests/pi-goal.mjs
+        cp ${./extensions/pi-policy.ts} $out/extensions/pi-policy.ts
+        cp ${./extensions/pi-approval.ts} $out/extensions/pi-approval.ts
+      '';
+    in
+    pkgs.runCommand "pi-goal-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+      node --experimental-strip-types ${testSource}/tests/pi-goal.mjs \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo \
+        ${agentbox-pi-goal-runtime}/lib/agentbox-pi-goal-runtime
+      touch $out
+    '';
 
   pi-codex-accounts-test =
     let
@@ -62,6 +81,7 @@ in
       pkgs.callPackage ./image.nix {
         inherit
           agentbox-neovim
+          agentbox-pi-goal-runtime
           agentbox-pi-rpc-runtime
           opencode
           pi-agentbox-mcp-runtime

@@ -1,0 +1,11 @@
+{
+  "name": "agentbox-pi-goal-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pinned upstream pi-goal runtime for managed Agentbox Pi",
+  "dependencies": {
+    "@narumitw/pi-goal": "0.53.1",
+    "@narumitw/pi-tui-kit": "0.57.0"
+  }
+}

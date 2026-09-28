@@ -71,6 +71,7 @@
   opencode,
   pi-coding-agent,
   pi-agentbox-mcp-runtime,
+  agentbox-pi-goal-runtime ? callPackage ./goal-runtime { },
   agentbox-pi-rpc-runtime,
   # Language servers (LSPs)
   gopls,
@@ -702,12 +703,19 @@ let
     export PI_WORKFLOW_CONFIG=/etc/agentbox/pi-workflow.json
     export PI_AGENTBOX_RUNTIME_CONFIG=/etc/agentbox/pi-runtime.json
     export PI_POLICY_CONFIG=/etc/pi/agentbox-policy.json
+    # Goal is a parent-session workflow, never a delegated child's loop. Keep
+    # child role tools, step limits and approval transport solely workflow-owned.
+    goalArgs=()
+    if [ "''${PI_WORKFLOW_CHILD:-}" != 1 ] && [ "''${PI_WORKFLOW_APPROVAL_VERSION+x}" != x ]; then
+      goalArgs=(-e ${agentbox-pi-goal-runtime}/lib/agentbox-pi-goal-runtime/node_modules/@narumitw/pi-goal/dist/index.ts)
+    fi
     exec ${pi-coding-agent}/bin/pi \
       --no-extensions \
       -e ${piAgentboxExtensions}/pi-agentbox.ts \
       -e ${piWorkflowExtension} \
       -e ${piMcpExtension} \
       -e ${piAgentboxExtensions}/pi-codex-accounts.ts \
+      "''${goalArgs[@]}" \
       -e ${piPolicyExtension} \
       "$@"
   '';
