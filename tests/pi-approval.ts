@@ -215,7 +215,7 @@ createPiWorkflowExtension({
 })({ events: { emit: (name: string, payload: any) => {
   assert.equal(name, "agentbox:auto-query")
   payload.reply(autoEnabled)
-} }, on: () => {}, registerTool: (tool: any) => tools.set(tool.name, tool), appendEntry: () => {} } as any)
+} }, on: () => {}, registerCommand: () => {}, registerTool: (tool: any) => tools.set(tool.name, tool), appendEntry: () => {} } as any)
 let active = 0
 let peak = 0
 const titles: string[] = []

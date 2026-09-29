@@ -12,6 +12,7 @@ function harness(dependencies: any = {}, commands: any[] = []) {
   const handlers = new Map<string, Handler[]>()
   const tools = new Map<string, any>()
   const entries: any[] = []
+  const registeredCommands = new Map<string, any>()
   const pi = {
     getCommands: () => commands,
     setModel: () => { throw new Error("Must not change parent model") },
@@ -19,6 +20,7 @@ function harness(dependencies: any = {}, commands: any[] = []) {
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler])
     },
+    registerCommand(name: string, command: any) { registeredCommands.set(name, command) },
     registerTool(tool: any) {
       tools.set(tool.name, tool)
     },
@@ -27,7 +29,7 @@ function harness(dependencies: any = {}, commands: any[] = []) {
     },
   } as any
   createPiWorkflowExtension(dependencies)(pi)
-  return { handlers, tools, entries, handler: (name: string) => handlers.get(name)![0] }
+  return { handlers, tools, entries, registeredCommands, handler: (name: string) => handlers.get(name)![0] }
 }
 
 function context(entries: any[] = [], overrides: any = {}) {
@@ -35,10 +37,12 @@ function context(entries: any[] = [], overrides: any = {}) {
     cwd: "/workspace/project",
     mode: "tui",
     hasUI: true,
+    isIdle: () => true,
     model: { provider: "parent-provider", id: "parent-model" },
     thinkingLevel: "medium",
     sessionManager: { getBranch: () => entries },
     ui: {
+      notify: () => {},
       select: async () => undefined,
       input: async () => undefined,
     },
@@ -624,6 +628,276 @@ try {
 } finally {
   await rm(skillDir, { recursive: true, force: true })
 }
+
+// With no configured override the managed default is four across calls, not four per call.
+peakActive = 0
+const defaultShared = harness({
+  readFile: async () => JSON.stringify({ roles: { scout: {} } }),
+  getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+  spawn: successfulSpawn,
+})
+await Promise.all(Array.from({ length: 3 }, (_, index) => defaultShared.tools.get("task").execute(`default-${index}`, {
+  jobs: Array.from({ length: 3 }, (_, job) => ({ role: "scout", prompt: `${index}/${job}` })),
+}, undefined, () => { throw new Error("broken UI observer") }, context())))
+assert.equal(peakActive, 4)
+assert.equal(active, 0)
+peakActive = 0
+await Promise.all(Array.from({ length: 2 }, (_, index) => defaultShared.tools.get("task").execute(`serial-${index}`, {
+  jobs: Array.from({ length: 3 }, (_, job) => ({ role: "scout", prompt: `${index}/${job}` })), concurrency: 1,
+}, undefined, undefined, context())))
+assert.equal(peakActive, 2, "per-call concurrency can still lower parallelism")
+
+// Shared FIFO spans overlapping calls, honors per-call limits, and skips aborted waiters.
+const held: Array<{ prompt: string; close: () => void }> = []
+let live = 0
+let peak = 0
+let throwSpawn = false
+const shared = harness({
+  readFile: async () => config,
+  getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+  spawn: () => {
+    if (throwSpawn) { throwSpawn = false; throw new Error("spawn failed") }
+    const proc = new EventEmitter() as any
+    proc.stdout = new EventEmitter()
+    proc.stderr = new EventEmitter()
+    proc.stdin = new EventEmitter()
+    live++
+    peak = Math.max(peak, live)
+    const call = { prompt: "", close: () => { live--; proc.emit("close", 0) } }
+    held.push(call)
+    proc.stdin.end = (prompt: string) => { call.prompt = prompt }
+    proc.kill = () => { queueMicrotask(call.close); return true }
+    return proc
+  },
+})
+const notices: Array<{ text: string; level: string }> = []
+const settingsContext = context([], { ui: { notify: (text: string, level: string) => notices.push({ text, level }) } })
+const settings = (args = "", ctx = settingsContext) => shared.registeredCommands.get("agentbox-subagents").handler(args, ctx)
+const runShared = (prompt: string, signal?: AbortSignal) => shared.tools.get("task").execute(prompt,
+  { role: "scout", prompt }, signal, undefined, context())
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
+await settings()
+assert.match(notices.at(-1)!.text, /concurrency: 2 .*session: default/)
+await settings("1")
+assert.deepEqual(shared.entries.at(-1), { type: "custom", customType: "pi-workflow.settings", data: { version: 1, maxConcurrency: 1 } })
+const savedSetting = shared.entries.at(-1)
+for (const value of ["0", "3", "-1", "1.5", "1e0", "NaN", "1 2", "bogus", "9007199254740993"]) {
+  const before = shared.entries.length
+  await settings(value)
+  assert.equal(notices.at(-1)!.level, "error", value)
+  assert.equal(shared.entries.length, before)
+}
+await settings("reset", { ...settingsContext, isIdle: () => false })
+assert.equal(notices.at(-1)!.level, "warning")
+assert.equal(shared.entries.at(-1), savedSetting)
+const alreadyAborted = new AbortController()
+alreadyAborted.abort()
+assert.equal((await runShared("pre-aborted", alreadyAborted.signal)).details.results[0].status, "cancelled")
+assert.equal(held.length, 0)
+const first = runShared("first")
+const abortQueued = new AbortController()
+const skipped = runShared("skip", abortQueued.signal)
+const third = runShared("third")
+await tick()
+assert.deepEqual(held.map((call) => call.prompt), ["first"])
+await settings("reset")
+assert.equal(notices.at(-1)!.level, "warning")
+await settings("status")
+assert.match(notices.at(-1)!.text, /running: 1; queued: 2/)
+abortQueued.abort()
+assert.equal((await skipped).details.results[0].status, "cancelled")
+assert.equal(held.length, 1)
+const fourth = runShared("fourth")
+held[0].close()
+await first
+await tick()
+assert.deepEqual(held.map((call) => call.prompt), ["first", "third"])
+held[1].close()
+await third
+await tick()
+assert.equal(held[2].prompt, "fourth")
+held[2].close()
+await fourth
+assert.equal(peak, 1)
+// Cancellation after a permit is granted but before the async continuation must not spawn.
+const grantBlocker = runShared("grant blocker")
+const grantAbort = new AbortController()
+const grantWaiter = runShared("abort at grant", grantAbort.signal)
+await tick()
+const beforeGrant = held.length
+held.at(-1)!.close()
+grantAbort.abort()
+await grantBlocker
+assert.equal((await grantWaiter).details.results[0].status, "cancelled")
+assert.equal(held.length, beforeGrant)
+// Running cancellation keeps the permit until close, then unblocks the FIFO.
+const runningAbort = new AbortController()
+const runningCancelled = runShared("cancel running", runningAbort.signal)
+const afterRunningCancel = runShared("after running cancellation")
+await tick()
+runningAbort.abort()
+assert.equal((await runningCancelled).details.results[0].status, "cancelled")
+await tick()
+assert.equal(held.at(-1)!.prompt, "after running cancellation")
+held.at(-1)!.close()
+await afterRunningCancel
+// A synchronous spawn failure must return its permit to the next caller.
+throwSpawn = true
+const failedSpawn = runShared("failure")
+const afterFailure = runShared("after failure")
+assert.equal((await failedSpawn).details.results[0].status, "failed")
+await tick()
+assert.equal(held.at(-1)!.prompt, "after failure")
+held.at(-1)!.close()
+await afterFailure
+await settings("reset")
+assert.deepEqual(shared.entries.at(-1).data, { version: 1, maxConcurrency: null })
+const resetSetting = shared.entries.at(-1)
+const a = runShared("a")
+const b = runShared("b")
+const c = runShared("c")
+await tick()
+assert.equal(live, 2)
+assert.equal(peak, 2)
+held.at(-2)!.close()
+await a
+await tick()
+assert.equal(held.at(-1)!.prompt, "c")
+held.at(-2)!.close()
+held.at(-1)!.close()
+await Promise.all([b, c])
+// Restoration uses only the branch and ignores malformed settings snapshots.
+await shared.handler("session_start")({}, context([savedSetting]))
+await settings()
+assert.match(notices.at(-1)!.text, /concurrency: 1/)
+for (const data of [{ version: 2, maxConcurrency: 2 }, { version: 1, maxConcurrency: 0 }, { version: 1, maxConcurrency: "2" }]) {
+  await shared.handler("session_tree")({}, context([savedSetting, { ...savedSetting, data }]))
+  await settings()
+  assert.match(notices.at(-1)!.text, /concurrency: 1/)
+}
+await shared.handler("session_tree")({}, context([savedSetting, resetSetting]))
+await settings()
+assert.match(notices.at(-1)!.text, /concurrency: 2 .*session: default/)
+await shared.handler("session_tree")({}, context([]))
+await settings()
+assert.match(notices.at(-1)!.text, /session: default/)
+// Old overrides can never raise a newly lowered managed cap.
+await shared.handler("session_start")({}, context([{ ...savedSetting, data: { version: 1, maxConcurrency: 16 } }]))
+await settings()
+assert.match(notices.at(-1)!.text, /concurrency: 2/)
+assert.ok(shared.tools.get("task").promptGuidelines.length >= 5)
+// An invocation awaiting config is already busy, even before it has queued jobs.
+let releaseConfig: (value: string) => void = () => {}
+let configReads = 0
+const preflight = harness({
+  readFile: async () => ++configReads === 1 ? new Promise<string>((resolve) => { releaseConfig = resolve }) : config,
+})
+const invalidPreflight = preflight.tools.get("task").execute("preflight", { jobs: [] }, undefined, undefined, context())
+await preflight.registeredCommands.get("agentbox-subagents").handler("1", settingsContext)
+assert.equal(notices.at(-1)!.level, "warning")
+assert.equal(preflight.entries.length, 0)
+releaseConfig(config)
+assert.equal((await invalidPreflight).isError, true)
+await preflight.registeredCommands.get("agentbox-subagents").handler("1", settingsContext)
+assert.deepEqual(preflight.entries.at(-1).data, { version: 1, maxConcurrency: 1 })
+const badConfig = harness({ readFile: async () => "invalid json" })
+await badConfig.registeredCommands.get("agentbox-subagents").handler("1", settingsContext)
+assert.equal(notices.at(-1)!.level, "error")
+assert.equal(badConfig.entries.length, 0)
+
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+// A command belongs to the branch on which it started, not the branch at read completion.
+for (const event of ["session_start", "session_tree"]) {
+  for (const value of ["2", "reset"]) {
+    const pendingConfig = deferred<string>()
+    let reads = 0
+    const staleCommand = harness({ readFile: async () => ++reads === 1 ? pendingConfig.promise : config })
+    const update = staleCommand.registeredCommands.get("agentbox-subagents").handler(value, settingsContext)
+    await staleCommand.handler(event)({}, context([savedSetting]))
+    pendingConfig.resolve(config)
+    await update
+    assert.equal(staleCommand.entries.length, 0, `${event}/${value} must not write to the new branch`)
+    assert.match(notices.at(-1)!.text, /Session or branch changed/)
+    await staleCommand.registeredCommands.get("agentbox-subagents").handler("", settingsContext)
+    assert.match(notices.at(-1)!.text, /concurrency: 1/)
+  }
+}
+
+// Older task config must not raise a newer cap after either skill I/O or an out-of-order read.
+for (const pause of ["skill", "config"]) {
+  const olderRead = deferred<string>()
+  const skillRead = deferred<string>()
+  let reads = 0
+  const closes: Array<() => void> = []
+  let running = 0
+  let maximum = 0
+  const cap = (maxConcurrency: number) => JSON.stringify({ maxConcurrency, roles: { scout: {} } })
+  const racing = harness({
+    readFile: async (path: string) => {
+      if (path === "/skills/race/SKILL.md") return skillRead.promise
+      if (++reads === 1) return pause === "config" ? olderRead.promise : cap(4)
+      return cap(1)
+    },
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+    spawn: () => {
+      const proc = new EventEmitter() as any
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.stdin = new EventEmitter()
+      proc.stdin.end = () => {}
+      proc.kill = () => true
+      maximum = Math.max(maximum, ++running)
+      closes.push(() => { running--; proc.emit("close", 0) })
+      return proc
+    },
+  }, [{ name: "skill:race", source: "skill", sourceInfo: { path: "/skills/race/SKILL.md" } }])
+  const execute = (params: any) => racing.tools.get("task").execute("race", params, undefined, undefined, context())
+  const older = execute({ role: "scout", prompt: "older", ...(pause === "skill" ? { skill: "race" } : {}) })
+  await tick()
+  const newer = execute({ role: "scout", prompt: "newer" })
+  await tick()
+  assert.equal(closes.length, 1)
+  olderRead.resolve(cap(4))
+  skillRead.resolve("Review independently.")
+  await tick()
+  assert.equal(closes.length, 1, `${pause}: stale config must not raise the shared limit`)
+  closes[0]()
+  await newer
+  await tick()
+  assert.equal(closes.length, 2)
+  closes[1]()
+  await older
+  assert.equal(maximum, 1)
+}
+
+// Branch restoration invalidates pending task reads and respects reset without stale spawns.
+for (const entry of [savedSetting, resetSetting]) {
+  const pendingConfig = deferred<string>()
+  let reads = 0
+  let spawned = false
+  const changedBranch = harness({
+    readFile: async () => ++reads === 1 ? pendingConfig.promise : config,
+    spawn: () => { spawned = true; throw new Error("stale task spawned") },
+  })
+  const pendingTask = changedBranch.tools.get("task").execute("old branch", { role: "scout", prompt: "stale" }, undefined, undefined, context())
+  await changedBranch.handler("session_tree")({}, context([entry]))
+  pendingConfig.resolve(config)
+  const staleResult = await pendingTask
+  assert.equal(staleResult.isError, true)
+  assert.match(staleResult.content[0].text, /Session or branch changed/)
+  assert.equal(spawned, false)
+  assert.equal(changedBranch.entries.length, 0)
+  await changedBranch.registeredCommands.get("agentbox-subagents").handler("", settingsContext)
+  assert.match(notices.at(-1)!.text, entry === savedSetting ? /concurrency: 1/ : /concurrency: 2/)
+}
+assert.ok(shared.tools.get("task").promptGuidelines.every((guideline: string) => /\btask\b/.test(guideline)))
+
 
 const originalChild = process.env.PI_WORKFLOW_CHILD
 process.env.PI_WORKFLOW_CHILD = "1"

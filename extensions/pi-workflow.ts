@@ -9,6 +9,7 @@ import type { Readable, Writable } from "node:stream"
 
 const TODO_ENTRY = "pi-workflow.todos"
 const TASK_ENTRY = "pi-workflow.tasks"
+const SETTINGS_ENTRY = "pi-workflow.settings"
 const DEFAULT_CONFIG_PATH = "/etc/agentbox/pi-workflow.json"
 const DEFAULT_MAX_CONCURRENCY = 4
 const DEFAULT_MAX_JOBS = 8
@@ -160,6 +161,52 @@ function currentPiInvocation(args: string[]): { command: string; args: string[] 
   throw new Error("PI_AGENTBOX_PI_WRAPPER does not identify the managed Pi wrapper")
 }
 
+// One FIFO for the extension runtime, not one semaphore per tool invocation.
+class JobLimiter {
+  active = 0
+  limit = DEFAULT_MAX_CONCURRENCY
+  private queue: Array<() => void> = []
+
+  get queued() { return this.queue.length }
+
+  acquire(signal?: AbortSignal): Promise<(() => void) | undefined> {
+    if (signal?.aborted) return Promise.resolve(undefined)
+    return new Promise((resolve) => {
+      const abort = () => {
+        const index = this.queue.indexOf(grant)
+        if (index < 0) return
+        this.queue.splice(index, 1)
+        signal?.removeEventListener("abort", abort)
+        resolve(undefined)
+        this.drain()
+      }
+      const grant = () => {
+        signal?.removeEventListener("abort", abort)
+        this.active++
+        let released = false
+        resolve(() => {
+          if (released) return
+          released = true
+          this.active--
+          this.drain()
+        })
+      }
+      this.queue.push(grant)
+      signal?.addEventListener("abort", abort, { once: true })
+      this.drain()
+    })
+  }
+
+  setLimit(limit: number) {
+    this.limit = limit
+    this.drain()
+  }
+
+  private drain() {
+    while (this.active < this.limit && this.queue.length) this.queue.shift()!()
+  }
+}
+
 class BoundedBytes {
   private value = Buffer.alloc(0)
   private readonly limit: number
@@ -224,13 +271,40 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
     let taskRecords = new Map<string, TaskRecord>()
     let reservedTaskIds = new Set<string>()
     const activeResumeIds = new Set<string>()
+    const limiter = new JobLimiter()
+    let maxConcurrency: number | null = null
+    let activeCalls = 0
+    let generation = 0
+    let configReadSequence = 0
+    let managedMaxConcurrency = DEFAULT_MAX_CONCURRENCY
+    const refreshLimit = () => limiter.setLimit(Math.min(maxConcurrency ?? managedMaxConcurrency, managedMaxConcurrency))
+    const effectiveLimit = (config: WorkflowConfig) => Math.min(maxConcurrency ?? config.maxConcurrency, config.maxConcurrency)
+    const loadConfig = async (path = process.env.PI_WORKFLOW_CONFIG || DEFAULT_CONFIG_PATH) => {
+      const sequence = ++configReadSequence
+      const startedGeneration = generation
+      const config = parseConfig(await readFile(path, "utf8"), path)
+      // Apply before any skill I/O. Neither an older read nor a former branch may
+      // overwrite the shared cap chosen by a newer invocation.
+      if (sequence === configReadSequence && startedGeneration === generation) {
+        managedMaxConcurrency = config.maxConcurrency
+        refreshLimit()
+      }
+      return config
+    }
 
     const restoreState = (ctx: any) => {
+      generation++
+      maxConcurrency = null
       todoState = { version: 1, nextId: 1, items: [] }
       taskRecords = new Map()
       reservedTaskIds = new Set()
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "custom") continue
+        if (entry.customType === SETTINGS_ENTRY && isObject(entry.data) && entry.data.version === 1
+          && (entry.data.maxConcurrency === null || (Number.isInteger(entry.data.maxConcurrency)
+            && (entry.data.maxConcurrency as number) >= 1 && (entry.data.maxConcurrency as number) <= 16))) {
+          maxConcurrency = entry.data.maxConcurrency as number | null
+        }
         if (entry.customType === TODO_ENTRY && validTodoState(entry.data)) {
           todoState = {
             version: 1,
@@ -243,6 +317,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           reservedTaskIds = new Set(taskRecords.keys())
         }
       }
+      refreshLimit()
     }
 
     const persistTodos = () => {
@@ -406,6 +481,40 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
       return
     }
 
+    pi.registerCommand("agentbox-subagents", {
+      description: "Show session subagent concurrency, set an integer up to the managed cap, or reset",
+      handler: async (args, ctx) => {
+        const startedGeneration = generation
+        let config: WorkflowConfig
+        try { config = await loadConfig() } catch (error) {
+          ctx.ui.notify(`Workflow config error: ${error instanceof Error ? error.message : String(error)}`, "error")
+          return
+        }
+        if (startedGeneration !== generation) {
+          ctx.ui.notify("Session or branch changed while loading subagent settings; run the command again.", "warning")
+          return
+        }
+        const value = args.trim()
+        if (value && value !== "status") {
+          if (value !== "reset" && (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(Number(value))
+            || Number(value) < 1 || Number(value) > config.maxConcurrency)) {
+            ctx.ui.notify(`Usage: /agentbox-subagents [status|1..${config.maxConcurrency}|reset]`, "error")
+            return
+          }
+          // Check after the asynchronous config read, including calls still in preflight.
+          if (!ctx.isIdle() || activeCalls || limiter.active || limiter.queued) {
+            ctx.ui.notify("Subagent settings can only change while idle (no running or queued tasks).", "warning")
+            return
+          }
+          const next = value === "reset" ? null : Number(value)
+          pi.appendEntry(SETTINGS_ENTRY, { version: 1, maxConcurrency: next })
+          maxConcurrency = next
+          refreshLimit()
+        }
+        ctx.ui.notify(`Subagent concurrency: ${effectiveLimit(config)} (managed cap: ${config.maxConcurrency}; session: ${maxConcurrency ?? "default"}; running: ${limiter.active}; queued: ${limiter.queued}).`, "info")
+      },
+    })
+
     const runJob = async (
       job: TaskJob,
       config: WorkflowConfig,
@@ -441,255 +550,268 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         }
       }
 
-      if (signal?.aborted) {
-        return {
-          taskId,
-          role: job.role,
-          status: "cancelled",
-          exitCode: null,
-          output: "Task cancelled before start.",
-          stderr: "",
-          outputTruncated: false,
-          stderrTruncated: false,
-          steps: 0,
-          resumed: Boolean(job.resume),
-        }
-      }
-
-      if (job.resume) {
-        const record = taskRecords.get(taskId)
-        if (!TASK_ID_RE.test(taskId) || !record || record.cwd !== cwd || record.role !== job.role) {
-          return {
-            taskId,
-            role: job.role,
-            status: "failed",
-            exitCode: null,
-            output: "Resume requires a task ID previously created for this role and working directory in the current session branch.",
-            stderr: "",
-            outputTruncated: false,
-            stderrTruncated: false,
-            steps: 0,
-            resumed: true,
-          }
-        }
-        if (activeResumeIds.has(taskId)) {
-          return {
-            taskId,
-            role: job.role,
-            status: "failed",
-            exitCode: null,
-            output: `Task ${taskId} is already being resumed by an active workflow job.`,
-            stderr: "",
-            outputTruncated: false,
-            stderrTruncated: false,
-            steps: 0,
-            resumed: true,
-          }
-        }
-        activeResumeIds.add(taskId)
-      }
-
-      const args = ["--mode", "json", "-p", "--exclude-tools", "task"]
-      if (job.resume) args.push("--session", taskId)
-      else args.push("--session-id", taskId)
-      const provider = job.provider ?? role.provider ?? inherited.provider
-      const model = job.model ?? role.model ?? inherited.model
-      const thinking = role.thinking ?? inherited.thinking
-      if (provider) args.push("--provider", provider)
-      if (model) args.push("--model", model)
-      if (thinking) args.push("--thinking", thinking)
-      if (role.systemPrompt) args.push("--system-prompt", role.systemPrompt)
-
-      let invocation: { command: string; args: string[] }
+      const release = await limiter.acquire(signal)
+      let ownsResume = false
       try {
-        invocation = getPiInvocation(args)
-      } catch (error) {
-        if (job.resume) activeResumeIds.delete(taskId)
-        return {
-          taskId,
-          role: job.role,
-          status: "failed",
-          exitCode: null,
-          output: error instanceof Error ? error.message : String(error),
-          stderr: "",
-          outputTruncated: false,
-          stderrTruncated: false,
-          steps: 0,
-          resumed: Boolean(job.resume),
-        }
-      }
-
-      const stdout = new BoundedBytes(config.maxOutputBytes)
-      const stderr = new BoundedBytes(config.maxOutputBytes)
-      let steps = 0
-      let pendingEvent = Buffer.alloc(0)
-      let cancelled = false
-      let stepLimited = false
-      let parserFailure = ""
-      let assistantStopReason = ""
-      let assistantOutput = ""
-      let assistantOutputTruncated = false
-      let killTimer: ReturnType<typeof setTimeout> | undefined
-
-      return new Promise<TaskResult>((resolve) => {
-        let settled = false
-        let abort = () => {}
-        let terminate = (_reason: "cancelled" | "step_limit" | "failed") => {}
-        let proc: ReturnType<Spawn>
-        let closeApprovals = () => {}
-
-        const setAssistantOutput = (text: string) => {
-          const bounded = new BoundedBytes(config.maxOutputBytes)
-          bounded.append(text)
-          assistantOutput = bounded.text()
-          assistantOutputTruncated = bounded.omitted > 0
-        }
-
-        const inspectEvent = (line: Buffer) => {
-          if (line.length === 0 || parserFailure) return
-          try {
-            const text = line.toString("utf8").trim()
-            if (!text) return
-            const event = JSON.parse(text)
-            if (event?.type !== "message_end" || event.message?.role !== "assistant") return
-            steps++
-            assistantStopReason = typeof event.message.stopReason === "string" ? event.message.stopReason : ""
-            const content = event.message.content
-            if (typeof content === "string") setAssistantOutput(content)
-            else if (Array.isArray(content)) {
-              const text = content
-                .filter((part) => part?.type === "text" && typeof part.text === "string")
-                .map((part) => part.text)
-                .join("\n")
-              if (text) setAssistantOutput(text)
-            }
-            if (typeof event.message.errorMessage === "string" && event.message.errorMessage) {
-              setAssistantOutput(event.message.errorMessage)
-            }
-            if (steps >= role.maxSteps && event.message.stopReason === "toolUse") terminate("step_limit")
-            onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
-          } catch (error) {
-            parserFailure = `Invalid JSON event from workflow child: ${error instanceof Error ? error.message : String(error)}`
-            terminate("failed")
+        if (signal?.aborted) {
+          return {
+            taskId,
+            role: job.role,
+            status: "cancelled",
+            exitCode: null,
+            output: "Task cancelled before start.",
+            stderr: "",
+            outputTruncated: false,
+            stderrTruncated: false,
+            steps: 0,
+            resumed: Boolean(job.resume),
           }
         }
 
-        const inspectChunk = (chunk: Buffer | string) => {
-          if (parserFailure) return
-          const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-          let offset = 0
-          while (offset < incoming.length) {
-            const newline = incoming.indexOf(10, offset)
-            const end = newline < 0 ? incoming.length : newline
-            const segment = incoming.subarray(offset, end)
-            if (pendingEvent.length + segment.length > MAX_JSON_EVENT_BYTES) {
-              parserFailure = `Workflow child JSON event exceeds ${MAX_JSON_EVENT_BYTES} bytes`
+        if (job.resume) {
+          const record = taskRecords.get(taskId)
+          if (!TASK_ID_RE.test(taskId) || !record || record.cwd !== cwd || record.role !== job.role) {
+            return {
+              taskId,
+              role: job.role,
+              status: "failed",
+              exitCode: null,
+              output: "Resume requires a task ID previously created for this role and working directory in the current session branch.",
+              stderr: "",
+              outputTruncated: false,
+              stderrTruncated: false,
+              steps: 0,
+              resumed: true,
+            }
+          }
+          if (activeResumeIds.has(taskId)) {
+            return {
+              taskId,
+              role: job.role,
+              status: "failed",
+              exitCode: null,
+              output: `Task ${taskId} is already being resumed by an active workflow job.`,
+              stderr: "",
+              outputTruncated: false,
+              stderrTruncated: false,
+              steps: 0,
+              resumed: true,
+            }
+          }
+          activeResumeIds.add(taskId)
+          ownsResume = true
+        }
+
+        const args = ["--mode", "json", "-p", "--exclude-tools", "task"]
+        if (job.resume) args.push("--session", taskId)
+        else args.push("--session-id", taskId)
+        const provider = job.provider ?? role.provider ?? inherited.provider
+        const model = job.model ?? role.model ?? inherited.model
+        const thinking = role.thinking ?? inherited.thinking
+        if (provider) args.push("--provider", provider)
+        if (model) args.push("--model", model)
+        if (thinking) args.push("--thinking", thinking)
+        if (role.systemPrompt) args.push("--system-prompt", role.systemPrompt)
+
+        let invocation: { command: string; args: string[] }
+        try {
+          invocation = getPiInvocation(args)
+        } catch (error) {
+          if (job.resume) activeResumeIds.delete(taskId)
+          return {
+            taskId,
+            role: job.role,
+            status: "failed",
+            exitCode: null,
+            output: error instanceof Error ? error.message : String(error),
+            stderr: "",
+            outputTruncated: false,
+            stderrTruncated: false,
+            steps: 0,
+            resumed: Boolean(job.resume),
+          }
+        }
+
+        const stdout = new BoundedBytes(config.maxOutputBytes)
+        const stderr = new BoundedBytes(config.maxOutputBytes)
+        let steps = 0
+        let pendingEvent = Buffer.alloc(0)
+        let cancelled = false
+        let stepLimited = false
+        let parserFailure = ""
+        let assistantStopReason = ""
+        let assistantOutput = ""
+        let assistantOutputTruncated = false
+        let killTimer: ReturnType<typeof setTimeout> | undefined
+
+        return await new Promise<TaskResult>((resolve) => {
+          let settled = false
+          let abort = () => {}
+          let terminate = (_reason: "cancelled" | "step_limit" | "failed") => {}
+          let proc: ReturnType<Spawn>
+          let closeApprovals = () => {}
+
+          const setAssistantOutput = (text: string) => {
+            const bounded = new BoundedBytes(config.maxOutputBytes)
+            bounded.append(text)
+            assistantOutput = bounded.text()
+            assistantOutputTruncated = bounded.omitted > 0
+          }
+
+          const inspectEvent = (line: Buffer) => {
+            if (line.length === 0 || parserFailure) return
+            try {
+              const text = line.toString("utf8").trim()
+              if (!text) return
+              const event = JSON.parse(text)
+              if (event?.type !== "message_end" || event.message?.role !== "assistant") return
+              steps++
+              assistantStopReason = typeof event.message.stopReason === "string" ? event.message.stopReason : ""
+              const content = event.message.content
+              if (typeof content === "string") setAssistantOutput(content)
+              else if (Array.isArray(content)) {
+                const text = content
+                  .filter((part) => part?.type === "text" && typeof part.text === "string")
+                  .map((part) => part.text)
+                  .join("\n")
+                if (text) setAssistantOutput(text)
+              }
+              if (typeof event.message.errorMessage === "string" && event.message.errorMessage) {
+                setAssistantOutput(event.message.errorMessage)
+              }
+              if (steps >= role.maxSteps && event.message.stopReason === "toolUse") terminate("step_limit")
+              onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
+            } catch (error) {
+              parserFailure = `Invalid JSON event from workflow child: ${error instanceof Error ? error.message : String(error)}`
+              terminate("failed")
+            }
+          }
+
+          const inspectChunk = (chunk: Buffer | string) => {
+            if (parserFailure) return
+            const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+            let offset = 0
+            while (offset < incoming.length) {
+              const newline = incoming.indexOf(10, offset)
+              const end = newline < 0 ? incoming.length : newline
+              const segment = incoming.subarray(offset, end)
+              if (pendingEvent.length + segment.length > MAX_JSON_EVENT_BYTES) {
+                parserFailure = `Workflow child JSON event exceeds ${MAX_JSON_EVENT_BYTES} bytes`
+                terminate("failed")
+                return
+              }
+              if (segment.length > 0) pendingEvent = Buffer.concat([pendingEvent, segment])
+              if (newline < 0) return
+              inspectEvent(pendingEvent)
+              pendingEvent = Buffer.alloc(0)
+              if (parserFailure) return
+              offset = newline + 1
+            }
+          }
+
+          const finish = (exitCode: number | null, spawnError?: Error) => {
+            if (settled) return
+            settled = true
+            closeApprovals()
+            if (killTimer) clearTimeout(killTimer)
+            signal?.removeEventListener("abort", abort)
+            if (pendingEvent.length > 0 && !parserFailure) inspectEvent(pendingEvent)
+            if (job.resume) activeResumeIds.delete(taskId)
+            const stdoutText = stdout.text().trim()
+            let stderrText = stderr.text().trim()
+            const status = cancelled || assistantStopReason === "aborted"
+              ? "cancelled"
+              : stepLimited
+                ? "step_limit"
+                : parserFailure || assistantStopReason === "error" || exitCode !== 0
+                  ? "failed"
+                  : "completed"
+            // Pi 0.84 emits this expected notice when --session-id creates a child.
+            // Keep all diagnostics on failures/resumes, and every unrelated warning.
+            if (!job.resume && !spawnError && status === "completed") {
+              const createdNotice = `Warning: No project session found with id '${taskId}'; creating a new session with that id.`
+              stderrText = stderrText.split(/\r?\n/).filter((line) => line !== createdNotice).join("\n").trim()
+            }
+            const output = spawnError?.message || parserFailure || assistantOutput || stdoutText || stderrText || "(no output)"
+            resolve({
+              taskId,
+              role: job.role,
+              status,
+              exitCode,
+              output,
+              stderr: stderrText,
+              outputTruncated: stdout.omitted > 0 || assistantOutputTruncated,
+              stderrTruncated: stderr.omitted > 0,
+              steps,
+              resumed: Boolean(job.resume),
+            })
+          }
+
+          try {
+            proc = spawn(invocation.command, invocation.args, {
+              cwd,
+              env: { ...process.env, PI_WORKFLOW_CHILD: "1", [APPROVAL_ENV]: APPROVAL_VERSION },
+              shell: false,
+              stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+            })
+          } catch (error) {
+            finish(null, error instanceof Error ? error : new Error(String(error)))
+            return
+          }
+
+          terminate = (reason: "cancelled" | "step_limit" | "failed") => {
+            if (settled || cancelled || stepLimited) return
+            closeApprovals()
+            if (reason === "cancelled") cancelled = true
+            else if (reason === "step_limit") stepLimited = true
+            proc.kill("SIGTERM")
+            killTimer = setTimeout(() => {
+              if (!settled) proc.kill("SIGKILL")
+            }, KILL_GRACE_MS)
+            killTimer.unref?.()
+          }
+
+          proc.once("error", (error) => finish(null, error))
+          proc.once("close", (code) => finish(code))
+          try {
+            proc.stdout?.on("data", (chunk: Buffer | string) => {
+              stdout.append(chunk)
+              inspectChunk(chunk)
+            })
+            proc.stderr?.on("data", (chunk: Buffer | string) => stderr.append(chunk))
+
+            abort = () => terminate("cancelled")
+            if (signal) {
+              signal.addEventListener("abort", abort, { once: true })
+              if (signal.aborted) abort()
+            }
+            if (proc.stdio?.[3] && proc.stdio?.[4]) {
+              closeApprovals = approvals.attach({ input: proc.stdio[3] as Readable, output: proc.stdio[4] as Writable },
+                approvalContext, { toolCallId, taskId, role: job.role }, signal, (approvalClosed) => {
+                  onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated, approvalClosed })
+                })
+              if (settled || cancelled || stepLimited) closeApprovals()
+            }
+            if (!proc.stdin) {
+              parserFailure = "Failed to send workflow prompt: child stdin is unavailable"
               terminate("failed")
               return
             }
-            if (segment.length > 0) pendingEvent = Buffer.concat([pendingEvent, segment])
-            if (newline < 0) return
-            inspectEvent(pendingEvent)
-            pendingEvent = Buffer.alloc(0)
-            if (parserFailure) return
-            offset = newline + 1
-          }
-        }
-
-        const finish = (exitCode: number | null, spawnError?: Error) => {
-          if (settled) return
-          settled = true
-          closeApprovals()
-          if (killTimer) clearTimeout(killTimer)
-          signal?.removeEventListener("abort", abort)
-          if (pendingEvent.length > 0 && !parserFailure) inspectEvent(pendingEvent)
-          if (job.resume) activeResumeIds.delete(taskId)
-          const stdoutText = stdout.text().trim()
-          let stderrText = stderr.text().trim()
-          const status = cancelled || assistantStopReason === "aborted"
-            ? "cancelled"
-            : stepLimited
-              ? "step_limit"
-              : parserFailure || assistantStopReason === "error" || exitCode !== 0
-                ? "failed"
-                : "completed"
-          // Pi 0.84 emits this expected notice when --session-id creates a child.
-          // Keep all diagnostics on failures/resumes, and every unrelated warning.
-          if (!job.resume && !spawnError && status === "completed") {
-            const createdNotice = `Warning: No project session found with id '${taskId}'; creating a new session with that id.`
-            stderrText = stderrText.split(/\r?\n/).filter((line) => line !== createdNotice).join("\n").trim()
-          }
-          const output = spawnError?.message || parserFailure || assistantOutput || stdoutText || stderrText || "(no output)"
-          resolve({
-            taskId,
-            role: job.role,
-            status,
-            exitCode,
-            output,
-            stderr: stderrText,
-            outputTruncated: stdout.omitted > 0 || assistantOutputTruncated,
-            stderrTruncated: stderr.omitted > 0,
-            steps,
-            resumed: Boolean(job.resume),
-          })
-        }
-
-        try {
-          proc = spawn(invocation.command, invocation.args, {
-            cwd,
-            env: { ...process.env, PI_WORKFLOW_CHILD: "1", [APPROVAL_ENV]: APPROVAL_VERSION },
-            shell: false,
-            stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
-          })
-        } catch (error) {
-          finish(null, error instanceof Error ? error : new Error(String(error)))
-          return
-        }
-
-        terminate = (reason: "cancelled" | "step_limit" | "failed") => {
-          if (settled || cancelled || stepLimited) return
-          closeApprovals()
-          if (reason === "cancelled") cancelled = true
-          else if (reason === "step_limit") stepLimited = true
-          proc.kill("SIGTERM")
-          killTimer = setTimeout(() => {
-            if (!settled) proc.kill("SIGKILL")
-          }, KILL_GRACE_MS)
-          killTimer.unref?.()
-        }
-
-        proc.stdout?.on("data", (chunk: Buffer | string) => {
-          stdout.append(chunk)
-          inspectChunk(chunk)
-        })
-        proc.stderr?.on("data", (chunk: Buffer | string) => stderr.append(chunk))
-
-        abort = () => terminate("cancelled")
-        if (signal) {
-          signal.addEventListener("abort", abort, { once: true })
-          if (signal.aborted) abort()
-        }
-        proc.once("error", (error) => finish(null, error))
-        proc.once("close", (code) => finish(code))
-        if (proc.stdio?.[3] && proc.stdio?.[4]) {
-          closeApprovals = approvals.attach({ input: proc.stdio[3] as Readable, output: proc.stdio[4] as Writable },
-            approvalContext, { toolCallId, taskId, role: job.role }, signal, (approvalClosed) => {
-              onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated, approvalClosed })
+            proc.stdin.once("error", (error) => {
+              parserFailure = `Failed to send workflow prompt on stdin: ${error.message}`
+              terminate("failed")
             })
-          if (settled || cancelled || stepLimited) closeApprovals()
-        }
-        if (!proc.stdin) {
-          parserFailure = "Failed to send workflow prompt: child stdin is unavailable"
-          terminate("failed")
-          return
-        }
-        proc.stdin.once("error", (error) => {
-          parserFailure = `Failed to send workflow prompt on stdin: ${error.message}`
-          terminate("failed")
+            proc.stdin.end(job.childPrompt ?? job.prompt)
+            onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
+          } catch (error) {
+            parserFailure = `Failed to initialize workflow child: ${error instanceof Error ? error.message : String(error)}`
+            terminate("failed")
+          }
         })
-        proc.stdin.end(job.childPrompt ?? job.prompt)
-        onProgress({ taskId, steps, output: assistantOutput, outputTruncated: assistantOutputTruncated })
-      })
+      } finally {
+        if (ownsResume) activeResumeIds.delete(taskId)
+        release?.()
+      }
     }
 
     const invocationProperties = {
@@ -703,6 +825,13 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
       label: "Task",
       description: `Run one child job (role + prompt or skill) or multiple bounded-parallel jobs (jobs). Roles and provider/model/thinking/systemPrompt/maxSteps settings come from PI_WORKFLOW_CONFIG (default ${DEFAULT_CONFIG_PATH}). Override provider/model per job without changing the parent. Set skill to load a discovered skill in the child; prompt then supplies optional skill arguments. Resume with a task ID returned by an earlier call on this session branch.`,
       promptSnippet: "task: delegate isolated child jobs to managed workflow roles",
+      promptGuidelines: [
+        "Use task to delegate independent tasks in parallel when useful; dependent tasks must wait for their prerequisites.",
+        "When using task, give each child explicit context, scope, constraints, and expected outputs; children do not inherit the parent conversation.",
+        "Children spawned by task share the workspace: assign disjoint write ownership and never schedule overlapping writes.",
+        "After task completes, verify child summaries and resulting changes before relying on them or reporting completion.",
+        "Parallel task subagents increase cost and rate-limit pressure; use only the concurrency needed, within the session-wide managed cap.",
+      ],
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -727,120 +856,134 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               required: ["role"],
             },
           },
-          concurrency: { type: "number", minimum: 1, maximum: 16, description: "Requested parallelism, capped by managed config" },
+          concurrency: { type: "number", minimum: 1, maximum: 16, description: "Per-call parallelism, additionally bounded by the shared session limit and managed cap" },
         },
       },
       async execute(_toolCallId, params: any, signal, onUpdate, ctx) {
-        const hasSingle = ["role", "prompt", "resume", "provider", "model", "skill"].some((key) => params[key] !== undefined)
-        const hasJobs = params.jobs !== undefined
-        if (hasSingle === hasJobs) {
-          return textResult("Provide exactly one mode: role + prompt (or skill), or jobs. Put batch overrides inside each job.", { results: [] }, true)
-        }
-
-        const configPath = process.env.PI_WORKFLOW_CONFIG || DEFAULT_CONFIG_PATH
-        let config: WorkflowConfig
+        activeCalls++
+        const startedGeneration = generation
         try {
-          config = parseConfig(await readFile(configPath, "utf8"), configPath)
-        } catch (error) {
-          return textResult(`Workflow config error: ${error instanceof Error ? error.message : String(error)}`, {
-            configPath,
-            results: [],
-          }, true)
-        }
+          const hasSingle = ["role", "prompt", "resume", "provider", "model", "skill"].some((key) => params[key] !== undefined)
+          const hasJobs = params.jobs !== undefined
+          if (hasSingle === hasJobs) {
+            return textResult("Provide exactly one mode: role + prompt (or skill), or jobs. Put batch overrides inside each job.", { results: [] }, true)
+          }
 
-        let jobs: TaskJob[]
-        try {
-          const candidates = hasSingle ? [params] : params.jobs
-          if (!Array.isArray(candidates) || candidates.length === 0) throw new Error("jobs must be a non-empty array")
-          if (candidates.length > config.maxJobs) throw new Error(`Too many jobs: ${candidates.length}; managed maximum is ${config.maxJobs}.`)
-          // Validate the entire batch before reading skills or starting any children.
-          jobs = candidates.map((candidate, index) => {
-            if (!isObject(candidate)) throw new Error(`Job ${index + 1} must be an object`)
-            const field = (name: string, max: number): string | undefined => {
-              const value = candidate[name]
-              if (value === undefined) return undefined
-              if (typeof value !== "string" || !value.trim() || value.length > max || value.includes("\0")) {
-                throw new Error(`Job ${index + 1} ${name} must be a non-empty string of at most ${max} characters without NUL`)
+          const configPath = process.env.PI_WORKFLOW_CONFIG || DEFAULT_CONFIG_PATH
+          let config: WorkflowConfig
+          try {
+            config = await loadConfig(configPath)
+          } catch (error) {
+            return textResult(`Workflow config error: ${error instanceof Error ? error.message : String(error)}`, {
+              configPath,
+              results: [],
+            }, true)
+          }
+
+          let jobs: TaskJob[]
+          try {
+            const candidates = hasSingle ? [params] : params.jobs
+            if (!Array.isArray(candidates) || candidates.length === 0) throw new Error("jobs must be a non-empty array")
+            if (candidates.length > config.maxJobs) throw new Error(`Too many jobs: ${candidates.length}; managed maximum is ${config.maxJobs}.`)
+            // Validate the entire batch before reading skills or starting any children.
+            jobs = candidates.map((candidate, index) => {
+              if (!isObject(candidate)) throw new Error(`Job ${index + 1} must be an object`)
+              const field = (name: string, max: number): string | undefined => {
+                const value = candidate[name]
+                if (value === undefined) return undefined
+                if (typeof value !== "string" || !value.trim() || value.length > max || value.includes("\0")) {
+                  throw new Error(`Job ${index + 1} ${name} must be a non-empty string of at most ${max} characters without NUL`)
+                }
+                if (["provider", "model", "skill"].includes(name) && (value !== value.trim() || /[\r\n]/.test(value) || value.startsWith("-"))) {
+                  throw new Error(`Job ${index + 1} ${name} must not contain surrounding whitespace, newlines, or a leading dash`)
+                }
+                return value
               }
-              if (["provider", "model", "skill"].includes(name) && (value !== value.trim() || /[\r\n]/.test(value) || value.startsWith("-"))) {
-                throw new Error(`Job ${index + 1} ${name} must not contain surrounding whitespace, newlines, or a leading dash`)
-              }
-              return value
+              const role = field("role", 64)
+              const prompt = field("prompt", 100_000)
+              const skill = field("skill", 256)
+              if (!role || (!prompt && !skill)) throw new Error(`Job ${index + 1} requires role and prompt or skill`)
+              return { role, prompt: prompt ?? "", skill, provider: field("provider", 256), model: field("model", 256), resume: field("resume", 256) }
+            })
+            const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+            for (const job of jobs) {
+              if (!job.skill) continue
+              // Use Pi's current discovery/trust/collision decisions, not a second filesystem scan.
+              const command = pi.getCommands().find((item) => item.source === "skill" && item.name === `skill:${job.skill}`)
+              if (!command) throw new Error(`Unknown or unavailable skill: ${job.skill}. Use a discovered skill name without /skill:.`)
+              const path = command.sourceInfo.path
+              if (!isAbsolute(path)) throw new Error(`Skill ${job.skill} has no absolute source path`)
+              const content = await readFile(path, "utf8")
+              if (!content.trim() || Buffer.byteLength(content, "utf8") > MAX_CONFIG_BYTES) throw new Error(`Skill ${job.skill} must be non-empty and at most ${MAX_CONFIG_BYTES} bytes`)
+              // Send actual content, not a slash command that child settings could leave unexpanded.
+              job.childPrompt = `<skill name="${escapeAttribute(job.skill)}" location="${escapeAttribute(path)}">\nFollow these already-loaded skill instructions; do not re-read the skill file. Relative paths in this skill resolve against: ${dirname(path)}\n\n${content}\n</skill>${job.prompt ? `\n\nUser: ${job.prompt}` : ""}`
             }
-            const role = field("role", 64)
-            const prompt = field("prompt", 100_000)
-            const skill = field("skill", 256)
-            if (!role || (!prompt && !skill)) throw new Error(`Job ${index + 1} requires role and prompt or skill`)
-            return { role, prompt: prompt ?? "", skill, provider: field("provider", 256), model: field("model", 256), resume: field("resume", 256) }
-          })
-          const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-          for (const job of jobs) {
-            if (!job.skill) continue
-            // Use Pi's current discovery/trust/collision decisions, not a second filesystem scan.
-            const command = pi.getCommands().find((item) => item.source === "skill" && item.name === `skill:${job.skill}`)
-            if (!command) throw new Error(`Unknown or unavailable skill: ${job.skill}. Use a discovered skill name without /skill:.`)
-            const path = command.sourceInfo.path
-            if (!isAbsolute(path)) throw new Error(`Skill ${job.skill} has no absolute source path`)
-            const content = await readFile(path, "utf8")
-            if (!content.trim() || Buffer.byteLength(content, "utf8") > MAX_CONFIG_BYTES) throw new Error(`Skill ${job.skill} must be non-empty and at most ${MAX_CONFIG_BYTES} bytes`)
-            // Send actual content, not a slash command that child settings could leave unexpanded.
-            job.childPrompt = `<skill name="${escapeAttribute(job.skill)}" location="${escapeAttribute(path)}">\nFollow these already-loaded skill instructions; do not re-read the skill file. Relative paths in this skill resolve against: ${dirname(path)}\n\n${content}\n</skill>${job.prompt ? `\n\nUser: ${job.prompt}` : ""}`
+          } catch (error) {
+            return textResult(`Invalid task: ${error instanceof Error ? error.message : String(error)}`, { configPath, results: [] }, true)
           }
-        } catch (error) {
-          return textResult(`Invalid task: ${error instanceof Error ? error.message : String(error)}`, { configPath, results: [] }, true)
-        }
-        const requested = Number.isInteger(params.concurrency) ? params.concurrency : config.maxConcurrency
-        const concurrency = Math.max(1, Math.min(requested, config.maxConcurrency, jobs.length))
-        const inherited = {
-          provider: typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined,
-          model: typeof ctx.model?.id === "string" ? ctx.model.id : undefined,
-          thinking: typeof ctx.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
-        }
-        const results: TaskResult[] = new Array(jobs.length)
-        const progress = jobs.map((job) => ({ role: job.role, prompt: job.prompt, resumed: Boolean(job.resume), provider: job.provider, model: job.model, skill: job.skill, taskId: job.resume, status: "queued" } as Record<string, unknown>))
-        let next = 0
-        let completed = 0
-        const publish = () => onUpdate?.(textResult(`${completed}/${jobs.length} child jobs finished.`, {
-          configPath,
-          concurrency,
-          jobs: progress.map((job) => ({ ...job })),
-          results: results.filter(Boolean),
-        }) as any)
-        publish()
-        const workers = Array.from({ length: concurrency }, async () => {
-          while (true) {
-            const index = next++
-            if (index >= jobs.length) return
-            results[index] = await runJob(jobs[index], config, ctx.cwd, signal, inherited, (update) => {
-              progress[index] = { ...progress[index], ...update, status: "running" }
+          if (startedGeneration !== generation) {
+            return textResult("Session or branch changed while preparing tasks; retry on the current branch.", { configPath, results: [] }, true)
+          }
+          const requested = Number.isInteger(params.concurrency) ? params.concurrency : config.maxConcurrency
+          const concurrency = Math.max(1, Math.min(requested, effectiveLimit(config), limiter.limit, jobs.length))
+          const inherited = {
+            provider: typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined,
+            model: typeof ctx.model?.id === "string" ? ctx.model.id : undefined,
+            thinking: typeof ctx.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
+          }
+          const results: TaskResult[] = new Array(jobs.length)
+          const progress = jobs.map((job) => ({ role: job.role, prompt: job.prompt, resumed: Boolean(job.resume), provider: job.provider, model: job.model, skill: job.skill, taskId: job.resume, status: "queued" } as Record<string, unknown>))
+          let next = 0
+          let completed = 0
+          const publish = () => {
+            // UI observers must not strand a running child or release its permit early.
+            try {
+              onUpdate?.(textResult(`${completed}/${jobs.length} child jobs finished.`, {
+                configPath,
+                concurrency,
+                jobs: progress.map((job) => ({ ...job })),
+                results: results.filter(Boolean),
+              }) as any)
+            } catch { /* Progress is best-effort; final results remain authoritative. */ }
+          }
+          publish()
+          const workers = Array.from({ length: concurrency }, async () => {
+            while (true) {
+              const index = next++
+              if (index >= jobs.length) return
+              results[index] = await runJob(jobs[index], config, ctx.cwd, signal, inherited, (update) => {
+                progress[index] = { ...progress[index], ...update, status: "running" }
+                publish()
+              }, ctx, _toolCallId)
+              progress[index] = { ...progress[index], ...results[index] }
+              completed++
               publish()
-            }, ctx, _toolCallId)
-            progress[index] = { ...progress[index], ...results[index] }
-            completed++
-            publish()
+            }
+          })
+          await Promise.all(workers)
+
+          let changed = false
+          for (const result of results) {
+            if (!result.taskId || result.resumed || result.status === "cancelled") continue
+            taskRecords.set(result.taskId, { id: result.taskId, cwd: ctx.cwd, role: result.role })
+            changed = true
           }
-        })
-        await Promise.all(workers)
+          if (changed) persistTasks()
 
-        let changed = false
-        for (const result of results) {
-          if (!result.taskId || result.resumed || result.status === "cancelled") continue
-          taskRecords.set(result.taskId, { id: result.taskId, cwd: ctx.cwd, role: result.role })
-          changed = true
+          const formatted = results.map((result) => {
+            const truncation = result.outputTruncated || result.stderrTruncated ? " (captured output truncated)" : ""
+            return `### ${result.role} [${result.taskId || "no task ID"}] ${result.status}${truncation}\n\n${result.output}`
+          }).join("\n\n---\n\n")
+          const failed = results.filter((result) => result.status !== "completed").length
+          return textResult(`${jobs.length - failed}/${jobs.length} child jobs completed.\n\n${formatted}`, {
+            configPath,
+            concurrency,
+            jobs: progress,
+            results,
+          }, failed === results.length)
+        } finally {
+          activeCalls--
         }
-        if (changed) persistTasks()
-
-        const formatted = results.map((result) => {
-          const truncation = result.outputTruncated || result.stderrTruncated ? " (captured output truncated)" : ""
-          return `### ${result.role} [${result.taskId || "no task ID"}] ${result.status}${truncation}\n\n${result.output}`
-        }).join("\n\n---\n\n")
-        const failed = results.filter((result) => result.status !== "completed").length
-        return textResult(`${jobs.length - failed}/${jobs.length} child jobs completed.\n\n${formatted}`, {
-          configPath,
-          concurrency,
-          jobs: progress,
-          results,
-        }, failed === results.length)
       },
     })
   }

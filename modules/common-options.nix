@@ -1177,7 +1177,7 @@ in
           maxConcurrency = lib.mkOption {
             type = lib.types.ints.between 1 16;
             default = 4;
-            description = "Maximum number of delegated Pi jobs that may run concurrently.";
+            description = "Per-session ceiling across overlapping Pi task calls, excluding the parent. Session settings may lower this cap; not an account-wide provider limit.";
           };
           maxJobs = lib.mkOption {
             type = lib.types.ints.between 1 32;

@@ -298,6 +298,41 @@ services.agentbox = {
 ```
 
 `settings.piConfig.workflow` types roles and delegation limits.
+
+### Concurrent Pi subagents
+
+The `task` tool runs independent child Pi processes concurrently, with role-based
+models/reasoning, progress, cancellation, step limits, approval forwarding, and
+branch-scoped resume IDs. Children share the working directory, **not** the
+parent conversation; give explicit context and assign disjoint files to writers.
+Prefer parallel exploration/review/tests, then reconcile and verify the results.
+Recursive delegation is disabled.
+
+`workflow.maxConcurrency` (default **4**, range **1..16**) is the ceiling across
+all overlapping `task` calls in one session, excluding the parent. Excess jobs
+wait in a cancellation-aware FIFO queue. `task.concurrency` can further lower a
+single batch's parallelism; `maxJobs` (default **8**) limits batch size, not the
+session's lifetime task count.
+
+Use web **Settings → Session subagent concurrency**, or:
+
+- `/agentbox-subagents`: show effective cap, managed ceiling, and running/queued jobs.
+- `/agentbox-subagents 2`: lower this session branch's cap while idle.
+- `/agentbox-subagents reset`: restore the managed default while idle.
+
+The override is saved in the conversation branch and restored on resume/tree
+navigation; it is not a global default. Deploy/rebuild Agentbox and start a new
+Pi process to load these changes.
+
+This is **not an account-wide provider throttle**: other chats and the parent
+can still make requests, and all children on one subscription share its usage.
+Reduce concurrency if rate-limited; a higher cap does not grant provider capacity.
+There is no automatic workspace/worktree isolation or cross-process file lock,
+so never assign overlapping writes. More agents only help when work is independent;
+use narrow tasks and concise evidence-based summaries to limit cost and context.
+
+### Pi permissions and MCP configuration
+
 `settings.piConfig.permissions` types and bounds ordered
 `tools`/`patterns`/`decision` rules, generated policy size, and approval timeout.
 Human policy approvals, including forwarded child approvals, default to 30
