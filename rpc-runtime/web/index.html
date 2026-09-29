@@ -17,7 +17,7 @@
     <aside class="sidebar" id="sidebar" aria-label="Session navigation">
       <div class="brand"><span class="brand-mark" aria-hidden="true">pi</span><span>Pi agent<span class="brand-sub">AGENTBOX</span></span><button id="close-drawer" class="icon-button mobile-only" aria-label="Close sessions">&times;</button></div>
       <button id="new-session" class="new-session" aria-label="New session" title="New session" disabled><span aria-hidden="true">+</span> <span class="new-session-label">New session</span> <kbd>N</kbd></button>
-      <button id="settings" class="text-button" type="button" title="Model visibility and defaults for future sessions" disabled>Settings</button>
+      <button id="settings" class="text-button" type="button" title="Session subagents, model visibility and future defaults" disabled>Settings</button>
       <div id="profile-section">
         <label class="section-label" for="profile-filter">PROFILE</label>
         <select id="profile-filter" disabled aria-label="Filter sessions by profile"><option value="">All profiles</option></select>
@@ -81,7 +81,7 @@
   </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
     <div class="dialog-body">
-      <div class="dialog-heading"><span class="dialog-eyebrow">GLOBAL PI DEFAULTS</span><button id="close-settings" class="icon-button" type="button" aria-label="Close settings">&times;</button></div>
+      <div class="dialog-heading"><span class="dialog-eyebrow">PI SETTINGS</span><button id="close-settings" class="icon-button" type="button" aria-label="Close settings">&times;</button></div>
       <h2 id="settings-title">Settings</h2>
       <p>Defaults apply to future fresh sessions. The current session's model and auto mode are unchanged. Resumed sessions keep their own state.</p>
       <p id="settings-model"></p>
@@ -93,6 +93,14 @@
       <button id="save-default-auto" class="primary-button" type="button">Save default auto</button>
       <button id="show-defaults" class="text-button" type="button">Show saved defaults</button>
       <p id="settings-help" class="field-note" role="status"></p>
+      <h3>Session subagent concurrency</h3>
+      <p class="field-note">Limit concurrent subagents for this session branch while idle. Saved with the branch, not as a global default. The managed ceiling is enforced by Pi; use Show status to view it.</p>
+      <label for="subagent-cap">Proposed concurrency cap</label>
+      <input id="subagent-cap" type="number" min="1" step="1" required inputmode="numeric" placeholder="Positive whole number" aria-describedby="subagent-help">
+      <button id="save-subagent-cap" class="primary-button" type="button">Set concurrency cap</button>
+      <button id="reset-subagent-cap" class="text-button" type="button">Reset to managed default</button>
+      <button id="show-subagent-cap" class="text-button" type="button">Show subagent status</button>
+      <p id="subagent-help" class="field-note" role="status"></p>
       <h3>Sidebar</h3>
       <label class="model-visibility-row"><input id="hide-profile-section" type="checkbox">Hide Profile section</label>
       <p id="sidebar-preference-status" class="field-note" role="status">Saved only in this browser. Hiding the section shows sessions from all profiles.</p>

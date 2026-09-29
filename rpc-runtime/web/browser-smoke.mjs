@@ -56,7 +56,7 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "session-title.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "session-title.mjs", "attachments.mjs", "model-visibility.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");
@@ -175,7 +175,7 @@ const server = createServer(async (request, response) => {
       }
       data = { models: session.catalog || models };
     }
-    else if (body.type === "get_commands") data = { commands: [...(session.noDefaults ? [] : [{ name: "agentbox-defaults", description: "Persistent defaults" }]), { name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
+    else if (body.type === "get_commands") data = { commands: [...(session.noSubagents ? [] : [{ name: "agentbox-subagents", description: "Session concurrency" }]), ...(session.noDefaults ? [] : [{ name: "agentbox-defaults", description: "Persistent defaults" }]), { name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
     else if (body.type === "get_available_thinking_levels") {
       if (session.denyThinking) return json(response, 403, { error: { code: "command_forbidden", message: "Thinking discovery is forbidden" } });
       data = { levels: availableThinking(session) };
@@ -195,7 +195,16 @@ const server = createServer(async (request, response) => {
     }
     else if (body.type === "abort") { session.streaming = false; emit(session, { type: "agent_end" }); }
     else if (body.type === "prompt") {
-      if (body.message.startsWith("/agentbox-defaults ")) {
+      if (/^\/agentbox-subagents(?: |$)/.test(body.message)) {
+        assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "subagent settings retain native identity");
+        assert.deepEqual(Object.keys(body).sort(), ["message", "type"], "subagent settings exclude draft, attachments and queue behavior");
+        assert.equal(session.streaming, false, "subagent settings run idle only");
+        if (session.holdSubagents) await new Promise((resolve) => { session.releaseSubagents = resolve; });
+        const arg = body.message.split(" ")[1];
+        if (arg === "reset") session.subagentCap = 4;
+        else if (arg && Number(arg) <= 8) session.subagentCap = Number(arg);
+        emit(session, { type: "extension_ui_request", method: "notify", message: arg && Number(arg) > 8 ? "Subagent cap exceeds managed ceiling 8" : `Subagent concurrency: ${session.subagentCap || 4}; managed ceiling: 8`, notifyType: "info" });
+      } else if (body.message.startsWith("/agentbox-defaults ")) {
         if (session.rejectDefaults) return json(response, 403, { error: { code: "command_forbidden", message: "Defaults prompt forbidden" } });
         assert.deepEqual(Object.keys(body).sort(), ["message", "type"], "settings sends no draft/images or queue behavior");
         if (session.holdDefaults) await new Promise((resolve) => { session.releaseDefaults = resolve; });
@@ -437,6 +446,44 @@ try {
       assert.equal(session.streaming, false); assert.equal(session.messages.length, 0);
       assert.equal(await page.locator("#prompt").inputValue(), "Keep my settings draft");
       assert.equal(await page.locator(".attachment img").count(), 1, "settings preserves draft attachments");
+      await openSettings();
+      await until(() => page.locator("#show-subagent-cap").isEnabled(), "subagent command discovered");
+      const subagentCalls = () => calls.filter((call) => call.id === session.id && call.command?.message?.startsWith("/agentbox-subagents"));
+      for (const value of ["", "0", "-1", "1.5", "9007199254740992"]) {
+        await page.locator("#subagent-cap").fill(value);
+        await page.locator("#save-subagent-cap").click();
+        assert.equal(subagentCalls().length, 0, "invalid cap never dispatched");
+      }
+      await page.locator("#subagent-cap").fill("2");
+      session.holdSubagents = true;
+      await page.locator("#save-subagent-cap").click();
+      await until(() => session.releaseSubagents, "subagent setting in flight");
+      for (const id of ["settings", "model", "auto-mode", "send"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true);
+      session.holdSubagents = false; session.releaseSubagents();
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Subagent concurrency: 2")), "cap result notification");
+      await openSettings();
+      await page.locator("#show-subagent-cap").click();
+      await until(() => subagentCalls().length === 2, "status dispatched without arguments");
+      assert.equal(subagentCalls()[1].command.message, "/agentbox-subagents");
+      await openSettings();
+      await page.locator("#subagent-cap").fill("9");
+      await page.locator("#save-subagent-cap").click();
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("exceeds managed ceiling")), "backend ceiling rejection visible");
+      assert.equal(session.subagentCap, 2);
+      await openSettings();
+      await page.locator("#reset-subagent-cap").click();
+      await until(() => session.subagentCap === 4, "managed default restored");
+      assert.equal(subagentCalls()[3].command.message, "/agentbox-subagents reset");
+      await openSettings();
+      session.streaming = true; emit(session, { type: "agent_start" });
+      await until(() => page.locator("#show-subagent-cap").isDisabled(), "subagent controls lock when session starts running");
+      await page.locator("#show-subagent-cap").evaluate((button) => button.dispatchEvent(new MouseEvent("click")));
+      assert.equal(subagentCalls().length, 4, "idle guard also protects dispatched events");
+      session.streaming = false; emit(session, { type: "agent_end" });
+      await page.locator("#close-settings").click();
+      assert.equal(await page.locator("#prompt").inputValue(), "Keep my settings draft");
+      assert.equal(await page.locator(".attachment img").count(), 1);
+      assert.equal(session.streaming, false); assert.equal(session.messages.length, 0);
       await page.locator(".attachment button").click();
       await page.locator("#prompt").fill("");
       await page.locator("#dismiss-notice").click();
@@ -446,9 +493,27 @@ try {
           await openSidebar(); await page.locator("#refresh-sessions").click();
           if (label === "mobile") await page.locator("#close-drawer").click();
         };
+        await openSettings();
+        session.nativeSessionId = randomUUID();
+        emit(session, { type: "supervisor", event: "conversation_changed", nativeSessionId: session.nativeSessionId });
+        await until(() => page.locator("#settings-dialog").isVisible().then((visible) => !visible), "native replacement closes settings");
+        const beforeStale = subagentCalls().length;
+        await page.locator("#reset-subagent-cap").evaluate((button) => button.dispatchEvent(new MouseEvent("click")));
+        assert.equal(subagentCalls().length, beforeStale, "stale modal cannot target replacement branch");
         session.noDefaults = true; await refreshCatalog(); await openSettings();
+        await until(() => page.locator("#show-subagent-cap").isEnabled(), "subagents supported independently of defaults");
+        assert.equal(await page.locator("#show-defaults").isDisabled(), true);
+        await page.locator("#close-settings").click();
+        session.noSubagents = true; await refreshCatalog(); await openSettings();
         await until(() => page.locator("#settings-help").textContent().then((text) => text.includes("does not register")), "old extension fails closed");
         for (const id of ["save-default-model", "save-default-auto", "show-defaults"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true);
+        await until(() => page.locator("#subagent-help").textContent().then((text) => text.includes("does not register")), "unsupported subagents fail closed");
+        const beforeUnsupported = subagentCalls().length;
+        for (const id of ["save-subagent-cap", "reset-subagent-cap", "show-subagent-cap"]) {
+          assert.equal(await page.locator(`#${id}`).isDisabled(), true);
+          await page.locator(`#${id}`).evaluate((button) => button.dispatchEvent(new MouseEvent("click")));
+        }
+        assert.equal(subagentCalls().length, beforeUnsupported);
         await page.locator("#settings-dialog").press("Escape");
         assert.equal(await page.locator("#settings-dialog").isVisible(), false);
         session.noDefaults = false; await refreshCatalog(); await openSettings();
@@ -462,7 +527,7 @@ try {
         assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length, beforeFailure + 1, "failed settings is not retried");
         await noOverflow(page);
         assert.deepEqual(errors, [], "No browser JS or CSP errors");
-        console.log(`${label}: PASS settings commands, current state/draft preservation, native guards, locks, confirmation/decline, unsupported command, discovery retry, forbidden/no retry, Escape`);
+        console.log(`${label}: PASS settings/defaults and subagent cap/status/reset/validation/ceiling/idle/replacement commands, current state/draft preservation, native guards, locks, confirmation/decline, unsupported command, discovery retry, forbidden/no retry, Escape`);
         continue;
       }
       const promptCalls = () => calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length;
@@ -981,7 +1046,7 @@ try {
       if (label === "mobile") await page.locator("#close-drawer").click();
       await drawerClosed();
       await until(() => group.locator(".tool-detail[open]").count().then((count) => count === 1), "expanded action survives refresh");
-      assert.deepEqual(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length, cookies: document.cookie })), { local: 0, session: 0, cookies: "" });
+      assert.deepEqual(await page.evaluate(() => ({ local: Object.keys(localStorage).sort(), session: sessionStorage.length, cookies: document.cookie })), { local: ["agentbox.pi.hidden-models.v1", "agentbox.pi.hide-profile.v1"], session: 0, cookies: "" }, "only display preferences persist, not auth or drafts");
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
       assert.equal(await page.locator("#token").inputValue(), "");
       assert.equal(await page.title(), "Pi Agent | Agentbox", "logout clears tab counters");

@@ -120,6 +120,9 @@ function updateControls() {
       const disabled = !supported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
       for (const id of ["save-default-model", "save-default-auto", "show-defaults", "default-auto"]) $(id).disabled = disabled;
       $("save-default-model").disabled ||= !ctx.state.model;
+      const subagentsSupported = ctx.commands?.some((command) => command.name === "agentbox-subagents");
+      for (const id of ["subagent-cap", "save-subagent-cap", "reset-subagent-cap", "show-subagent-cap"]) $(id).disabled = !subagentsSupported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
+      $("subagent-help").textContent = ctx.commandLoading ? "Checking command support..." : subagentsSupported ? "Status and results appear in session notifications. No chat draft or attachments are sent." : ctx.commandError || "This Pi process does not register /agentbox-subagents. Start a new session with the updated extension. Nothing will be sent to the model.";
       $("settings-model").textContent = `Current model: ${ctx.state.model ? `${ctx.state.model.provider}/${ctx.state.model.id}` : "unavailable"}`;
       $("settings-help").textContent = ctx.commandLoading ? "Checking command support..." : supported ? "Results appear in the session's notifications. No chat draft or attachments are sent." : ctx.commandError || "This Pi process does not register /agentbox-defaults. Deploy the updated policy extension and start a new session. Nothing will be sent to the model.";
     }
@@ -1021,6 +1024,7 @@ $("settings").addEventListener("click", () => {
   settingsTarget = { ctx, nativeId: ctx.meta.nativeSessionId };
   drawer(false);
   $("default-auto").value = "off";
+  $("subagent-cap").value = "";
   $("model-visibility-search").value = "";
   $("model-visibility-status").textContent = "";
   renderModelVisibility(ctx);
@@ -1051,16 +1055,16 @@ $("show-all-models").addEventListener("click", () => {
 });
 $("close-settings").addEventListener("click", () => $("settings-dialog").close());
 $("settings-dialog").addEventListener("close", () => { settingsTarget = null; });
-async function saveDefaults(args) {
+async function runSettingsCommand(command, args = "") {
   const target = settingsTarget, ctx = target?.ctx, ownEpoch = epoch;
   if (!ctx || target.nativeId !== ctx.meta.nativeSessionId || !canChangeConversation(ctx) || ctx.record.settingsBusy
-    || !ctx.commands?.some((command) => command.name === "agentbox-defaults")) return;
+    || !ctx.commands?.some((item) => item.name === command)) return;
   // Share the prompt lock without touching the composer draft. Close the modal
   // before dispatch so extension select/confirm requests remain accessible.
   ctx.record.settingsBusy = true; ctx.record.sending = true;
   $("settings-dialog").close(); updateControls();
   try {
-    await rpc(ctx, { type: "prompt", message: `/agentbox-defaults ${args}` }, true);
+    await rpc(ctx, { type: "prompt", message: `/${command}${args ? ` ${args}` : ""}` }, true);
   } catch (error) {
     if (ownEpoch === epoch) report(error, ctx, { write: true, command: "prompt", ambiguous: true });
   } finally {
@@ -1068,9 +1072,18 @@ async function saveDefaults(args) {
     if (ownEpoch === epoch && current?.record === ctx.record) { updateControls(); requestRefresh(current); }
   }
 }
-$("save-default-model").addEventListener("click", () => saveDefaults("model current"));
-$("save-default-auto").addEventListener("click", () => saveDefaults($("default-auto").value === "on" ? "auto on" : "auto off"));
-$("show-defaults").addEventListener("click", () => saveDefaults("status"));
+$("save-default-model").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "model current"));
+$("save-default-auto").addEventListener("click", () => runSettingsCommand("agentbox-defaults", $("default-auto").value === "on" ? "auto on" : "auto off"));
+$("show-defaults").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "status"));
+
+$("save-subagent-cap").addEventListener("click", () => {
+  const input = $("subagent-cap"), value = input.value;
+  input.setCustomValidity(/^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? "" : "Enter a positive whole number.");
+  if (input.reportValidity()) runSettingsCommand("agentbox-subagents", value);
+});
+$("subagent-cap").addEventListener("input", () => $("subagent-cap").setCustomValidity(""));
+$("reset-subagent-cap").addEventListener("click", () => runSettingsCommand("agentbox-subagents", "reset"));
+$("show-subagent-cap").addEventListener("click", () => runSettingsCommand("agentbox-subagents"));
 
 $("composer").addEventListener("submit", async (event) => {
   event.preventDefault();

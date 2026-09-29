@@ -132,6 +132,13 @@ stream; unavailable connections and browser network recovery explicitly reconnec
 Selecting a different session changes the browser subscription, not the running
 Pi process.
 
+Settings also includes **Session subagent concurrency**: set a positive integer cap,
+reset to the managed default, or show current status/managed ceiling in session
+notifications. Changes apply to the current session branch, persist with it, and
+require an idle session. Pi enforces the managed ceiling. Controls are disabled
+unless `/agentbox-subagents` is registered; no draft or attachments are sent.
+These actions share the defaults command's write lock and native-session guard.
+
 Settings includes browser-local display preferences (no credentials are stored):
 - **Models shown in selector:** search and uncheck models to hide them by provider
   and model ID. The current model remains visible; **Show all models** clears the
@@ -189,6 +196,10 @@ npm install --prefix /tmp/opencode-work/opencode --no-save --no-audit --no-fund 
 PLAYWRIGHT_MODULE=/tmp/opencode-work/opencode/node_modules/playwright/index.mjs \
 SMOKE_OUTPUT_DIR=/tmp/opencode-work/opencode node web/browser-smoke.mjs
 ```
+
+Set `SETTINGS_ONLY=1` for the desktop/mobile Settings regression path (including
+subagent cap/status/reset, validation, notifications, draft preservation, idle and
+native-replacement guards, and unsupported-command handling).
 
 The output directory must already exist. Chromium needs its usual OS libraries
 and fonts; on Nix-based hosts provide a browser environment (`LD_LIBRARY_PATH`
