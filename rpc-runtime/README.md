@@ -245,7 +245,16 @@ scope and allowed `prompt`, binds the request to the displayed native session,
 and sends the policy extension's `/auto on` or `/auto off` command. It waits for
 confirmed state, never optimistically enables auto, and never retries failed
 writes. State changes synchronize through the existing SSE/metadata flow.
-Forks, resumes, replacements, and workflow children start with auto off. `activity` distinguishes `starting`, `running`,
+Forks, resumes, replacements, and workflow children start with auto off.
+
+`fastMode` is likewise `null` until the managed `pi-openai-fast` extension reports
+`{available, enabled}` through `agentbox-fast` status. Settings → OpenAI fast mode
+sends `/fast on|off` through native-session-bound prompt RPC and waits for refreshed
+metadata. It requires idle writable state, defaults off, and resets on session or
+model changes. Only OpenAI/Codex providers are supported; premium pricing/credits
+may apply. This option is distinct from reasoning effort and auto permissions.
+
+`activity` distinguishes `starting`, `running`,
 `waiting_reply` (text input/editor), `waiting_action` (confirmation/selection),
 and `idle`; stopped processes retain their process status. Idle is reported only
 after `agent_settled`, not a low-level `agent_end` that may still retry or continue.

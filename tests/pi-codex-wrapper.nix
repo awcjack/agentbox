@@ -31,22 +31,26 @@ pkgs.runCommand "pi-codex-wrapper-test" { } ''
   test "''${args[8]##*/}" = pi-codex-accounts.ts
   test -f "''${args[8]}"
   test "''${args[9]}" = -e
-  case "''${args[10]}" in
+  test "''${args[10]##*/}" = pi-openai-fast.ts
+  test -f "''${args[10]}"
+  test "''${args[11]}" = -e
+  case "''${args[12]}" in
     /nix/store/*/lib/agentbox-pi-goal-runtime/node_modules/@narumitw/pi-goal/dist/index.ts) ;;
     *) exit 1 ;;
   esac
-  test -f "''${args[10]}"
-  test "''${args[11]}" = -e
-  test "''${args[12]##*/}" = pi-policy.ts
-  test "''${args[13]}" = --mode
-  test "''${args[14]}" = rpc
+  test -f "''${args[12]}"
+  test "''${args[13]}" = -e
+  test "''${args[14]##*/}" = pi-policy.ts
+  test "''${args[15]}" = --mode
+  test "''${args[16]}" = rpc
   # A child must never register Goal or widen its role's active tool set.
   for childEnv in PI_WORKFLOW_CHILD=1 PI_WORKFLOW_APPROVAL_VERSION=1 PI_WORKFLOW_APPROVAL_VERSION=; do
     mapfile -t childArgs < <(env "$childEnv" ${wrapper}/bin/pi --mode json)
-    test "''${#childArgs[@]}" = 13
-    test "''${childArgs[10]##*/}" = pi-policy.ts
-    test "''${childArgs[11]}" = --mode
-    test "''${childArgs[12]}" = json
+    test "''${#childArgs[@]}" = 15
+    test "''${childArgs[10]##*/}" = pi-openai-fast.ts
+    test "''${childArgs[12]##*/}" = pi-policy.ts
+    test "''${childArgs[13]}" = --mode
+    test "''${childArgs[14]}" = json
   done
   for flag in -e -e/tmp/untrusted.ts --extension --extension=/tmp/untrusted.ts; do
     status=0

@@ -93,6 +93,10 @@
       <button id="save-default-auto" class="primary-button" type="button">Save default auto</button>
       <button id="show-defaults" class="text-button" type="button">Show saved defaults</button>
       <p id="settings-help" class="field-note" role="status"></p>
+      <h3>OpenAI fast mode</h3>
+      <p id="fast-mode-cost" class="field-note">Opt-in priority service may incur extra cost. Off by default for each Pi process; this is not a saved default.</p>
+      <button id="fast-mode" class="auto-toggle" type="button" aria-label="OpenAI fast mode" aria-pressed="false" aria-describedby="fast-mode-cost fast-mode-help" disabled>Fast: unknown</button>
+      <p id="fast-mode-help" class="field-note" role="status"></p>
       <h3>Session subagent concurrency</h3>
       <p class="field-note">Limit concurrent subagents for this session branch while idle. Saved with the branch, not as a global default. The managed ceiling is enforced by Pi; use Show status to view it.</p>
       <label for="subagent-cap">Proposed concurrency cap</label>

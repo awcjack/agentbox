@@ -1354,6 +1354,22 @@ test("runtime supervisor bounds logs and stops a crash loop", async (t) => {
   assert.match(await readFile(logPath, "utf8"), /giving up$/m);
 });
 
+test("fast-mode metadata is unknown until valid extension status and rejects malformed state", async (t) => {
+  const { runtime, baseUrl, children } = await fixture(t);
+  const id = await createSession(baseUrl);
+  const session = runtime.sessions.get(id);
+  assert.equal(session.metadata().fastMode, null);
+  for (const value of [{ available: true, enabled: false }, { available: true, enabled: true }, { available: false, enabled: false }]) {
+    children[0].output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast", statusText: JSON.stringify(value) });
+    assert.deepEqual(session.metadata().fastMode, value);
+    assert.deepEqual((await request(baseUrl, `/v1/sessions/${id}`)).body.session.fastMode, value);
+  }
+  for (const statusText of ['{"available":false,"enabled":true}', '{"available":true,"enabled":"true"}', '{}', 'bad json']) {
+    children[0].output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast", statusText });
+    assert.equal(session.metadata().fastMode, null);
+  }
+});
+
 test("idle cleanup preserves disconnected quiet work and pending dialogs", async (t) => {
   for (const record of [
     { type: "agent_start" }, // Includes silent tool execution such as a long sleep.

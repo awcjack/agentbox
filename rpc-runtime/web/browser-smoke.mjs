@@ -28,7 +28,7 @@ function conversationSnapshot(session) {
 }
 let tick = Date.now();
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
-const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, autoMode: session.autoMode === undefined ? { available: true, enabled: false } : session.autoMode, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
+const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, fastMode: session.fastMode === undefined ? { available: true, enabled: false } : session.fastMode, autoMode: session.autoMode === undefined ? { available: true, enabled: false } : session.autoMode, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
 function emit(session, event) {
   const frame = `id: ${++session.cursor}\nevent: pi\ndata: ${JSON.stringify(event)}\n\n`;
   session.events.push({ id: session.cursor, frame });
@@ -175,7 +175,7 @@ const server = createServer(async (request, response) => {
       }
       data = { models: session.catalog || models };
     }
-    else if (body.type === "get_commands") data = { commands: [...(session.noSubagents ? [] : [{ name: "agentbox-subagents", description: "Session concurrency" }]), ...(session.noDefaults ? [] : [{ name: "agentbox-defaults", description: "Persistent defaults" }]), { name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
+    else if (body.type === "get_commands") data = { commands: [...(session.noSubagents ? [] : [{ name: "agentbox-subagents", description: "Session concurrency" }]), ...(session.noDefaults ? [] : [{ name: "agentbox-defaults", description: "Persistent defaults" }]), { name: "fast", description: "OpenAI fast mode" }, { name: "auto", description: "Toggle session auto mode" }, { name: "skill:commit", description: "Commit and push changes" }, { name: "review", description: "Review changes" }] };
     else if (body.type === "get_available_thinking_levels") {
       if (session.denyThinking) return json(response, 403, { error: { code: "command_forbidden", message: "Thinking discovery is forbidden" } });
       data = { levels: availableThinking(session) };
@@ -195,7 +195,14 @@ const server = createServer(async (request, response) => {
     }
     else if (body.type === "abort") { session.streaming = false; emit(session, { type: "agent_end" }); }
     else if (body.type === "prompt") {
-      if (/^\/agentbox-subagents(?: |$)/.test(body.message)) {
+      if (/^\/fast (on|off)$/.test(body.message)) {
+        assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "fast settings retain native identity");
+        assert.deepEqual(Object.keys(body).sort(), ["message", "type"], "fast settings exclude draft/images/queue behavior");
+        assert.equal(session.streaming, false, "fast settings run idle only");
+        if (session.holdFast) await new Promise((resolve) => { session.releaseFast = resolve; });
+        if (!session.ignoreFast) session.fastMode = { available: true, enabled: body.message === "/fast on" };
+        emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast", statusText: JSON.stringify(session.fastMode) });
+      } else if (/^\/agentbox-subagents(?: |$)/.test(body.message)) {
         assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "subagent settings retain native identity");
         assert.deepEqual(Object.keys(body).sort(), ["message", "type"], "subagent settings exclude draft, attachments and queue behavior");
         assert.equal(session.streaming, false, "subagent settings run idle only");
@@ -387,6 +394,40 @@ try {
         await page.locator("#settings-dialog").waitFor();
       };
       await openSettings();
+      assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
+      assert.match(await page.locator("#fast-mode-cost").textContent(), /extra cost/);
+      session.holdFast = true;
+      await page.locator("#fast-mode").click();
+      await until(() => Boolean(session.releaseFast), "fast command pending");
+      assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false", "no optimistic enable");
+      assert.equal(await page.locator("#settings").isDisabled(), true, "settings locked during fast command");
+      session.holdFast = false; session.releaseFast();
+      await until(() => page.locator("#settings").isEnabled(), "fast command settled");
+      await openSettings();
+      await until(() => page.locator("#fast-mode").getAttribute("aria-pressed").then((value) => value === "true"), "metadata confirms fast on");
+      await page.locator("#fast-mode").click();
+      await until(() => page.locator("#settings").isEnabled(), "fast off settled");
+      await openSettings();
+      await until(() => page.locator("#fast-mode").isEnabled(), "fast metadata refreshed");
+      assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
+      assert.equal(await page.locator("#prompt").inputValue(), "Draft while syncing", "fast preserves draft");
+      // A successful prompt response alone must not enable priority billing.
+      session.ignoreFast = true;
+      await page.locator("#fast-mode").click();
+      await until(() => page.locator("#settings").isEnabled(), "ignored fast command settled");
+      await openSettings();
+      await until(() => page.locator("#fast-mode").isEnabled(), "ignored fast metadata refreshed");
+      assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
+      session.ignoreFast = false;
+      for (const [value, text] of [[null, "Fast: unknown"], [{ available: false, enabled: false }, "Fast: unavailable"]]) {
+        session.fastMode = value;
+        emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast", statusText: "untrusted" });
+        await until(() => page.locator("#fast-mode").textContent().then((actual) => actual === text), text);
+        assert.equal(await page.locator("#fast-mode").isDisabled(), true);
+      }
+      session.fastMode = { available: true, enabled: false };
+      emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast", statusText: JSON.stringify(session.fastMode) });
+      await until(() => page.locator("#fast-mode").isEnabled(), "fast support restored");
       const rows = page.locator("#model-visibility-list label");
       await rows.filter({ hasText: "Pi Reasoning" }).locator("input").uncheck();
       assert.equal(await page.locator("#model option").filter({ hasText: "Pi Reasoning" }).count(), 0);

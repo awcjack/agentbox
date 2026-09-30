@@ -62,6 +62,8 @@ in
         cp ${./tests/pi-codex-accounts.mjs} $out/tests/pi-codex-accounts.mjs
         cp ${./tests/pi-codex-restore.mjs} $out/tests/pi-codex-restore.mjs
         cp ${./tests/pi-gpt-6.1-sol.mjs} $out/tests/pi-gpt-6.1-sol.mjs
+        cp ${./tests/pi-openai-fast.mjs} $out/tests/pi-openai-fast.mjs
+        cp ${./extensions/pi-openai-fast.ts} $out/extensions/pi-openai-fast.ts
         cp ${./extensions/pi-codex-accounts.ts} $out/extensions/pi-codex-accounts.ts
       '';
     in
@@ -70,6 +72,8 @@ in
       node ${testSource}/tests/pi-codex-accounts.mjs \
         ${pi-coding-agent}/lib/node_modules/pi-monorepo
       node ${testSource}/tests/pi-gpt-6.1-sol.mjs \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
+      node --experimental-strip-types ${testSource}/tests/pi-openai-fast.mjs \
         ${pi-coding-agent}/lib/node_modules/pi-monorepo
       node ${testSource}/tests/pi-codex-restore.mjs \
         ${pi-coding-agent}/lib/node_modules/pi-monorepo

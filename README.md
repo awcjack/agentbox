@@ -255,7 +255,7 @@ patched executable and web assets; browser refresh alone cannot update Pi in an
 older image. Start a new session or resume into a new process after deployment.
 Reply badges show the model/provider recorded on each old reply.
 
-### OpenAI models
+### OpenAI models and fast mode
 
 The Pi-only `nixpkgs-unstable` pin supplies **Pi 0.87.1**. Agentbox also backports
 **GPT-6.1 Sol** (`gpt-6.1-sol`) into its offline OpenAI API and Codex catalogs,
@@ -266,6 +266,18 @@ refreshes remain authoritative. Select `/model openai/gpt-6.1-sol`,
 Codex Work mirrors the native Codex catalog, so no separate model list is needed. Authentication and
 account entitlements still determine which models you can use. Rebuild/redeploy
 the image to upgrade Pi; `pi update --models` refreshes metadata only.
+
+OpenAI [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode) is a
+paid service tier, not a lower thinking level or a different model. Enable it
+while idle in web **Settings → OpenAI fast mode**, or use `/fast on`, `/fast off`,
+and `/fast status` in Pi. The managed extension sets `service_tier: "priority"`
+in the actual request payload for native OpenAI, personal Codex, and Codex Work;
+custom/proxy providers are excluded. It defaults **off**, is not a saved default,
+and resets on model selection, session start/switch/fork. Delegated children do
+not inherit it. The web control waits for reported metadata rather than assuming
+a command succeeded. Fast mode may consume extra money/credits; availability,
+actual tier, and speed remain server/account dependent. Pi's token-cost
+estimates may not reflect the premium tier—consult provider billing.
 
 **Privacy:** switching accounts in a conversation sends its existing context,
 including prior messages and tool results, to the newly selected account.

@@ -4,7 +4,7 @@ import { renderSubagents } from "./subagents.mjs";
 import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
-import { commandQuery, commandSuggestions } from "./commands.mjs";
+import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
@@ -116,6 +116,13 @@ function updateControls() {
     if (settingsTarget?.ctx !== ctx || settingsTarget?.nativeId !== ctx?.meta.nativeSessionId || !canWrite(ctx)) {
       $("settings-dialog").close(); settingsTarget = null;
     } else {
+      const fastMode = ctx.meta.fastMode;
+      const fastSupported = ctx.commands?.some((command) => command.name === "fast");
+      const fastControl = fastModeControl(fastMode, { supported: fastSupported, writable: canChangeConversation(ctx), refreshing: Boolean(ctx.fastModeRefresh) });
+      $("fast-mode").disabled = fastControl.disabled;
+      $("fast-mode").setAttribute("aria-pressed", String(fastControl.pressed));
+      $("fast-mode").textContent = fastControl.text;
+      $("fast-mode-help").textContent = fastControl.help;
       const supported = ctx.commands?.some((command) => command.name === "agentbox-defaults");
       const disabled = !supported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
       for (const id of ["save-default-model", "save-default-auto", "show-defaults", "default-auto"]) $(id).disabled = disabled;
@@ -721,6 +728,7 @@ function applyMeta(ctx, meta) {
 async function snapshot(ctx, initial = false) {
   // Capture the cursor BEFORE snapshot RPCs. Anything racing them is replayed.
   const uiRevision = ctx.uiRevision;
+  const fastModeRefresh = ctx.fastModeRefresh;
   let { session: meta } = await api.request(path(ctx), { signal: ctx.controller.signal });
   while (meta.conversationReplacing && active(ctx)) {
     cancelModels(ctx);
@@ -736,6 +744,7 @@ async function snapshot(ctx, initial = false) {
     meta.pendingUi = ctx.meta.pendingUi;
     ctx.refreshAgain = true;
   }
+  if (ctx.fastModeRefresh === fastModeRefresh) ctx.fastModeRefresh = null;
   applyMeta(ctx, meta);
   if (initial && meta.status === "running") setNetwork("reconnecting", meta.activity === "starting" ? "Starting agent" : "Syncing conversation");
   if (meta.status !== "running") { ctx.ready = true; ctx.state.isStreaming = false; renderMessages(); updateControls(); return cursor; }
@@ -810,7 +819,7 @@ function handleEvent(ctx, frame) {
     // Metadata, not replay, decides which dialogs are still pending.
     if (dialogMethods.has(event.method)) { ctx.uiRevision++; requestRefresh(ctx); }
     else if (event.method === "notify") showNotice(event.message || "Agent notification", event.notifyType === "error");
-    else if (event.method === "setStatus" && event.statusKey === "agentbox-auto") requestRefresh(ctx);
+    else if (event.method === "setStatus" && ["agentbox-auto", "agentbox-fast"].includes(event.statusKey)) requestRefresh(ctx);
   } else if (type === "supervisor") {
     if (["conversation_replacing", "conversation_source_exited"].includes(event.event)) {
       cancelModels(ctx);
@@ -1059,6 +1068,7 @@ async function runSettingsCommand(command, args = "") {
   const target = settingsTarget, ctx = target?.ctx, ownEpoch = epoch;
   if (!ctx || target.nativeId !== ctx.meta.nativeSessionId || !canChangeConversation(ctx) || ctx.record.settingsBusy
     || !ctx.commands?.some((item) => item.name === command)) return;
+  if (command === "fast" && (ctx.fastModeRefresh || ctx.meta.fastMode?.available !== true || typeof ctx.meta.fastMode?.enabled !== "boolean")) return;
   // Share the prompt lock without touching the composer draft. Close the modal
   // before dispatch so extension select/confirm requests remain accessible.
   ctx.record.settingsBusy = true; ctx.record.sending = true;
@@ -1068,10 +1078,14 @@ async function runSettingsCommand(command, args = "") {
   } catch (error) {
     if (ownEpoch === epoch) report(error, ctx, { write: true, command: "prompt", ambiguous: true });
   } finally {
+    // Only a metadata read started after the command settles can unlock fast
+    // mode. Neither prompt acceptance nor setStatus text confirms the value.
+    if (command === "fast") ctx.fastModeRefresh = {};
     ctx.record.settingsBusy = false; ctx.record.sending = false;
     if (ownEpoch === epoch && current?.record === ctx.record) { updateControls(); requestRefresh(current); }
   }
 }
+$("fast-mode").addEventListener("click", () => runSettingsCommand("fast", settingsTarget?.ctx.meta.fastMode?.enabled ? "off" : "on"));
 $("save-default-model").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "model current"));
 $("save-default-auto").addEventListener("click", () => runSettingsCommand("agentbox-defaults", $("default-auto").value === "on" ? "auto on" : "auto off"));
 $("show-defaults").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "status"));

@@ -676,6 +676,7 @@ let
     cp ${./extensions/pi-policy.ts} $out/pi-policy.ts
     cp ${./extensions/pi-approval.ts} $out/pi-approval.ts
     cp ${./extensions/pi-codex-accounts.ts} $out/pi-codex-accounts.ts
+    cp ${./extensions/pi-openai-fast.ts} $out/pi-openai-fast.ts
   '';
   piWorkflowExtension = "${piAgentboxExtensions}/pi-workflow.ts";
   piPolicyExtension = "${piAgentboxExtensions}/pi-policy.ts";
@@ -715,6 +716,7 @@ let
       -e ${piWorkflowExtension} \
       -e ${piMcpExtension} \
       -e ${piAgentboxExtensions}/pi-codex-accounts.ts \
+      -e ${piAgentboxExtensions}/pi-openai-fast.ts \
       "''${goalArgs[@]}" \
       -e ${piPolicyExtension} \
       "$@"

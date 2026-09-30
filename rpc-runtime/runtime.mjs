@@ -527,6 +527,7 @@ class Session extends EventEmitter {
     this.agentBusy = false;
     this.settledEventId = null;
     this.autoMode = null;
+    this.fastMode = null;
     this.autoModeChanging = false;
     this.agentReady = false;
     this.agentCompacting = false;
@@ -574,6 +575,7 @@ class Session extends EventEmitter {
       latestEventId: this.events.nextId - 1,
       settledEventId: this.settledEventId,
       autoMode: this.autoMode,
+      fastMode: this.fastMode,
       status: this.status,
       activity: this.status !== "running" ? this.status
         : [...this.pendingUi.values()].some(({ request }) => ["confirm", "select"].includes(request.method)) ? "waiting_action"
@@ -644,6 +646,14 @@ class Session extends EventEmitter {
         if (value && typeof value.available === "boolean" && typeof value.enabled === "boolean"
           && Object.keys(value).length === 2 && (!value.enabled || value.available)) this.autoMode = value;
       } catch { /* Unknown or malformed extension status cannot enable the toggle. */ }
+    }
+    if (record.type === "extension_ui_request" && record.method === "setStatus" && record.statusKey === "agentbox-fast") {
+      this.fastMode = null;
+      try {
+        const value = JSON.parse(record.statusText);
+        if (value && typeof value.available === "boolean" && typeof value.enabled === "boolean"
+          && Object.keys(value).length === 2 && (!value.enabled || value.available)) this.fastMode = value;
+      } catch { /* Never infer paid mode from malformed or missing extension status. */ }
     }
     if (record.type !== "response") this.revision++;
     if (["agent_start", "auto_retry_start", "auto_compaction_start"].includes(record.type)) this.agentBusy = true;

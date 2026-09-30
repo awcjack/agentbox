@@ -116,6 +116,12 @@ try {
     assert.deepEqual(context, before, "history must not be mutated");
     return payloads.at(-1);
   }
+  // Fast mode is a service tier, not a different model or reasoning level.
+  for (const provider of [native.id, "codex-work"]) {
+    const fast = await run(provider, history(provider), "stream", { serviceTier: "priority" });
+    assert.equal(fast.service_tier, "priority");
+  }
+  requests.length = 0;
   const personal = await run(native.id, history(native.id));
   assert.equal(personal.prompt_cache_key, "shared-session");
   const same = await run("codex-work", history("codex-work"));

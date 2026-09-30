@@ -244,3 +244,14 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
 - Message history is fully rendered, not virtualized. Extremely large
   conversations or tool outputs can be expensive to display.
 - This directory does not configure static hosting or modify the backend.
+
+### OpenAI fast mode
+
+Settings offers an opt-in **OpenAI fast mode** toggle with an extra-cost warning.
+It starts off for each Pi process and is not persisted as a browser or future-session
+default. The control sends `/fast on` or `/fast off` through the native-conversation-bound
+prompt RPC without sending the draft or attachments. It requires an idle, writable
+session, registered `/fast` command, and confirmed available `session.fastMode` metadata.
+Unknown or unsupported sessions cannot enable it. Prompt acceptance never optimistically
+enables fast mode: the UI waits for refreshed metadata, including refreshes triggered
+by `agentbox-fast` status events.

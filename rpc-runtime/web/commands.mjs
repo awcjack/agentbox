@@ -27,3 +27,13 @@ export function commandSuggestions(text, commands) {
   return [...known.values()].filter((command) => command.name.toLowerCase().startsWith(query))
     .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 12);
 }
+
+// Billing-affecting state is authoritative only when supplied by metadata.
+export function fastModeControl(mode, { supported = false, writable = false, refreshing = false } = {}) {
+  return {
+    disabled: !supported || !writable || refreshing || mode?.available !== true || typeof mode?.enabled !== "boolean",
+    pressed: mode?.enabled === true,
+    text: refreshing ? "Fast: refreshing..." : !mode ? "Fast: unknown" : !mode.available ? "Fast: unavailable" : mode.enabled ? "Fast: on" : "Fast: off",
+    help: refreshing ? "Waiting for confirmed session metadata..." : !mode ? "This process has not reported fast-mode support. Start an updated Pi process to use this option." : !mode.available || !supported ? "OpenAI fast mode is unavailable in this session." : "Applies to this Pi process only; new processes start off. No chat draft or attachments are sent.",
+  };
+}
