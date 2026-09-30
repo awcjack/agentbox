@@ -16,7 +16,7 @@ const load = (path) => import(pathToFileURL(`${piRoot}/${path}`));
 const { loadExtensions } = await load("dist/core/extensions/loader.js");
 const { createEventBus } = await load("dist/core/event-bus.js");
 const goalRoot = `${runtimeRoot}/node_modules/@narumitw/pi-goal`;
-assert.equal(JSON.parse(await readFile(`${piRoot}/package.json`)).version, "0.84.2");
+assert.equal(JSON.parse(await readFile(`${piRoot}/package.json`)).version, "0.87.1");
 assert.equal(JSON.parse(await readFile(`${goalRoot}/package.json`)).version, "0.53.1");
 assert.equal(JSON.parse(await readFile(`${runtimeRoot}/node_modules/@narumitw/pi-tui-kit/package.json`)).version, "0.57.0");
 

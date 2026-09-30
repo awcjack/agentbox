@@ -61,12 +61,15 @@ in
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-codex-accounts.mjs} $out/tests/pi-codex-accounts.mjs
         cp ${./tests/pi-codex-restore.mjs} $out/tests/pi-codex-restore.mjs
+        cp ${./tests/pi-gpt-6.1-sol.mjs} $out/tests/pi-gpt-6.1-sol.mjs
         cp ${./extensions/pi-codex-accounts.ts} $out/extensions/pi-codex-accounts.ts
       '';
     in
     pkgs.runCommand "pi-codex-accounts-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
       export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
       node ${testSource}/tests/pi-codex-accounts.mjs \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
+      node ${testSource}/tests/pi-gpt-6.1-sol.mjs \
         ${pi-coding-agent}/lib/node_modules/pi-monorepo
       node ${testSource}/tests/pi-codex-restore.mjs \
         ${pi-coding-agent}/lib/node_modules/pi-monorepo

@@ -100,7 +100,7 @@ the TUI and an RPC-provided UI.
 ### Pi goal mode
 
 Agentbox bundles upstream [`@narumitw/pi-goal` 0.53.1](https://github.com/narumiruna/pi-extensions/tree/86a5eda01aaf271ff0865b36d1a711dc972232e9/packages/pi-goal),
-characterized against **Pi 0.84.2**, without reimplementing its workflow.
+characterized against **Pi 0.87.1**, without reimplementing its workflow.
 It continues one session-owned objective at settled idle boundaries until complete,
 paused, blocked, waiting, or limited. It does not start a goal automatically in a
 fresh session.
@@ -186,7 +186,7 @@ Focused offline checks (also run in CI):
 nix build .#agentbox-pi-goal-runtime .#pi-goal-extension-test .#pi-codex-wrapper-test
 ```
 
-The extension check uses Pi 0.84.2's real Jiti loader, lazy TUI/RPC routes, managed
+The extension check uses Pi 0.87.1's real Jiti loader, lazy TUI/RPC routes, managed
 policy approvals, stale goal IDs, pause/resume/clear, token exhaustion and restored
 response caps. The wrapper check verifies policy-last ordering, immutable entry
 paths, rejection of user extensions, and exclusion from child sessions.
@@ -233,8 +233,8 @@ the result in `~/.pi/agent/auth.json`.
 For two Codex accounts in one Pi, use the built-in **ChatGPT Plus/Pro (Codex)**
 (`openai-codex`) for personal, then run `/login` for **Codex Work** (`codex-work`). Use the
 appropriate browser account/profile for each OAuth flow; headless device-code
-login is also available. Select `/model openai-codex/gpt-5.4` or
-`/model codex-work/gpt-5.4` (or another model from `/model`). The work alias has its
+login is also available. Select `/model openai-codex/gpt-6-sol` or
+`/model codex-work/gpt-6-sol` (or another model from `/model`). The work alias has its
 own stored login and native OAuth refresh; it neither replaces nor copies the
 existing `openai-codex` login. Use interactive `/login` and `/logout` for the
 work alias, not the wrapper's extension-free `pi auth` command.
@@ -243,7 +243,7 @@ The work alias loads the native provider's local catalog (cached remote models
 and `models.json` metadata) before CLI/default/session model resolution, then
 mirrors the live registry after startup. Credentials and configured auth headers
 remain separate; catalog bootstrap performs no network requests or token refresh.
-Agentbox patches Pi 0.84.2 to batch startup provider registrations before one
+Agentbox patches Pi 0.87.1 to batch startup provider registrations before one
 awaited catalog/auth refresh, preventing intermittent account fallback on resume
 and missing aliases in new-session model lists. The web model picker loads after
 startup synchronization, retries transient read failures, and reloads on Refresh
@@ -254,6 +254,18 @@ process. The picker itself does not force a network catalog refresh. Rebuild and
 patched executable and web assets; browser refresh alone cannot update Pi in an
 older image. Start a new session or resume into a new process after deployment.
 Reply badges show the model/provider recorded on each old reply.
+
+### OpenAI models
+
+The Pi-only `nixpkgs-unstable` pin supplies **Pi 0.87.1**. Agentbox also backports
+**GPT-6.1 Sol** (`gpt-6.1-sol`) into its offline OpenAI API and Codex catalogs,
+using provider-specific metadata from [Pi's OpenAI catalog](https://pi.dev/api/models/providers/openai)
+and [Codex catalog](https://pi.dev/api/models/providers/openai-codex). Native catalog
+refreshes remain authoritative. Select `/model openai/gpt-6.1-sol`,
+`/model openai-codex/gpt-6.1-sol`, or `/model codex-work/gpt-6.1-sol`.
+Codex Work mirrors the native Codex catalog, so no separate model list is needed. Authentication and
+account entitlements still determine which models you can use. Rebuild/redeploy
+the image to upgrade Pi; `pi update --models` refreshes metadata only.
 
 **Privacy:** switching accounts in a conversation sends its existing context,
 including prior messages and tool results, to the newly selected account.

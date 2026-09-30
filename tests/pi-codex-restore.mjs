@@ -124,16 +124,16 @@ try {
   assert.equal(refreshCalls, 1, "startup must have exactly one awaited refresh, no detached registration refreshes");
   assert.equal(runtime.hasConfiguredAuth("codex-work"), true);
   assert.equal(runtime.hasConfiguredAuth("startup-legacy"), true);
-  assert.ok(runtime.getModel("codex-work", "gpt-5.4"));
+  assert.ok(runtime.getModel("codex-work", "gpt-6.1-sol"));
   assert.ok(runtime.getModel("startup-legacy", "legacy-fixture"));
   const settings = (provider, model) => writeFile(join(directory, "settings.json"), JSON.stringify({
     defaultProvider: provider, defaultModel: model,
   }));
-  await settings(native.id, "gpt-5.4");
+  await settings(native.id, "gpt-6.1-sol");
   await mkdir(join(directory, "history"));
   const sessionPath = join(directory, "history", "resume.jsonl");
   const timestamp = new Date().toISOString();
-  for (const modelId of ["gpt-5.4", remote.id, "configured-codex"]) {
+  for (const modelId of ["gpt-6.1-sol", remote.id, "configured-codex"]) {
     await writeFile(sessionPath, [
       { type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", cwd: directory, timestamp },
       { type: "model_change", id: "00000001", parentId: null, timestamp, provider: "codex-work", modelId },
@@ -155,9 +155,9 @@ try {
       assert.equal(result.data.thinkingLevel, "high");
     }
   }
-  expect(await state(["--session", sessionPath, "--provider", native.id, "--model", "gpt-5.4"]), native.id, "gpt-5.4");
+  expect(await state(["--session", sessionPath, "--provider", native.id, "--model", "gpt-6.1-sol"]), native.id, "gpt-6.1-sol");
   expect(await state(["--no-session", "--provider", "codex-work", "--model", remote.id]), "codex-work", remote.id);
-  for (const modelId of ["gpt-5.4", remote.id, "configured-codex"]) {
+  for (const modelId of ["gpt-6.1-sol", remote.id, "configured-codex"]) {
     await settings("codex-work", modelId);
     // The web supervisor creates persistent sessions with --session-id. Exercise
     // simultaneous cold starts as well as the no-session CLI path, offline.

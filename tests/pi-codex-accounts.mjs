@@ -21,6 +21,13 @@ assert.deepEqual(loaded.errors, []);
 const aliases = loaded.runtime.pendingNativeProviderRegistrations.map(({ provider }) => provider);
 assert.deepEqual(aliases.map(({ id }) => id), ["codex-work"]);
 const native = openaiCodexProvider();
+const { builtinProviders } = await load("node_modules/@earendil-works/pi-ai/dist/providers/all.js");
+for (const providerId of ["openai", "openai-codex"]) {
+  const provider = builtinProviders().find((entry) => entry.id === providerId);
+  for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]) {
+    assert.ok(provider.getModels().some((model) => model.id === id), `${providerId} bundles ${id}`);
+  }
+}
 const credentials = new ai.InMemoryCredentialStore();
 const models = ai.createModels({ credentials });
 models.setProvider(native);
@@ -74,7 +81,7 @@ try {
   assert.equal((await credentials.read("codex-work")).refresh, "rotated-work");
   assert.deepEqual(await credentials.read(native.id), original);
 
-  const modelId = aliases[0].getModels().find((model) => model.id === "gpt-5.4").id;
+  const modelId = aliases[0].getModels().find((model) => model.id === "gpt-6-sol").id;
   const history = (provider, model = modelId) => ({ messages: [
     { role: "assistant", provider, api: "openai-codex-responses", model,
       content: [
@@ -210,13 +217,13 @@ try {
     const modelsPath = join(directory, "models.json");
     const configured = {
       models: [{ id: "configured-codex", name: "Configured Codex", contextWindow: 234567 }],
-      modelOverrides: { "gpt-6-astra": { maxTokens: 12345 } },
+      modelOverrides: { "remote-astra-fixture": { maxTokens: 12345 } },
       headers: { "X-Personal-Only": "synthetic-header" },
     };
     await writeFile(modelsPath, JSON.stringify({ providers: { [native.id]: configured } }));
     const store = new InMemoryCodingAgentModelsStore();
     // Synthetic metadata, not claims about Astra's actual limits or pricing.
-    const astra = { ...native.getModels()[0], id: "gpt-6-astra", name: "Astra (fixture)",
+    const astra = { ...native.getModels()[0], id: "remote-astra-fixture", name: "Astra (fixture)",
       contextWindow: 345678, thinkingLevelMap: { high: "high", xhigh: "xhigh" } };
     const cache = (entries) => store.write(native.id, {
       models: entries, checkedAt: Date.now(), lastModified: Date.now() + 86_400_000,
