@@ -26,7 +26,8 @@ test("only confirmed metadata changes the displayed mode", () => {
   assert.equal(on.text, "Fast: on");
   assert.equal(on.pressed, true);
   assert.equal(on.disabled, false);
-  assert.match(on.help, /new processes start off/);
+  assert.match(on.help, /New parent sessions start off/);
+  assert.match(on.help, /subagents inherit/);
 });
 
 // Exercise the actual click/dispatch guards without a browser dependency.

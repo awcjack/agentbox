@@ -276,9 +276,12 @@ while idle using **Fast** beside Auto in the active session's toolbar, or use `/
 and `/fast status` in Pi. The managed extension sets `service_tier: "priority"`
 in the actual request payload for native OpenAI, personal Codex, and Codex Work;
 custom/proxy providers are excluded. It defaults **off**, is not a saved default,
-and resets on model selection, session start/switch/fork. Delegated children do
-not inherit it. Each session reports its own mode; changing it never changes
-another session or a global/browser default. The web control waits for reported metadata rather than assuming
+and resets on model selection, session start/switch/fork. Each managed subagent
+inherits the parent's effective Fast mode when it actually spawns, including
+resumed jobs; queued jobs read the live mode when their slot opens. Unsupported
+child providers ignore it. Changing the parent does not retroactively change
+already-running children. Each session reports its own mode; no global/browser
+default is changed. The web control waits for reported metadata rather than assuming
 a command succeeded. Fast mode may consume extra money/credits; availability,
 actual tier, and speed remain server/account dependent. Pi's token-cost
 estimates may not reflect the premium tier—consult provider billing.

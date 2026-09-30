@@ -13,7 +13,9 @@ function harness(dependencies: any = {}, commands: any[] = []) {
   const tools = new Map<string, any>()
   const entries: any[] = []
   const registeredCommands = new Map<string, any>()
+  const events = new EventEmitter()
   const pi = {
+    events,
     getCommands: () => commands,
     setModel: () => { throw new Error("Must not change parent model") },
     setThinkingLevel: () => { throw new Error("Must not change parent thinking") },
@@ -29,7 +31,7 @@ function harness(dependencies: any = {}, commands: any[] = []) {
     },
   } as any
   createPiWorkflowExtension(dependencies)(pi)
-  return { handlers, tools, entries, registeredCommands, handler: (name: string) => handlers.get(name)![0] }
+  return { handlers, tools, entries, registeredCommands, events, handler: (name: string) => handlers.get(name)![0] }
 }
 
 function context(entries: any[] = [], overrides: any = {}) {
@@ -563,6 +565,51 @@ for (const invalid of [
   const before = spawnCalls.length
   assert.equal((await route(invalid)).isError, true)
   assert.equal(spawnCalls.length, before)
+}
+
+// Fast mode comes from the live parent, never a stale inherited shell flag.
+const previousFastEnv = process.env.PI_WORKFLOW_FAST_MODE
+process.env.PI_WORKFLOW_FAST_MODE = "on"
+try {
+  const isolated = harness({ readFile: async () => config, spawn: successfulSpawn,
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }) })
+  const invoke = (params: any) => isolated.tools.get("task").execute("fast", params, undefined, undefined, context())
+  await invoke({ role: "scout", prompt: "missing fast extension" })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_WORKFLOW_FAST_MODE, "off")
+  let fast = true
+  isolated.events.on("agentbox:fast-query", ({ reply }) => reply(fast))
+  const start = spawnCalls.length
+  const results = await invoke({ jobs: [{ role: "scout", prompt: "one" }, { role: "reviewer", prompt: "two" }] })
+  assert.deepEqual(spawnCalls.slice(start).map(call => call.options.env.PI_WORKFLOW_FAST_MODE), ["on", "on"])
+  fast = false
+  await invoke({ role: "scout", prompt: "resume off", resume: results.details.results[0].taskId })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_WORKFLOW_FAST_MODE, "off", "resumed jobs use current parent mode")
+  fast = true
+  await invoke({ role: "scout", prompt: "resume on", resume: results.details.results[0].taskId })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_WORKFLOW_FAST_MODE, "on")
+  isolated.events.removeAllListeners("agentbox:fast-query")
+  isolated.events.on("agentbox:fast-query", ({ reply }) => { reply(true); throw Error("unavailable") })
+  await invoke({ role: "scout", prompt: "failed query" })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_WORKFLOW_FAST_MODE, "off")
+
+  let queuedFast = true
+  const queued = harness({ readFile: async () => config,
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+    spawn: (command: string, args: string[], options: any) => {
+      const child = successfulSpawn(command, args, options)
+      queuedFast = false
+      return child
+    } })
+  queued.events.on("agentbox:fast-query", ({ reply }) => reply(queuedFast))
+  const queuedStart = spawnCalls.length
+  await queued.tools.get("task").execute("queued-fast", { concurrency: 1, jobs: [
+    { role: "scout", prompt: "starts on" }, { role: "scout", prompt: "queued off" },
+  ] }, undefined, undefined, context())
+  assert.deepEqual(spawnCalls.slice(queuedStart).map(call => call.options.env.PI_WORKFLOW_FAST_MODE), ["on", "off"],
+    "mode is queried when each child actually spawns, not at batch submission")
+} finally {
+  if (previousFastEnv === undefined) delete process.env.PI_WORKFLOW_FAST_MODE
+  else process.env.PI_WORKFLOW_FAST_MODE = previousFastEnv
 }
 
 // Real files, with the same metadata shape supplied by Pi's discovered commands.

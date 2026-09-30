@@ -262,8 +262,10 @@ but the Auto button remains off because review is not automatic approval.
 The active-session toolbar beside Auto offers an opt-in **OpenAI fast mode** toggle
 with an extra-cost warning, not a global Settings preference. Switching sessions
 shows the selected session’s confirmed mode; enabling A does not enable B.
-It starts off for each Pi process and is not persisted as a browser or future-session
-default. The control sends `/fast on` or `/fast off` through the native-conversation-bound
+It starts off for each parent Pi process and is not persisted as a browser or
+future-session default. Managed subagents inherit the parent's live mode at spawn,
+including resumed jobs; existing children are not changed retroactively. A child
+using an unsupported provider does not send the premium tier. The control sends `/fast on` or `/fast off` through the native-conversation-bound
 prompt RPC without sending the draft or attachments. It requires an idle, writable
 session and confirmed available `session.fastMode` metadata (which establishes
 extension support without opening Settings or loading the command catalog).

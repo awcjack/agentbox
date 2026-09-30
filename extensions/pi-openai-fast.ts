@@ -1,16 +1,31 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-// Deliberately session-local: resuming/forking or selecting another model never
-// silently opts into a paid service tier. Workflow children also start off.
+// Parent sessions start off. Managed workflow children receive a spawn-time
+// snapshot of their parent's live mode, never a global/browser preference.
 export default function openaiFast(pi: ExtensionAPI) {
   let enabled = false;
+  let effective = false;
+  let initialStart = true;
+  const inherited = process.env.PI_WORKFLOW_CHILD === "1" && process.env.PI_WORKFLOW_FAST_MODE === "on";
+  pi.events.on("agentbox:fast-query", (request: unknown) => {
+    if (request && typeof request === "object" && "reply" in request && typeof request.reply === "function") {
+      request.reply(effective);
+    }
+  });
   const available = (ctx: ExtensionContext) => Boolean(ctx.model
     && ["openai", "openai-codex", "codex-work"].includes(ctx.model.provider)
     && ["openai-responses", "openai-codex-responses"].includes(ctx.model.api));
-  const publish = (ctx: ExtensionContext) => ctx.ui.setStatus("agentbox-fast",
-    JSON.stringify({ available: available(ctx), enabled: enabled && available(ctx) }));
+  const publish = (ctx: ExtensionContext) => {
+    effective = enabled && available(ctx);
+    ctx.ui.setStatus("agentbox-fast", JSON.stringify({ available: available(ctx), enabled: effective }));
+  };
   const reset = (_event: unknown, ctx: ExtensionContext) => { enabled = false; publish(ctx); };
-  pi.on("session_start", reset);
+  pi.on("session_start", (_event, ctx) => {
+    enabled = initialStart && inherited && available(ctx);
+    initialStart = false;
+    publish(ctx);
+  });
+  pi.on("session_shutdown", () => { enabled = false; effective = false; initialStart = false; });
   pi.on("session_switch", reset);
   pi.on("session_fork", reset);
   pi.on("model_select", reset);

@@ -748,9 +748,15 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           }
 
           try {
+            // Read the live parent state after queued jobs obtain a slot. Never
+            // let an inherited shell variable enable premium billing by itself.
+            let fastMode = false
+            try {
+              pi.events.emit("agentbox:fast-query", { reply: (value: boolean) => { fastMode = value === true } })
+            } catch { fastMode = false }
             proc = spawn(invocation.command, invocation.args, {
               cwd,
-              env: { ...process.env, PI_WORKFLOW_CHILD: "1", [APPROVAL_ENV]: APPROVAL_VERSION },
+              env: { ...process.env, PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_FAST_MODE: fastMode ? "on" : "off", [APPROVAL_ENV]: APPROVAL_VERSION },
               shell: false,
               stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
             })
