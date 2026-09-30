@@ -393,7 +393,6 @@ try {
         await page.locator("#settings").click();
         await page.locator("#settings-dialog").waitFor();
       };
-      await openSettings();
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
       assert.match(await page.locator("#fast-mode-cost").textContent(), /extra cost/);
       session.holdFast = true;
@@ -403,11 +402,20 @@ try {
       assert.equal(await page.locator("#settings").isDisabled(), true, "settings locked during fast command");
       session.holdFast = false; session.releaseFast();
       await until(() => page.locator("#settings").isEnabled(), "fast command settled");
-      await openSettings();
       await until(() => page.locator("#fast-mode").getAttribute("aria-pressed").then((value) => value === "true"), "metadata confirms fast on");
+      await openSidebar(); await page.locator("#new-session").click();
+      await page.locator("#new-name").fill(`${label} fast isolation`);
+      await page.locator("#create-session").click();
+      await until(() => page.locator("#session-title").textContent().then((text) => text === `${label} fast isolation`), "B selected");
+      await until(() => page.locator("#fast-mode").isEnabled(), "B fast ready without Settings");
+      assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false", "A on does not enable B");
+      await openSidebar();
+      await page.locator(".session-item").filter({ hasText: session.name }).click();
+      await until(() => page.locator("#session-title").textContent().then((text) => text === session.name), "A selected");
+      await until(() => page.locator("#fast-mode").isEnabled(), "A restored");
+      assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "true", "returning to A retains on");
       await page.locator("#fast-mode").click();
       await until(() => page.locator("#settings").isEnabled(), "fast off settled");
-      await openSettings();
       await until(() => page.locator("#fast-mode").isEnabled(), "fast metadata refreshed");
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
       assert.equal(await page.locator("#prompt").inputValue(), "Draft while syncing", "fast preserves draft");
@@ -415,7 +423,6 @@ try {
       session.ignoreFast = true;
       await page.locator("#fast-mode").click();
       await until(() => page.locator("#settings").isEnabled(), "ignored fast command settled");
-      await openSettings();
       await until(() => page.locator("#fast-mode").isEnabled(), "ignored fast metadata refreshed");
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
       session.ignoreFast = false;
@@ -428,6 +435,8 @@ try {
       session.fastMode = { available: true, enabled: false };
       emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast", statusText: JSON.stringify(session.fastMode) });
       await until(() => page.locator("#fast-mode").isEnabled(), "fast support restored");
+      await openSettings();
+      assert.equal(await page.locator("#settings-dialog #fast-mode").count(), 0);
       const rows = page.locator("#model-visibility-list label");
       await rows.filter({ hasText: "Pi Reasoning" }).locator("input").uncheck();
       assert.equal(await page.locator("#model option").filter({ hasText: "Pi Reasoning" }).count(), 0);
@@ -456,7 +465,7 @@ try {
       session.holdDefaults = true;
       await page.locator("#save-default-model").click();
       await until(() => session.releaseDefaults, "defaults prompt in flight");
-      for (const id of ["settings", "model", "auto-mode", "send"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true, `${id} is locked while saving defaults`);
+      for (const id of ["settings", "model", "auto-mode", "fast-mode", "send"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true, `${id} is locked while saving defaults`);
       const defaultsSent = calls.filter((call) => call.command?.message?.startsWith("/agentbox-defaults")).length;
       await page.locator("#settings").evaluate((button) => button.click());
       assert.equal(calls.filter((call) => call.command?.message?.startsWith("/agentbox-defaults")).length, defaultsSent);
@@ -499,7 +508,7 @@ try {
       session.holdSubagents = true;
       await page.locator("#save-subagent-cap").click();
       await until(() => session.releaseSubagents, "subagent setting in flight");
-      for (const id of ["settings", "model", "auto-mode", "send"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true);
+      for (const id of ["settings", "model", "auto-mode", "fast-mode", "send"]) assert.equal(await page.locator(`#${id}`).isDisabled(), true);
       session.holdSubagents = false; session.releaseSubagents();
       await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Subagent concurrency: 2")), "cap result notification");
       await openSettings();

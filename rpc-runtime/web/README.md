@@ -247,11 +247,14 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
 
 ### OpenAI fast mode
 
-Settings offers an opt-in **OpenAI fast mode** toggle with an extra-cost warning.
+The active-session toolbar beside Auto offers an opt-in **OpenAI fast mode** toggle
+with an extra-cost warning, not a global Settings preference. Switching sessions
+shows the selected session’s confirmed mode; enabling A does not enable B.
 It starts off for each Pi process and is not persisted as a browser or future-session
 default. The control sends `/fast on` or `/fast off` through the native-conversation-bound
 prompt RPC without sending the draft or attachments. It requires an idle, writable
-session, registered `/fast` command, and confirmed available `session.fastMode` metadata.
+session and confirmed available `session.fastMode` metadata (which establishes
+extension support without opening Settings or loading the command catalog).
 Unknown or unsupported sessions cannot enable it. Prompt acceptance never optimistically
 enables fast mode: the UI waits for refreshed metadata, including refreshes triggered
 by `agentbox-fast` status events.

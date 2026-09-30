@@ -272,12 +272,13 @@ patches, even if the Agentbox flake input itself is current.
 
 OpenAI [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode) is a
 paid service tier, not a lower thinking level or a different model. Enable it
-while idle in web **Settings → OpenAI fast mode**, or use `/fast on`, `/fast off`,
+while idle using **Fast** beside Auto in the active session's toolbar, or use `/fast on`, `/fast off`,
 and `/fast status` in Pi. The managed extension sets `service_tier: "priority"`
 in the actual request payload for native OpenAI, personal Codex, and Codex Work;
 custom/proxy providers are excluded. It defaults **off**, is not a saved default,
 and resets on model selection, session start/switch/fork. Delegated children do
-not inherit it. The web control waits for reported metadata rather than assuming
+not inherit it. Each session reports its own mode; changing it never changes
+another session or a global/browser default. The web control waits for reported metadata rather than assuming
 a command succeeded. Fast mode may consume extra money/credits; availability,
 actual tier, and speed remain server/account dependent. Pi's token-cost
 estimates may not reflect the premium tier—consult provider billing.

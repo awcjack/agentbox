@@ -69,8 +69,8 @@ function record(id) {
 }
 function active(ctx) { return current === ctx && !ctx.controller.signal.aborted && Boolean(token); }
 function path(ctx, suffix = "") { return `/v1/sessions/${encodeURIComponent(ctx.id)}${suffix}`; }
-async function rpc(ctx, command, write = false) {
-  const value = await api.request(path(ctx, "/rpc"), { body: command, nativeSessionId: write ? ctx.state.sessionId || ctx.meta.nativeSessionId : undefined, signal: write ? auth.signal : ctx.controller.signal });
+async function rpc(ctx, command, write = false, nativeId = ctx.state.sessionId || ctx.meta.nativeSessionId) {
+  const value = await api.request(path(ctx, "/rpc"), { body: command, nativeSessionId: write ? nativeId : undefined, signal: write ? auth.signal : ctx.controller.signal });
   return value.data;
 }
 function showNotice(message, error = false) {
@@ -116,13 +116,6 @@ function updateControls() {
     if (settingsTarget?.ctx !== ctx || settingsTarget?.nativeId !== ctx?.meta.nativeSessionId || !canWrite(ctx)) {
       $("settings-dialog").close(); settingsTarget = null;
     } else {
-      const fastMode = ctx.meta.fastMode;
-      const fastSupported = ctx.commands?.some((command) => command.name === "fast");
-      const fastControl = fastModeControl(fastMode, { supported: fastSupported, writable: canChangeConversation(ctx), refreshing: Boolean(ctx.fastModeRefresh) });
-      $("fast-mode").disabled = fastControl.disabled;
-      $("fast-mode").setAttribute("aria-pressed", String(fastControl.pressed));
-      $("fast-mode").textContent = fastControl.text;
-      $("fast-mode-help").textContent = fastControl.help;
       const supported = ctx.commands?.some((command) => command.name === "agentbox-defaults");
       const disabled = !supported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
       for (const id of ["save-default-model", "save-default-auto", "show-defaults", "default-auto"]) $(id).disabled = disabled;
@@ -146,6 +139,14 @@ function updateControls() {
   $("logout").disabled = !token;
   $("end-session").disabled = !ctx || !token || deleteDenied || ctx.record.ending;
   $("end-session").textContent = ctx?.record.ending ? "Ending..." : "End & archive";
+  const fastMode = ctx?.meta?.fastMode;
+  const fastSupported = fastMode?.available === true;
+  const fastControl = fastModeControl(fastMode, { supported: fastSupported, writable: canChangeConversation(ctx), refreshing: Boolean(ctx?.fastModeRefresh) });
+  $("fast-mode").disabled = fastControl.disabled;
+  $("fast-mode").setAttribute("aria-pressed", String(fastControl.pressed));
+  $("fast-mode").textContent = fastControl.text;
+  $("fast-mode-help").textContent = fastControl.help;
+  $("fast-mode").title = `${fastControl.help} Opt-in priority service may incur extra cost.`;
   const autoMode = ctx?.meta?.autoMode;
   $("auto-mode").disabled = !canWrite(ctx) || !autoMode?.available || ctx.record.autoModeBusy;
   $("auto-mode").setAttribute("aria-pressed", String(autoMode?.enabled === true));
@@ -1064,17 +1065,17 @@ $("show-all-models").addEventListener("click", () => {
 });
 $("close-settings").addEventListener("click", () => $("settings-dialog").close());
 $("settings-dialog").addEventListener("close", () => { settingsTarget = null; });
-async function runSettingsCommand(command, args = "") {
-  const target = settingsTarget, ctx = target?.ctx, ownEpoch = epoch;
+async function runSettingsCommand(command, args = "", target = settingsTarget) {
+  const ctx = target?.ctx, ownEpoch = epoch;
   if (!ctx || target.nativeId !== ctx.meta.nativeSessionId || !canChangeConversation(ctx) || ctx.record.settingsBusy
-    || !ctx.commands?.some((item) => item.name === command)) return;
+    || (command !== "fast" && !ctx.commands?.some((item) => item.name === command))) return;
   if (command === "fast" && (ctx.fastModeRefresh || ctx.meta.fastMode?.available !== true || typeof ctx.meta.fastMode?.enabled !== "boolean")) return;
   // Share the prompt lock without touching the composer draft. Close the modal
   // before dispatch so extension select/confirm requests remain accessible.
   ctx.record.settingsBusy = true; ctx.record.sending = true;
   $("settings-dialog").close(); updateControls();
   try {
-    await rpc(ctx, { type: "prompt", message: `/${command}${args ? ` ${args}` : ""}` }, true);
+    await rpc(ctx, { type: "prompt", message: `/${command}${args ? ` ${args}` : ""}` }, true, target.nativeId);
   } catch (error) {
     if (ownEpoch === epoch) report(error, ctx, { write: true, command: "prompt", ambiguous: true });
   } finally {
@@ -1085,7 +1086,12 @@ async function runSettingsCommand(command, args = "") {
     if (ownEpoch === epoch && current?.record === ctx.record) { updateControls(); requestRefresh(current); }
   }
 }
-$("fast-mode").addEventListener("click", () => runSettingsCommand("fast", settingsTarget?.ctx.meta.fastMode?.enabled ? "off" : "on"));
+$("fast-mode").addEventListener("click", () => {
+  const ctx = current;
+  if (!ctx) return;
+  const target = { ctx, nativeId: ctx.meta.nativeSessionId };
+  return runSettingsCommand("fast", ctx.meta.fastMode?.enabled ? "off" : "on", target);
+});
 $("save-default-model").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "model current"));
 $("save-default-auto").addEventListener("click", () => runSettingsCommand("agentbox-defaults", $("default-auto").value === "on" ? "auto on" : "auto off"));
 $("show-defaults").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "status"));

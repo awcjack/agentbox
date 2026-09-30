@@ -33,6 +33,9 @@
         <div class="session-heading"><h1 id="session-title">Pi coding workspace</h1><p id="session-subtitle">Code, tools, and persistent conversations.</p></div>
         <span id="session-status" class="status-pill">WORKSPACE</span>
         <button id="auto-mode" class="auto-toggle" type="button" aria-label="Auto permission mode" aria-pressed="false" title="Auto mode is off. Normal permission rules apply." disabled>Auto: off</button>
+        <button id="fast-mode" class="auto-toggle" type="button" aria-label="OpenAI fast mode" aria-pressed="false" aria-describedby="fast-mode-cost fast-mode-help" disabled>Fast: unknown</button>
+        <span id="fast-mode-cost" class="sr-only">Opt-in priority service may incur extra cost. Active session only; new Pi processes start off. Not a saved default.</span>
+        <span id="fast-mode-help" class="sr-only" role="status"></span>
         <button id="export-conversation" class="text-button" disabled title="Download the complete conversation tree as JSON, including tool output and embedded attachments. Reopen archived sessions first; wait for the agent to be idle.">Export JSON</button>
         <button id="end-session" class="text-button" disabled>End &amp; archive</button>
       </header>
@@ -93,10 +96,6 @@
       <button id="save-default-auto" class="primary-button" type="button">Save default auto</button>
       <button id="show-defaults" class="text-button" type="button">Show saved defaults</button>
       <p id="settings-help" class="field-note" role="status"></p>
-      <h3>OpenAI fast mode</h3>
-      <p id="fast-mode-cost" class="field-note">Opt-in priority service may incur extra cost. Off by default for each Pi process; this is not a saved default.</p>
-      <button id="fast-mode" class="auto-toggle" type="button" aria-label="OpenAI fast mode" aria-pressed="false" aria-describedby="fast-mode-cost fast-mode-help" disabled>Fast: unknown</button>
-      <p id="fast-mode-help" class="field-note" role="status"></p>
       <h3>Session subagent concurrency</h3>
       <p class="field-note">Limit concurrent subagents for this session branch while idle. Saved with the branch, not as a global default. The managed ceiling is enforced by Pi; use Show status to view it.</p>
       <label for="subagent-cap">Proposed concurrency cap</label>
