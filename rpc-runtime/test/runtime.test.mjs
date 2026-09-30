@@ -1354,6 +1354,54 @@ test("runtime supervisor bounds logs and stops a crash loop", async (t) => {
   assert.match(await readFile(logPath, "utf8"), /giving up$/m);
 });
 
+test("idle cleanup preserves disconnected quiet work and pending dialogs", async (t) => {
+  for (const record of [
+    { type: "agent_start" }, // Includes silent tool execution such as a long sleep.
+    { type: "auto_retry_start" },
+    { type: "auto_compaction_start" },
+    { type: "compaction_start" },
+    { type: "extension_ui_request", id: "approval", method: "confirm", title: "Allow?" },
+    { type: "extension_ui_request", id: "reply", method: "input", title: "Reply?" },
+  ]) {
+    await t.test(`${record.type}/${record.method ?? "work"}`, async (t) => {
+      let currentTime = 1_000;
+      const { runtime, baseUrl, children } = await fixture(t, config({
+        limits: { idleTimeoutMs: 100, cleanupIntervalMs: 50, shutdownGraceMs: 10, killGraceMs: 10 },
+      }), { now: () => currentTime });
+      const created = await createSession(baseUrl);
+      const session = runtime.sessions.get(created);
+      children[0].output(record);
+      assert.equal(session.clients.size, 0);
+      assert.equal(session.pending.size, 0);
+      currentTime = 2_000;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(session.status, "running");
+      assert.equal(runtime.sessions.size, 1);
+      assert.equal(children[0].input.includes('"type":"abort"'), false);
+
+      // Explicit runtime shutdown must still terminate protected work.
+      await runtime.close();
+      assert.equal(children[0].exited, true);
+    });
+  }
+});
+
+test("settled quiet work becomes eligible for idle cleanup again", async (t) => {
+  let currentTime = 1_000;
+  const { runtime, baseUrl, children } = await fixture(t, config({
+    limits: { idleTimeoutMs: 100, cleanupIntervalMs: 50, shutdownGraceMs: 10, killGraceMs: 10 },
+  }), { now: () => currentTime });
+  await createSession(baseUrl);
+  children[0].output({ type: "agent_start" });
+  currentTime = 2_000;
+  children[0].output({ type: "agent_settled" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(runtime.sessions.size, 1, "settling starts a fresh idle window");
+  currentTime = 3_000;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(runtime.sessions.size, 0);
+});
+
 test("idle cleanup and graceful close terminate every child", async (t) => {
   let currentTime = 1_000;
   const cfg = config({

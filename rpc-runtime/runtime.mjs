@@ -1368,7 +1368,12 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   const cleanupTimer = setInterval(() => {
     const cutoff = now() - config.limits.idleTimeoutMs;
     for (const [id, session] of sessions) {
-      if (!session.conversationLocked && session.clients.size === 0 && session.pending.size === 0 && session.lastActivityAt < cutoff) {
+      // Silence is not idleness: a tool (e.g. sleep), retry, compaction, or
+      // approval may remain quiet after the browser disconnects. RPC responses
+      // acknowledge commands before the agent finishes, so pending is not enough.
+      const activeWork = session.status === "running"
+        && (session.agentBusy || session.agentCompacting || session.pendingUi.size > 0);
+      if (!activeWork && !session.conversationLocked && session.clients.size === 0 && session.pending.size === 0 && session.lastActivityAt < cutoff) {
         session.stop().then(() => {
           if (session.exit && sessions.get(id) === session && !session.conversationLocked) sessions.delete(id);
         }).catch(() => {});

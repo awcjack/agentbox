@@ -226,8 +226,14 @@ these commands as a way to read session data.
 
 Create requests are `{"profile":"default"}`, optionally with `name` and a full
 UUID `resume` session ID. Exited sessions remain available for inspection until
-idle cleanup but do not consume the active-session quota. RPC requests are Pi
-command objects. UI requests
+idle cleanup but do not consume the active-session quota. Idle cleanup (30 minutes
+by default) only stops disconnected sessions without outstanding commands, active
+agent work, compaction, or pending UI dialogs. Quiet tools such as a long `sleep`
+and unanswered approvals are not idle. Once work settles or a dialog closes, its
+last activity starts a fresh idle window. Explicit end and runtime shutdown still
+stop these sessions. “PICK UP WHERE YOU LEFT OFF” lists saved conversations with
+no running/stopping process; it is not a waiting-for-tool or approval status.
+RPC requests are Pi command objects. UI requests
 are `{"id":"...","confirmed":true}`, `{"id":"...","value":"..."}`, or
 `{"id":"...","cancelled":true}`. Select values must match an offered option.
 
