@@ -266,6 +266,9 @@ refreshes remain authoritative. Select `/model openai/gpt-6.1-sol`,
 Codex Work mirrors the native Codex catalog, so no separate model list is needed. Authentication and
 account entitlements still determine which models you can use. Rebuild/redeploy
 the image to upgrade Pi; `pi update --models` refreshes metadata only.
+When customizing `agentboxImage.override`, retain its bundled `pi-coding-agent`:
+replacing it with another nixpkgs package bypasses Agentbox's Pi pin and model/RPC
+patches, even if the Agentbox flake input itself is current.
 
 OpenAI [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode) is a
 paid service tier, not a lower thinking level or a different model. Enable it
