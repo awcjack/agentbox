@@ -158,12 +158,19 @@ in
       testSource = pkgs.runCommand "pi-policy-extension-test-source" { } ''
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-policy.ts} $out/tests/pi-policy.ts
+        cp ${./tests/pi-defaults.ts} $out/tests/pi-defaults.ts
+        cp ${./tests/pi-auto-session.mjs} $out/tests/pi-auto-session.mjs
         cp ${./extensions/pi-policy.ts} $out/extensions/pi-policy.ts
         cp ${./extensions/pi-approval.ts} $out/extensions/pi-approval.ts
       '';
     in
     pkgs.runCommand "pi-policy-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
       node --experimental-strip-types ${testSource}/tests/pi-policy.ts
+      node --experimental-strip-types ${testSource}/tests/pi-defaults.ts \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
+      node --experimental-strip-types ${testSource}/tests/pi-auto-session.mjs \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
       touch $out
     '';
 

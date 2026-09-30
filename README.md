@@ -391,12 +391,22 @@ Enable availability declaratively:
 services.agentbox.settings.piConfig.permissions.auto.enable = true;
 ```
 
-Auto starts **off** unless explicitly saved as a default (see below). Use
-`/auto on`, `/auto off`, `/auto status`, or the web header's **Auto: off/on** button.
-`/auto` toggles live mode without changing saved defaults. Live mode resets on
-session start/switch/fork/tree navigation/shutdown. Turning it off
-restores human approvals for subsequent decisions; it does not answer an already
-open approval dialog. This change requires rebuilding/redeploying Agentbox and
+Fresh sessions start **off** unless explicitly saved as a global default (see below).
+Use `/auto on`, `/auto off`, `/auto status`, or the web header's **Auto: off/on** button.
+An explicit `/auto` choice (including `review`) is saved with that native conversation,
+not in global settings or browser storage. Restarting Pi or resuming from
+**PICK UP WHERE YOU LEFT OFF** restores its last choice; switching sessions loads
+that session's own choice. Tree navigation cannot resurrect an older Auto-on after
+an explicit off. Forks/new sessions and workflow children do not inherit a parent's
+saved authorization. Old conversations without a saved choice resume off; a global
+default alone is not copied into their history. Set Auto once to retain it.
+
+Turning Auto off revokes live authorization immediately and saves off for later
+resumes; it does not answer an already open approval dialog. Managed policy must
+still permit Auto. Invalid saved entries fail closed. If saving fails, live Auto
+is disabled and an error warns that restarting may restore an older saved choice.
+Pi normally flushes a brand-new conversation to disk after its first assistant
+reply; retention before that point follows Pi's normal session persistence. This change requires rebuilding/redeploying Agentbox and
 starting a new Pi process; editing the source does not change a running wrapper.
 
 Workflow child approval requests are automatically answered by the parent while
@@ -436,7 +446,8 @@ CLI and web settings share Pi's global `~/.pi/agent/settings.json`
 Only boolean `true` enables the auto default; strings/numbers/missing values do
 not. The policy reads it at session start, only for fresh startup/new sessions
 without restored conversation history or a parent session. Reload, resume,
-fork/clone, tree navigation, and workflow children never enable it. Managed
+fork/clone, tree navigation, and workflow children never apply the global auto
+default. Restoring an explicit same-session Auto choice is separate. Managed
 `permissions.auto.enable = true` is still required, and all safety gates remain.
 Project settings cannot grant this auto default. Pi's normal model resolution
 still applies: explicit model choices, restored session models, and trusted

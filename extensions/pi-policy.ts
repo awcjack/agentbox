@@ -21,6 +21,9 @@ const MAX_GENERIC_TARGETS = 128
 const MAX_TARGET_DEPTH = 8
 const MAX_TARGET_CHARS = 100_000
 
+const AUTO_SESSION_ENTRY = "agentbox-auto-mode"
+type AutoMode = "on" | "off" | "review"
+
 type Decision = "allow" | "ask" | "deny"
 
 interface AutoConfig {
@@ -742,6 +745,8 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         : askHuman(ctx, { timeout: request.timeout as number }, request.summary.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, MAX_DISPLAY_CHARS))
           .then((result) => !ctx.signal.aborted && !result?.block, () => false))
     })
+    // A failed append may already exist in SDK memory. Never restore it in this runtime.
+    const failedSaves = new Set<string>()
     let modeRequest = 0
     let autoAttempt = new AbortController()
     let session = new AbortController()
@@ -764,13 +769,13 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         : available ? `Auto: ${autoEnabled ? "on" : reviewEnabled ? "review (may ask)" : "off"}` : undefined)
     }
     async function publishAuto(ctx: ExtensionContext) {
-      const epoch = session
+      const epoch = session, request = modeRequest
       let available = false
       try {
         const config = parseConfig(await readFile(env.PI_POLICY_CONFIG || DEFAULT_CONFIG_PATH), env.PI_POLICY_CONFIG || DEFAULT_CONFIG_PATH)
         available = config.auto?.enable === true
       } catch { /* Invalid policy remains fail-closed, including auto mode. */ }
-      if (epoch !== session || epoch.signal.aborted) return false
+      if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return false
       autoAvailable = available
       if (!available) {
         autoEnabled = false
@@ -781,8 +786,27 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       showAuto(ctx, available)
       return available
     }
+    function restoreAuto(ctx: ExtensionContext, available: boolean): boolean {
+      // Session-wide, deliberately not getBranch(): tree navigation cannot undo off.
+      // Inspect the latest entry before validating, never resurrect an older on.
+      const latest = ctx.sessionManager.getEntries().filter(entry =>
+        entry.type === "custom" && entry.customType === AUTO_SESSION_ENTRY).at(-1)
+      const id = ctx.sessionManager.getSessionId()
+      if (failedSaves.has(id)) { showAuto(ctx, available); return true }
+      if (!latest) return false
+      const data = latest.type === "custom" ? latest.data : undefined
+      if (env.PI_WORKFLOW_CHILD !== "1" && env[APPROVAL_ENV] === undefined
+        && !failedSaves.has(id) && available && isObject(data) && data.version === 1
+        && typeof id === "string" && id.length > 0 && data.sessionId === id
+        && ["on", "off", "review"].includes(data.mode as string)) {
+        autoEnabled = data.mode === "on"
+        reviewEnabled = data.mode === "review"
+      }
+      showAuto(ctx, available)
+      return true
+    }
     pi.registerCommand("auto", {
-      description: "Auto-approve asks: /auto on|off|status. Optional classifier: /auto review (may ask).",
+      description: "Session Auto (retained on resume): /auto on|off|status. /auto review uses a classifier (may ask).",
       handler: async (args, ctx) => {
         const value = args.trim().toLowerCase()
         if (!["", "on", "off", "status", "review"].includes(value)) {
@@ -790,8 +814,17 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
           return
         }
         const epoch = session, request = ++modeRequest
+        // Off revokes live authorization even while policy I/O is pending.
+        if (value === "off") {
+          autoEnabled = false
+          reviewEnabled = false
+          autoAttempt.abort()
+          showAuto(ctx, autoAvailable)
+        }
+        const sessionId = ctx.sessionManager.getSessionId()
         const available = await publishAuto(ctx)
-        if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
+        if (epoch !== session || epoch.signal.aborted || request !== modeRequest
+          || sessionId !== ctx.sessionManager.getSessionId()) return
         if (value === "status") {
           ctx.ui.notify(`Auto: ${autoEnabled ? "on" : reviewEnabled ? "review (may ask)" : "off"}${available ? "" : " (unavailable)"}.`, "info")
           return
@@ -803,12 +836,25 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         }
         autoAttempt.abort()
         autoAttempt = new AbortController()
+        autoEnabled = false
+        reviewEnabled = false
+        const mode: AutoMode = value === "review" ? "review" : enabled ? "on" : "off"
+        try {
+          if (!sessionId) throw new Error("Missing native session ID")
+          pi.appendEntry(AUTO_SESSION_ENTRY, { version: 1, sessionId, mode })
+          failedSaves.delete(sessionId)
+        } catch {
+          failedSaves.add(sessionId)
+          showAuto(ctx, available)
+          ctx.ui.notify("Could not save session Auto mode; live Auto is off. The saved choice was not confirmed changed; restarting may restore an older choice.", "error")
+          return
+        }
         autoEnabled = enabled
         reviewEnabled = value === "review"
         showAuto(ctx, available)
         ctx.ui.notify(reviewEnabled
-          ? "Review mode: classifier checks default asks and may request human approval."
-          : `Auto mode ${enabled ? "on: approval prompts are automatically allowed" : "off"}. Managed denials and safety guards still apply.`, "info")
+          ? "Review mode saved for this session: classifier checks default asks and may request human approval."
+          : `Auto mode ${enabled ? "on: approval prompts are automatically allowed" : "off"}. Saved for this session and retained on resume. Managed denials and safety guards still apply.`, "info")
       },
     })
     pi.registerCommand("agentbox-defaults", {
@@ -856,7 +902,8 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       reset()
       const epoch = session, request = modeRequest
       const available = await publishAuto(ctx)
-      if (epoch !== session || epoch.signal.aborted) return
+      if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
+      if (restoreAuto(ctx, available)) return
       if (event.reason !== "startup" && event.reason !== "new") return
       if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) return
       try {
@@ -895,7 +942,12 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         showAuto(ctx, available)
       } catch { /* Unreadable or invalid defaults never enable auto. */ }
     })
-    pi.on("session_tree", async (_event, ctx) => { reset(); await publishAuto(ctx) })
+    pi.on("session_tree", async (_event, ctx) => {
+      reset()
+      const epoch = session, request = modeRequest
+      const available = await publishAuto(ctx)
+      if (epoch === session && !epoch.signal.aborted && request === modeRequest) restoreAuto(ctx, available)
+    })
     pi.on("session_shutdown", () => {
       reset(true)
       approvalClient?.close()

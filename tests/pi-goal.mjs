@@ -101,7 +101,9 @@ try {
     events: h.bus, registerCommand() {},
     on: (name, handler) => policyHandlers.set(name, handler),
   });
-  const policyContext = { ...h.ctx, ui: { ...h.ctx.ui,
+  const policyContext = { ...h.ctx,
+    sessionManager: { ...h.ctx.sessionManager, getSessionId: () => "goal-policy-fixture" },
+    ui: { ...h.ctx.ui,
     select: async () => { approvals++; return allow ? "Allow once" : "Deny"; },
   } };
   await policyHandlers.get("session_start")({ reason: "reload" }, policyContext);

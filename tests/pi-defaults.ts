@@ -12,7 +12,7 @@ function harness(saved: unknown, available = true, overrides: any = {}) {
   let confirmed = false
   const ctx: any = { cwd: "/workspace", hasUI: true, mode: "tui", model: { provider: "example", id: "model" },
     modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
-    sessionManager: { getSessionFile: () => undefined, getHeader: () => ({}), getEntries: () => [] },
+    sessionManager: { getSessionId: () => "test-session", getSessionFile: () => undefined, getHeader: () => ({}), getEntries: () => [] },
     ui: { setStatus() {}, select: async () => "Deny", notify: (text: string) => notices.push(text),
       confirm: async (_title: string, warning: string) => { assert.match(warning, /broad authorization/); return confirmed } } }
   createPiPolicyExtension({

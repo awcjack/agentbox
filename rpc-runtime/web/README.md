@@ -245,6 +245,18 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
   conversations or tool outputs can be expensive to display.
 - This directory does not configure static hosting or modify the backend.
 
+### Session Auto permissions
+
+The toolbar's Auto toggle saves an explicit on/off choice with the native
+conversation through the policy extension. Restarting Pi and resuming it from
+**PICK UP WHERE YOU LEFT OFF** restores that choice; the UI displays the restored
+`autoMode` metadata rather than persisting permission in browser storage.
+Other sessions, forks, and workflow children do not inherit it. Managed policy
+must still permit Auto, and managed denials remain enforced. Conversations with
+no saved choice resume off. This is separate from Settings' global defaults for
+future fresh sessions. `/auto review` also restores its saved review choice,
+but the Auto button remains off because review is not automatic approval.
+
 ### OpenAI fast mode
 
 The active-session toolbar beside Auto offers an opt-in **OpenAI fast mode** toggle

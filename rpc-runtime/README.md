@@ -239,13 +239,17 @@ are `{"id":"...","confirmed":true}`, `{"id":"...","value":"..."}`, or
 
 Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and
 pending UI requests. `autoMode` is `null` until the policy extension announces
-support, then `{available, enabled}`. Auto starts off in every Pi process;
-managed `auto.enable` only makes it available. The web toggle requires write
+support, then `{available, enabled}`. Auto restores the conversation's last explicit
+choice on restart/resume, including from “PICK UP WHERE YOU LEFT OFF”; without a
+saved choice, resumed conversations start off. Managed `auto.enable` must still
+permit it. Fresh sessions alone may use an explicitly saved global default. The web toggle requires write
 scope and allowed `prompt`, binds the request to the displayed native session,
 and sends the policy extension's `/auto on` or `/auto off` command. It waits for
 confirmed state, never optimistically enables auto, and never retries failed
 writes. State changes synchronize through the existing SSE/metadata flow.
-Forks, resumes, replacements, and workflow children start with auto off.
+Forks and workflow children do not inherit saved Auto authorization. Resuming or
+replacing a process for the same native conversation restores its own choice.
+The browser never copies Auto state between sessions or persists it globally.
 
 `fastMode` is likewise `null` until the managed `pi-openai-fast` extension reports
 `{available, enabled}` through `agentbox-fast` status. The active-session toolbar’s OpenAI fast mode control (beside Auto, not global Settings)
@@ -357,8 +361,9 @@ user request and recent follow-ups guide classification, including explicitly
 requested normal commit/push operations. Installed skill Markdown reads default
 to no prompt, but explicit ask/deny rules and sensitive-path guards still win.
 There is no silent-denial threshold. Denied, cancelled, timed-out, or unavailable
-human approval still blocks; no classifier failure grants permission. Auto is a
-per-process opt-in, starts off, and resets on session start/switch/fork/tree/shutdown.
+human approval still blocks; no classifier failure grants permission. Explicit
+Auto/review choices belong to the native session and restore on resume; they do
+not authorize another session, fork, or workflow child.
 Disabling it cancels an in-flight classification without accepting a late allow.
 Existing pending approvals still require a human answer. No approval overrides
 rule denials. See the main README's Pi auto permissions section for classifier

@@ -15,6 +15,7 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
   const signals: string[] = []
   const events = new Map<string, (request: unknown) => void>()
   const pi = {
+    appendEntry() {},
     events: { on: (name: string, handler: (request: unknown) => void) => events.set(name, handler) },
     registerCommand(name: string, command: any) { commands.set(name, command) },
     on(name: string, handler: Handler) {
@@ -71,6 +72,7 @@ function context(overrides: any = {}) {
     signal: undefined,
     ui: { select: async () => "Deny", setStatus: () => {}, notify: () => {} },
     ...overrides,
+    sessionManager: { getSessionId: () => "test-session", getEntries: () => [], ...overrides.sessionManager },
   }
 }
 
@@ -544,7 +546,9 @@ const fallbackTitle = "Approve tool call? Auto could not approve; read: README.m
 
 // Every auto failure asks immediately; approval is still single-call only.
 for (const failure of ["deny", "malformed", "error", "timeout", "missing-model", "missing-auth", "oversized-input", "image-only-latest"]) {
-  const probe = autoProbe({ auto: { ...autoSettings, timeout: 5 } })
+  // Only the timeout case needs a tiny deadline; loaded CI builders must not
+  // time out before the malformed/error fixtures reach their classifier.
+  const probe = autoProbe({ auto: { ...autoSettings, timeout: failure === "timeout" ? 5 : 1000 } })
   let attempts = 0
   probe.ctx.modelRegistry.complete = async () => {
     attempts++
