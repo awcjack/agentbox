@@ -19,6 +19,31 @@ export function compareArchivedSessions(a, b) {
   return String(b.createdAt || b.modifiedAt || "").localeCompare(String(a.createdAt || a.modifiedAt || ""));
 }
 
+// Folder membership follows the native conversation across runtime restarts.
+export function sessionFolderKey(session, historical = false) {
+  return JSON.stringify([session.profile, historical ? session.id : session.nativeSessionId || `runtime:${session.id}`]);
+}
+export function normalizeFolder(value) {
+  const parts = value.trim().split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length > 12 || parts.some((part) => part === "." || part === ".." || part.length > 80)) {
+    throw new Error("Use up to 12 folder levels, with names of at most 80 characters (not . or ..).");
+  }
+  return parts.join("/");
+}
+export function readSessionFolders(storage) {
+  try {
+    const entries = JSON.parse(storage?.getItem("agentbox.pi.session-folders.v1") || "[]");
+    return new Map(entries.filter((entry) => Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string" && typeof entry[1] === "string").map(([key, value]) => [key, normalizeFolder(value)]));
+  } catch { return new Map(); }
+}
+export function saveSessionFolders(storage, folders) {
+  try {
+    if (!storage) return false;
+    storage.setItem("agentbox.pi.session-folders.v1", JSON.stringify([...folders]));
+    return true;
+  } catch { return false; }
+}
+
 export function initSidebarResize(doc = document) {
   const win = doc.defaultView;
   const workspace = doc.getElementById("workspace");

@@ -20,12 +20,28 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   supports Left/Right arrows, Shift for larger steps, and Home/End for limits.
   The transcript and composer resize with it. Drag below 180px (or press Home)
   to collapse to a 64px conversation-bubble rail; drag right or press Right to
-  expand. Bubbles have status-colored auras and title/status tooltips.
+  expand. Bubbles have status-colored auras and title/status previews on hover
+  or keyboard focus, displayed outside the scrolling rail.
+- Use a row's **↳ Move to folder** button to create or assign nested folders such
+  as `Work/Agentbox`; an empty path ungroups it. Folder membership is saved on
+  the server, keyed by profile and native conversation ID, so it follows
+  resume/archive and runtime restarts across browsers and devices. Other devices
+  refresh assignments every 15 seconds, or immediately with Refresh. Changes
+  require `sessions:write` and a persisted session in the profile's `sessionDir`.
+  Existing browser-saved folders are imported at login when no server assignment
+  exists; failed imports are retained locally for retry. Server assignments win.
+  Folders group each lifecycle section; closed folders still expose session
+  bubbles when the sidebar is collapsed.
+- Use **✎ Rename session** on a running runtime row to persist its name through
+  Pi's `set_session_name` RPC (write access required). Reopen historical or
+  archived conversations first to rename them. Cancel leaves the name unchanged.
 - Unread completed runs show **Finished (unread)** in blue, distinct from neutral
   **Idle** after viewing the conversation in a focused tab or restarting Agentbox.
   Running is green, reply-needed yellow, and action-needed peach.
 - Bearer token/password input, held only in memory and cleared on logout or
-  page exit. No cookies, local/session storage, IndexedDB, or service worker.
+  page exit. Credentials never enter cookies, local/session storage, IndexedDB,
+  or a service worker. Display preferences use local storage; session folder
+  assignments are server-side (legacy local assignments are removed after import).
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,
   streaming steering/follow-up selection, queue counts, and stop-current-run.
 - End & archive with confirmation uses `DELETE /v1/sessions/:id` to stop the

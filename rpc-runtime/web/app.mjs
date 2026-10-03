@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
+import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
@@ -13,6 +13,12 @@ import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./m
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
 const hiddenModels = readHiddenModels(preferenceStorage);
+const sessionFolders = new Map();
+const legacyFolders = readSessionFolders(preferenceStorage);
+const folderProfiles = new Set(), movingFolders = new Set();
+let folderPoll = null, folderVersion = 0, foldersLoading = false;
+const folderOpen = new Map();
+const renaming = new Set();
 
 initSidebarResize();
 
@@ -274,12 +280,133 @@ function displayTitle(session) {
   const saved = history.find((item) => item.profile === session?.profile && item.id === session?.nativeSessionId);
   return sessionTitle(session, ctx?.state, records.get(session?.id)?.messages, saved);
 }
+const sessionPreview = element("div", "session-preview");
+sessionPreview.id = "session-preview";
+sessionPreview.setAttribute("role", "tooltip");
+sessionPreview.hidden = true;
+document.body.append(sessionPreview);
+function hideSessionPreview() { sessionPreview.hidden = true; }
+function previewSession(button) {
+  if (!$('workspace').classList.contains('sidebar-collapsed') || window.matchMedia('(max-width: 720px)').matches) return;
+  sessionPreview.textContent = button.title;
+  sessionPreview.hidden = false;
+  const rect = button.getBoundingClientRect();
+  sessionPreview.style.left = `${rect.right + 12}px`;
+  sessionPreview.style.top = `${Math.max(8, Math.min(rect.top, window.innerHeight - sessionPreview.offsetHeight - 8))}px`;
+}
+$("sessions").addEventListener("scroll", hideSessionPreview, true);
+window.addEventListener("resize", hideSessionPreview);
+document.addEventListener("keydown", (event) => { if (event.key === "Escape") hideSessionPreview(); });
+async function renameSession(session) {
+  if (renaming.has(session.id)) return;
+  const name = window.prompt("Session name", displayTitle(session));
+  if (name === null) return;
+  if (!name.trim()) { showNotice("Session name cannot be empty.", true); return; }
+  const ownEpoch = epoch;
+  renaming.add(session.id);
+  renderSessions();
+  try {
+    await api.request(`/v1/sessions/${encodeURIComponent(session.id)}/rpc`, {
+      body: { type: "set_session_name", name: name.trim() }, nativeSessionId: session.nativeSessionId, signal: auth.signal,
+    });
+    if (ownEpoch !== epoch) return;
+    const meta = sessions.find((item) => item.id === session.id);
+    if (meta) meta.name = name.trim();
+    const saved = history.find((item) => item.profile === session.profile && item.id === session.nativeSessionId);
+    if (saved) saved.name = name.trim();
+    if (current?.id === session.id) { current.state.sessionName = name.trim(); requestRefresh(current); }
+    // Refresh the runtime's cached name even when renaming a non-selected row.
+    await api.request(`/v1/sessions/${encodeURIComponent(session.id)}/rpc`, { body: { type: "get_state" }, signal: auth.signal });
+    if (ownEpoch === epoch) showNotice("Session renamed.");
+  } catch (error) { if (ownEpoch === epoch) report(error, null, { write: true }); }
+  finally { renaming.delete(session.id); if (ownEpoch === epoch) renderSessions(); }
+}
+const folderPath = (profile) => `/v1/session-folders?profile=${encodeURIComponent(profile)}`;
+async function refreshFolders(migrate = false) {
+  if (!token || foldersLoading || movingFolders.size) return;
+  const ownEpoch = epoch, version = folderVersion;
+  foldersLoading = true;
+  try {
+    for (const profile of profiles) {
+      try {
+        const result = await api.request(folderPath(profile), { signal: auth.signal });
+        if (ownEpoch !== epoch || version !== folderVersion) return;
+        const assignments = new Map((result.folders || []).map(({ id, folder }) => [sessionFolderKey({ profile, id }, true), folder]));
+        // One-time migration: existing server assignments win. Retain failed
+        // imports locally so they can be retried on the next login.
+        if (migrate) {
+          for (const [key, folder] of legacyFolders) {
+            let identity;
+            try { identity = JSON.parse(key); } catch { continue; }
+            if (!Array.isArray(identity) || identity[0] !== profile || typeof identity[1] !== "string" || identity[1].startsWith("runtime:")) continue;
+            if (!assignments.has(key)) {
+              try {
+                const imported = await api.request(folderPath(profile), { method: "PUT", body: { id: identity[1], folder, importOnly: true }, signal: auth.signal });
+                if (ownEpoch !== epoch) return;
+                assignments.set(key, imported.folder);
+              } catch (error) {
+                if (ownEpoch !== epoch) return;
+                if (error.status === 401) { report(error); return; }
+                showNotice(`A browser-saved folder could not be imported: ${error.message}`, true);
+                continue;
+              }
+            }
+            legacyFolders.delete(key);
+            saveSessionFolders(preferenceStorage, legacyFolders);
+          }
+        }
+        if (ownEpoch !== epoch || version !== folderVersion) return;
+        for (const key of sessionFolders.keys()) {
+          if (JSON.parse(key)[0] === profile) sessionFolders.delete(key);
+        }
+        for (const [key, folder] of assignments) sessionFolders.set(key, folder);
+        folderProfiles.add(profile);
+      } catch (error) {
+        if (ownEpoch !== epoch) return;
+        if (error.status === 401) { report(error); return; }
+        if (migrate) showNotice(`Session folders unavailable for ${profile}: ${error.message}`, true);
+      }
+    }
+  } finally {
+    if (ownEpoch === epoch) {
+      foldersLoading = false;
+      renderSessions();
+      clearTimeout(folderPoll);
+      folderPoll = setTimeout(() => refreshFolders(), 15000);
+    }
+  }
+}
+async function moveSession(session, historical) {
+  const key = sessionFolderKey(session, historical);
+  if (foldersLoading || movingFolders.has(key) || !folderProfiles.has(session.profile)) return;
+  const value = window.prompt("Folder path (for example Work/Agentbox). Leave empty to ungroup. Saved on the server and shared across devices.", sessionFolders.get(key) || "");
+  if (value === null) return;
+  const ownEpoch = epoch;
+  movingFolders.add(key); folderVersion++; renderSessions();
+  try {
+    const folder = normalizeFolder(value);
+    await api.request(folderPath(session.profile), { method: "PUT", body: { id: historical ? session.id : session.nativeSessionId, folder }, signal: auth.signal });
+    if (ownEpoch !== epoch) return;
+    if (folder) sessionFolders.set(key, folder); else sessionFolders.delete(key);
+    legacyFolders.delete(key); saveSessionFolders(preferenceStorage, legacyFolders);
+    showNotice("Folder saved on the server and shared across devices.");
+  } catch (error) { if (ownEpoch === epoch) report(error, null, { write: true }); }
+  finally {
+    if (ownEpoch === epoch) {
+      movingFolders.delete(key); folderVersion++; renderSessions();
+      clearTimeout(folderPoll); folderPoll = setTimeout(() => refreshFolders(), 15000);
+    }
+  }
+}
 function renderSessions() {
+  hideSessionPreview();
   updateTabTitle();
   const root = $("sessions");
   const focusedKey = root.contains(document.activeElement) ? document.activeElement.dataset.sessionKey : null;
-  const archiveOpen = root.querySelector("details")?.open || false;
-  const archiveFocused = document.activeElement === root.querySelector("summary");
+  const focusedFolder = root.contains(document.activeElement) ? document.activeElement.dataset.folderKey : null;
+  const hoveredKey = root.querySelector(".session-item:hover")?.dataset.sessionKey;
+  const archiveOpen = root.querySelector(".archived-sessions")?.open || false;
+  const archiveFocused = document.activeElement === root.querySelector(".archived-sessions > summary");
   root.replaceChildren();
   const filter = $("profile-filter").value;
   const live = sessions.filter((session) => !filter || session.profile === filter);
@@ -303,16 +430,64 @@ function renderSessions() {
     button.append(copy);
     button.addEventListener("click", () => historical ? resume(session) : activate(session));
     button.disabled = historical ? createDenied || createBusy : Boolean(records.get(session.id)?.ending);
-    container.append(button);
-    if (focusedKey === button.dataset.sessionKey) button.focus({ preventScroll: true });
+    button.addEventListener("pointerenter", () => previewSession(button));
+    button.addEventListener("pointerleave", hideSessionPreview);
+    button.addEventListener("focus", () => previewSession(button));
+    button.addEventListener("blur", hideSessionPreview);
+    const wrapper = element("div", "session-row");
+    const actions = element("div", "session-actions");
+    const rename = element("button", "text-button", "✎");
+    rename.title = historical ? "Reopen this conversation to rename it" : "Rename session";
+    rename.setAttribute("aria-label", `${rename.title}: ${displayTitle(session)}`);
+    rename.dataset.sessionKey = `${button.dataset.sessionKey}:rename`;
+    rename.disabled = historical || readOnly || session.status !== "running" || !session.nativeSessionId || renaming.has(session.id) || Boolean(records.get(session.id)?.ending);
+    rename.addEventListener("click", () => renameSession(session));
+    const move = element("button", "text-button", "↳");
+    move.dataset.sessionKey = `${button.dataset.sessionKey}:folder`;
+    move.disabled = readOnly || foldersLoading || !folderProfiles.has(session.profile) || movingFolders.has(sessionFolderKey(session, historical)) || (!historical && !session.nativeSessionId);
+    move.title = "Move to folder";
+    move.setAttribute("aria-label", `Move to folder: ${displayTitle(session)}`);
+    move.addEventListener("click", () => moveSession(session, historical));
+    actions.append(rename, move);
+    wrapper.append(button, actions);
+    container.append(wrapper);
+    for (const control of [button, rename, move]) {
+      if (focusedKey === control.dataset.sessionKey) control.focus({ preventScroll: true });
+    }
+    if (hoveredKey === button.dataset.sessionKey) previewSession(button);
+  }
+  function grouped(items, historical, container, sectionKey) {
+    const folders = new Map();
+    for (const session of items) {
+      const path = sessionFolders.get(sessionFolderKey(session, historical)) || "";
+      let target = container, prefix = "";
+      for (const name of path.split("/").filter(Boolean)) {
+        prefix += `/${name}`;
+        if (!folders.has(prefix)) {
+          const details = element("details", "session-folder");
+          const key = `${sectionKey}:${prefix}`;
+          details.open = folderOpen.get(key) !== false;
+          const summary = element("summary", "folder-heading", name);
+          summary.dataset.folderKey = key;
+          const children = element("div", "folder-children");
+          details.append(summary, children);
+          details.addEventListener("toggle", () => { if (details.isConnected) folderOpen.set(key, details.open); });
+          target.append(details);
+          if (focusedFolder === key) summary.focus({ preventScroll: true });
+          folders.set(prefix, children);
+        }
+        target = folders.get(prefix);
+      }
+      row(session, historical, target);
+    }
   }
   if (live.length) root.append(element("div", "list-heading", "IN THIS RUNTIME"));
-  for (const session of live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt)))) row(session, false);
+  grouped(live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))), false, root, "live");
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
   const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
   const past = available.filter((session) => !isArchived(session));
   if (past.length) root.append(element("div", "list-heading", "PICK UP WHERE YOU LEFT OFF"));
-  for (const session of past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))) row(session, true);
+  grouped(past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))), true, root, "past");
   if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   if (token) {
     const archived = available.filter(isArchived).sort(compareArchivedSessions);
@@ -322,7 +497,7 @@ function renderSessions() {
     section.append(summary);
     root.append(section);
     section.append(element("p", "sidebar-empty", archived.length ? "Reopen to read or continue. Use End & archive when done. Reopening starts a Pi process." : "No archived conversations in this profile selection."));
-    for (const session of archived) row(session, true, section);
+    grouped(archived, true, section, "archive");
     if (archiveFocused) summary.focus({ preventScroll: true });
   }
 }
@@ -349,6 +524,7 @@ function scheduleSessionPoll() {
 }
 async function refreshSessions() {
   const version = ++listVersion, ownEpoch = epoch;
+  refreshFolders();
   try {
     const result = await api.request("/v1/sessions", { signal: auth.signal });
     if (ownEpoch !== epoch || version !== listVersion) return;
@@ -1266,6 +1442,8 @@ function logout(message = "") {
   epoch++; selection++; listVersion++;
   token = ""; auth.abort(); auth = new AbortController();
   clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
+  clearTimeout(folderPoll); folderPoll = null; folderVersion++;
+  foldersLoading = false; sessionFolders.clear(); folderProfiles.clear(); movingFolders.clear(); folderOpen.clear();
   attention.clear(); document.title = baseTitle;
   dismissedCommands = null; commandKey = ""; hideCommandSuggestions();
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
@@ -1299,7 +1477,7 @@ $("login-form").addEventListener("submit", async (event) => {
       const option = element("option", "", profile); option.value = profile;
       $("profile-filter").append(option); $("new-profile").append(option.cloneNode(true));
     }
-    $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshSessions(); scheduleSessionPoll();
+    $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshFolders(true); refreshSessions(); scheduleSessionPoll();
   } catch (error) { if (ownEpoch === epoch) logout(error.message); }
   finally { if (ownEpoch === epoch) $("login-submit").disabled = false; }
 });

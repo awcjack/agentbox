@@ -15,6 +15,7 @@ const models = [
   { provider: "fixture", id: "pi-reasoning", name: "Pi Reasoning", input: ["text", "image"] },
 ];
 const sessions = new Map(), saved = new Map(), archived = new Set(), calls = [], serverErrors = [];
+const serverFolders = new Map();
 const availableThinking = (session) => session.model?.id === "pi-reasoning" ? ["off", "minimal", "low", "medium", "high", "xhigh", "max"] : ["off"];
 const entryIds = new WeakMap();
 function conversationSnapshot(session) {
@@ -67,11 +68,18 @@ const server = createServer(async (request, response) => {
     }
     if (request.headers.authorization !== "Bearer smoke-token") return json(response, 401, { error: { code: "unauthorized", message: "Invalid smoke token" } });
     let body;
-    if (request.method === "POST") {
+    if (["POST", "PUT"].includes(request.method)) {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       body = JSON.parse(Buffer.concat(chunks).toString());
     }
     if (url.pathname === "/v1/profiles") return json(response, 200, { profiles: ["default"] });
+    if (url.pathname === "/v1/session-folders") {
+      if (request.method === "GET") return json(response, 200, { folders: [...serverFolders].map(([id, folder]) => ({ id, folder })) });
+      assert.equal(request.method, "PUT");
+      if (!saved.has(body.id)) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
+      if (!body.importOnly || !serverFolders.has(body.id)) serverFolders.set(body.id, body.folder);
+      return json(response, 200, { id: body.id, folder: serverFolders.get(body.id) });
+    }
     if (url.pathname === "/v1/history") return json(response, 200, { sessions: [...saved.values()].filter((session) => url.searchParams.get("includeArchived") === "true" || !archived.has(session.nativeSessionId)).map((session) => ({ id: session.nativeSessionId, name: session.name, profile: "default", cwd: "/workspace/project", modifiedAt: session.modifiedAt, archived: archived.has(session.nativeSessionId) })) });
     if (url.pathname === "/v1/sessions") {
       if (request.method === "GET") return json(response, 200, { sessions: [...sessions.values()].map(meta) });
@@ -184,6 +192,7 @@ const server = createServer(async (request, response) => {
         await new Promise((resolve) => { session.releaseThinking = resolve; });
       }
     }
+    else if (body.type === "set_session_name") session.name = body.name;
     else if (body.type === "set_model") {
       session.model = models.find((model) => model.id === body.modelId); data = session.model;
       if (!availableThinking(session).includes(session.thinkingLevel)) session.thinkingLevel = "off";
@@ -345,6 +354,53 @@ try {
       await until(() => session.clients.size === 1 && page.locator("#connection-label").textContent().then((text) => text === "Connected"), "initial stream connected");
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "session ready");
       assert.equal(session.subscriptions, 1);
+      // Folder paths nest rows, and collapsed previews escape the scroll container.
+      await openSidebar();
+      page.once("dialog", (dialog) => dialog.accept("Work/Agentbox"));
+      await page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).click();
+      await until(() => page.locator(".session-folder .session-folder .session-item").filter({ hasText: session.name }).count().then((count) => count === 1), "folder write reflected in sidebar");
+      assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox");
+      const otherDevice = await browser.newContext();
+      try {
+        await otherDevice.addInitScript(({ id }) => localStorage.setItem("agentbox.pi.session-folders.v1", JSON.stringify([[JSON.stringify(["default", id]), "Stale/local"]])), { id: session.nativeSessionId });
+        const otherPage = await otherDevice.newPage();
+        await otherPage.goto(origin); await login(otherPage);
+        await until(() => otherPage.locator(".session-folder .session-folder .session-item").filter({ hasText: session.name }).count().then((count) => count === 1), "fresh browser loads server folders");
+        assert.equal(await otherPage.evaluate(() => localStorage.getItem("agentbox.pi.session-folders.v1")), "[]", "existing server folder wins and removes migrated local entry");
+      } finally { await otherDevice.close(); }
+      if (label === "desktop") {
+        await page.locator(".folder-heading").filter({ hasText: /^Work$/ }).click();
+        await page.locator("#sidebar-resizer").press("Home");
+        const row = page.locator(".session-item").filter({ hasText: session.name });
+        await row.hover();
+        assert.equal(await page.locator("#session-preview").isVisible(), true);
+        assert.ok((await page.locator("#session-preview").textContent()).includes(session.name));
+        await page.locator("#sidebar-resizer").press("ArrowRight");
+        await page.locator(".folder-heading").filter({ hasText: /^Work$/ }).click();
+      }
+      const originalName = session.name;
+      page.once("dialog", (dialog) => dialog.accept(`${originalName} renamed`));
+      await page.getByRole("button", { name: `Rename session: ${originalName}`, exact: true }).click();
+      await until(() => session.name === `${originalName} renamed`, "native rename received");
+      await until(() => page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).isEnabled(), "rename finished");
+      page.once("dialog", (dialog) => dialog.accept(originalName));
+      await page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).click();
+      await until(() => session.name === originalName, "original name restored");
+      page.once("dialog", (dialog) => dialog.accept(""));
+      await page.getByRole("button", { name: `Move to folder: ${originalName}`, exact: true }).click();
+      await until(() => page.locator(".session-folder").count().then((count) => count === 0), "server folder removed");
+      assert.equal(serverFolders.get(session.nativeSessionId), "");
+      const legacyDevice = await browser.newContext();
+      try {
+        await legacyDevice.addInitScript(({ id }) => localStorage.setItem("agentbox.pi.session-folders.v1", JSON.stringify([[JSON.stringify(["default", id]), "Stale/local"]])), { id: session.nativeSessionId });
+        const legacyPage = await legacyDevice.newPage();
+        await legacyPage.goto(origin); await login(legacyPage);
+        await until(() => legacyPage.evaluate(() => localStorage.getItem("agentbox.pi.session-folders.v1") === "[]"), "legacy migration respects server ungrouping");
+        assert.equal(serverFolders.get(session.nativeSessionId), "");
+        assert.equal(await legacyPage.locator(".session-folder").count(), 0);
+      } finally { await legacyDevice.close(); }
+      await page.locator(".session-item").filter({ hasText: session.name }).click();
+      await drawerClosed();
       // Composer sizes work on desktop and mobile without losing the draft.
       const promptHeight = () => page.locator("#prompt").evaluate(node => node.getBoundingClientRect().height);
       assert.equal(await promptHeight(), 44);

@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol } from "./sidebar.mjs";
+import {
+  compareArchivedSessions, initSidebarResize, sessionActivitySymbol,
+  sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders,
+} from "./sidebar.mjs";
 
 test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
   const expected = {
@@ -38,6 +41,124 @@ test("archive sorting supports older servers and keeps equal creation dates stab
   const legacy = { modifiedAt: "2026-01-01T00:00:00.000Z" };
   const unknown = { name: "Unknown date" };
   assert.deepEqual([unknown, legacy, first, second].sort(compareArchivedSessions), [first, second, legacy, unknown]);
+});
+
+test("folder keys follow native identity across runtime restarts and history", () => {
+  const live = { profile: "work", id: "runtime-one", nativeSessionId: "native-one" };
+  const key = sessionFolderKey(live);
+  assert.equal(key, JSON.stringify(["work", "native-one"]));
+  assert.equal(sessionFolderKey({ ...live, id: "runtime-two" }), key);
+  assert.equal(sessionFolderKey({ profile: "work", id: "native-one", nativeSessionId: "ignored" }, true), key);
+  assert.notEqual(sessionFolderKey({ ...live, nativeSessionId: "native-two" }), key);
+});
+
+test("folder keys separate profiles, runtime fallbacks, and delimiter-like identities", () => {
+  const keys = [];
+  for (const profile of ["work", "personal"]) {
+    const runtime = { profile, id: "same" };
+    const native = { ...runtime, nativeSessionId: "same" };
+    const runtimeKey = sessionFolderKey(runtime);
+    const nativeKey = sessionFolderKey(native);
+    assert.equal(runtimeKey, JSON.stringify([profile, "runtime:same"]));
+    assert.equal(sessionFolderKey({ ...runtime, nativeSessionId: "" }), runtimeKey);
+    assert.equal(sessionFolderKey(runtime, true), nativeKey);
+    assert.notEqual(sessionFolderKey({ ...runtime, id: "other" }), runtimeKey);
+    keys.push(runtimeKey, nativeKey);
+  }
+  assert.equal(new Set(keys).size, keys.length);
+  assert.notEqual(
+    sessionFolderKey({ profile: "a:b", nativeSessionId: "c" }),
+    sessionFolderKey({ profile: "a", nativeSessionId: "b:c" }),
+  );
+  const escaped = { profile: 'work/"team"', nativeSessionId: 'id\\with,delimiters' };
+  assert.deepEqual(JSON.parse(sessionFolderKey(escaped)), [escaped.profile, escaped.nativeSessionId]);
+});
+
+test("folder normalization trims nested levels, drops empty levels, and is idempotent", () => {
+  for (const [input, expected] of [
+    [" / Projects // Client A / Design / ", "Projects/Client A/Design"],
+    ["\tWork /\n Notes\t/", "Work/Notes"],
+    ["", ""], [" / // \t ", ""],
+    [" .hidden / release..notes / 日本語 ", ".hidden/release..notes/日本語"],
+    [Array(12).fill("level").join("/"), Array(12).fill("level").join("/")],
+    [` ${"x".repeat(80)} `, "x".repeat(80)],
+  ]) {
+    assert.equal(normalizeFolder(input), expected);
+    assert.equal(normalizeFolder(expected), expected);
+  }
+});
+
+test("folder normalization rejects traversal, excessive depth, and oversized names", () => {
+  for (const input of [
+    ".", "..", "Work/./Notes", "Work/ ../Notes", "../Work", "Work/..",
+    Array(13).fill("level").join("/"), `Work/${"x".repeat(81)}`,
+  ]) {
+    assert.throws(() => normalizeFolder(input), /Use up to 12 folder levels/, input);
+  }
+});
+
+const folderStorageKey = "agentbox.pi.session-folders.v1";
+
+function folderStorage(initial = null) {
+  const values = new Map(initial === null ? [] : [[folderStorageKey, initial]]);
+  return {
+    values,
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
+test("folder storage roundtrips profile-scoped identities and replaces saved assignments", () => {
+  const storage = folderStorage();
+  assert.deepEqual(readSessionFolders(storage), new Map());
+  const folders = new Map([
+    [sessionFolderKey({ profile: "work", id: "one", nativeSessionId: "shared" }), "Projects/Client A"],
+    [sessionFolderKey({ profile: "personal", id: "shared" }, true), "Personal/Notes"],
+    [sessionFolderKey({ profile: "work", id: "one" }), ""],
+  ]);
+  assert.equal(saveSessionFolders(storage, folders), true);
+  assert.deepEqual([...storage.values.keys()], [folderStorageKey]);
+  assert.deepEqual(JSON.parse(storage.values.get(folderStorageKey)), [...folders]);
+  const restored = readSessionFolders(storage);
+  assert.deepEqual(restored, folders);
+  assert.notEqual(restored, folders);
+  assert.equal(saveSessionFolders(storage, new Map()), true);
+  assert.equal(storage.values.get(folderStorageKey), "[]");
+  assert.deepEqual(readSessionFolders(storage), new Map());
+});
+
+test("folder storage filters malformed entries and normalizes nested assignments", () => {
+  const storage = folderStorage(JSON.stringify([
+    ["valid", " / Projects // Notes / "], ["root", " / "],
+    null, 42, "bad", {}, [], ["missing"], ["extra", "folder", "value"],
+    [7, "folder"], ["null", null], ["object", {}], ["number", 5],
+    ["duplicate", "Old"], ["duplicate", " New / Child "],
+  ]));
+  assert.deepEqual(readSessionFolders(storage), new Map([
+    ["valid", "Projects/Notes"], ["root", ""], ["duplicate", "New/Child"],
+  ]));
+});
+
+test("folder storage safely discards corrupt JSON, invalid containers, and invalid paths", () => {
+  for (const raw of [
+    "{broken", "null", "{}", '"text"', "42", "true", "",
+    ...["Work/../Notes", Array(13).fill("level").join("/"), "x".repeat(81)]
+      .map((path) => JSON.stringify([["valid", "Work"], ["invalid", path]])),
+  ]) {
+    assert.deepEqual(readSessionFolders(folderStorage(raw)), new Map(), raw);
+  }
+});
+
+test("folder storage tolerates unavailable APIs and read or write failures", () => {
+  const folders = new Map([["key", "Work/Notes"]]);
+  for (const storage of [undefined, null, {}, {
+    getItem() { throw new Error("Storage access denied"); },
+    setItem() { throw new Error("Storage quota exceeded"); },
+  }]) {
+    assert.deepEqual(readSessionFolders(storage), new Map());
+    assert.equal(saveSessionFolders(storage, folders), false);
+  }
+  assert.deepEqual(folders, new Map([["key", "Work/Notes"]]));
 });
 
 function setup(viewport = 1200) {
