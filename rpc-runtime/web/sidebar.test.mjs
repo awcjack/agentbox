@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  compareArchivedSessions, initSidebarResize, sessionActivitySymbol,
+  compareArchivedSessions, initSidebarResize, initSessionDragDrop, sessionActivitySymbol,
   sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders,
 } from "./sidebar.mjs";
 
@@ -266,5 +266,180 @@ test("untouched defaults follow breakpoints and non-primary buttons do not drag"
   for (const values of [{ button: 2, isPrimary: true }, { button: 0, isPrimary: false }]) {
     fire("pointerdown", { ...values, pointerId: 1, clientX: 285 });
     assert.equal(captured.size, 0);
+  }
+});
+
+function dragSetup() {
+  class Element extends EventTarget {
+    constructor(parent, dataset = {}, sessionItem = false) {
+      super();
+      this.parent = parent;
+      this.dataset = dataset;
+      this.sessionItem = sessionItem;
+      this.draggable = sessionItem;
+      this.classes = new Set();
+      this.classList = { add: (name) => this.classes.add(name), remove: (name) => this.classes.delete(name) };
+    }
+    contains(node) {
+      for (; node; node = node.parent) if (node === this) return true;
+      return false;
+    }
+    closest(selector) {
+      for (let node = this; node; node = node.parent) {
+        if (selector === ".session-item" ? node.sessionItem : Object.hasOwn(node.dataset, "folderPath")) return node;
+      }
+      return null;
+    }
+  }
+  const outside = new Element(null, { folderPath: "Outside" });
+  const root = new Element(outside);
+  root.ownerDocument = new EventTarget();
+  const button = new Element(root, { sessionKey: "test-key" }, true);
+  const icon = new Element(button);
+  const folder = new Element(root, { folderPath: "Work" });
+  const nested = new Element(folder, { folderPath: "Work/Notes" });
+  const label = new Element(nested);
+  const ungrouped = new Element(root, { folderPath: "" });
+  const source = { session: { id: "test-id" }, historical: true };
+  const moves = [];
+  let allowed = true;
+  let ends = 0;
+  const controller = initSessionDragDrop(root, {
+    getSource: (key) => key === "test-key" ? source : undefined,
+    canMove: (candidate) => { assert.equal(candidate, source); return allowed; },
+    move: (...args) => {
+      assert.equal(controller.isDragging(), false);
+      for (const target of [folder, nested, ungrouped]) assert.equal(target.classes.has("drag-over"), false);
+      moves.push(args);
+    },
+    onEnd: () => { assert.equal(controller.isDragging(), false); ends++; },
+  });
+  const payload = new Map();
+  const transfer = { setData: (type, value) => payload.set(type, value) };
+  function fire(type, target = icon, values = {}, dispatcher = root) {
+    const event = new Event(type, { cancelable: true });
+    Object.defineProperty(event, "target", { value: target });
+    Object.assign(event, { dataTransfer: transfer, ...values });
+    dispatcher.dispatchEvent(event);
+    return event;
+  }
+  return { root, outside, button, icon, folder, nested, label, ungrouped, source, moves, controller, transfer, payload, fire,
+    setAllowed: (value) => { allowed = value; }, ends: () => ends };
+}
+
+test("session drag moves to the closest nested folder, clears before move, and ends once", () => {
+  const s = dragSetup();
+  s.fire("dragstart");
+  assert.equal(s.controller.isDragging(), true);
+  assert.equal(s.transfer.effectAllowed, "move");
+  assert.deepEqual([...s.payload], [["application/x-agentbox-session", "session"], ["text/plain", "session"]]);
+  assert.equal(s.fire("dragover", s.folder).defaultPrevented, true);
+  assert.equal(s.folder.classes.has("drag-over"), true);
+  assert.equal(s.fire("dragover", s.label).defaultPrevented, true);
+  assert.equal(s.transfer.dropEffect, "move");
+  assert.equal(s.folder.classes.has("drag-over"), false);
+  assert.equal(s.nested.classes.has("drag-over"), true);
+  assert.equal(s.fire("drop", s.label).defaultPrevented, true);
+  s.fire("drop", s.label);
+  s.fire("dragend");
+  assert.deepEqual(s.moves, [[s.source, "Work/Notes"]]);
+  assert.equal(s.ends(), 1);
+});
+
+test("session drag supports empty Ungrouped folder paths", () => {
+  const s = dragSetup();
+  s.fire("dragstart");
+  s.fire("dragover", s.ungrouped);
+  s.fire("drop", s.ungrouped);
+  assert.deepEqual(s.moves, [[s.source, ""]]);
+});
+
+test("external transfer payloads and targets outside the root cannot authorize moves", () => {
+  const s = dragSetup();
+  s.payload.set("application/x-agentbox-session", "session");
+  s.payload.set("text/plain", "test-key");
+  assert.equal(s.fire("dragover", s.folder).defaultPrevented, false);
+  assert.equal(s.fire("drop", s.folder).defaultPrevented, false);
+  assert.equal(s.ends(), 0);
+  s.fire("dragstart", s.outside);
+  assert.equal(s.controller.isDragging(), false);
+  s.fire("dragstart");
+  for (const target of [s.root, s.outside]) {
+    assert.equal(s.fire("dragover", target).defaultPrevented, false);
+  }
+  s.fire("drop", s.root);
+  assert.equal(s.controller.isDragging(), false);
+  assert.deepEqual(s.moves, []);
+  assert.equal(s.ends(), 1);
+});
+
+test("read-only, non-draggable, and missing sessions cannot start a drag", () => {
+  for (const mode of ["read-only", "non-draggable", "missing"]) {
+    const s = dragSetup();
+    if (mode === "read-only") s.setAllowed(false);
+    if (mode === "non-draggable") s.button.draggable = false;
+    if (mode === "missing") s.button.dataset.sessionKey = "unknown";
+    assert.equal(s.fire("dragstart").defaultPrevented, true);
+    assert.equal(s.controller.isDragging(), false);
+    assert.equal(s.fire("dragover", s.folder).defaultPrevented, false);
+    s.fire("drop", s.folder);
+    assert.deepEqual(s.moves, []);
+    assert.equal(s.ends(), 0);
+  }
+});
+
+test("permission is checked again at dragover and drop", () => {
+  for (const overAfterRevocation of [true, false]) {
+    const s = dragSetup();
+    s.fire("dragstart");
+    s.fire("dragover", s.folder);
+    s.setAllowed(false);
+    if (overAfterRevocation) {
+      assert.equal(s.fire("dragover", s.folder).defaultPrevented, false);
+      assert.equal(s.folder.classes.has("drag-over"), false);
+    }
+    assert.equal(s.fire("drop", s.folder).defaultPrevented, false);
+    assert.equal(s.folder.classes.has("drag-over"), false);
+    assert.equal(s.controller.isDragging(), false);
+    assert.deepEqual(s.moves, []);
+    assert.equal(s.ends(), 1);
+  }
+});
+
+test("dragleave keeps the highlight within a target and clears it on exit", () => {
+  const s = dragSetup();
+  s.fire("dragstart");
+  s.fire("dragover", s.label);
+  s.fire("dragleave", s.label, { relatedTarget: s.nested });
+  assert.equal(s.nested.classes.has("drag-over"), true);
+  s.fire("dragleave", s.label, { relatedTarget: s.folder });
+  assert.equal(s.nested.classes.has("drag-over"), false);
+  s.fire("dragover", s.label);
+  s.fire("dragleave", s.nested, { relatedTarget: null });
+  assert.equal(s.nested.classes.has("drag-over"), false);
+  assert.equal(s.controller.isDragging(), true);
+});
+
+test("cancel, dragend, and document Escape clean up once and allow later drags", () => {
+  for (const ending of ["cancel", "dragend", "Escape"]) {
+    const s = dragSetup();
+    s.fire("dragstart");
+    s.fire("dragover", s.folder);
+    s.fire("keydown", s.root, { key: "Enter" }, s.root.ownerDocument);
+    assert.equal(s.controller.isDragging(), true);
+    if (ending === "cancel") s.controller.cancel();
+    else if (ending === "Escape") s.fire("keydown", s.root, { key: "Escape" }, s.root.ownerDocument);
+    else s.fire("dragend");
+    assert.equal(s.controller.isDragging(), false);
+    assert.equal(s.folder.classes.has("drag-over"), false);
+    s.controller.cancel();
+    s.fire("drop", s.folder);
+    s.fire("dragend");
+    assert.deepEqual(s.moves, []);
+    assert.equal(s.ends(), 1);
+    s.fire("dragstart");
+    s.fire("drop", s.folder);
+    assert.deepEqual(s.moves, [[s.source, "Work"]]);
+    assert.equal(s.ends(), 2);
   }
 });

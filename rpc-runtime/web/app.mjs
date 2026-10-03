@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders } from "./sidebar.mjs";
+import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, initSessionDragDrop } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
@@ -18,6 +18,7 @@ const legacyFolders = readSessionFolders(preferenceStorage);
 const folderProfiles = new Set(), movingFolders = new Set();
 let folderPoll = null, folderVersion = 0, foldersLoading = false;
 const folderOpen = new Map();
+const rowSources = new Map();
 const renaming = new Set();
 
 initSidebarResize();
@@ -321,9 +322,23 @@ async function renameSession(session) {
   } catch (error) { if (ownEpoch === epoch) report(error, null, { write: true }); }
   finally { renaming.delete(session.id); if (ownEpoch === epoch) renderSessions(); }
 }
+function canMoveSession({ session, historical }) {
+  return Boolean(token && !readOnly && !foldersLoading && folderProfiles.has(session.profile)
+    && !movingFolders.has(sessionFolderKey(session, historical)) && (historical || session.nativeSessionId));
+}
+const sessionDrag = initSessionDragDrop($("sessions"), {
+  getSource: (key) => rowSources.get(key),
+  canMove: canMoveSession,
+  move: ({ session, historical }, folder) => assignSessionFolder(session, historical, folder),
+  onEnd: () => renderSessions(),
+});
 const folderPath = (profile) => `/v1/session-folders?profile=${encodeURIComponent(profile)}`;
 async function refreshFolders(migrate = false) {
   if (!token || foldersLoading || movingFolders.size) return;
+  if (sessionDrag.isDragging()) {
+    clearTimeout(folderPoll); folderPoll = setTimeout(() => refreshFolders(), 15000);
+    return;
+  }
   const ownEpoch = epoch, version = folderVersion;
   foldersLoading = true;
   try {
@@ -376,11 +391,14 @@ async function refreshFolders(migrate = false) {
     }
   }
 }
-async function moveSession(session, historical) {
+function moveSession(session, historical) {
+  if (!canMoveSession({ session, historical })) return;
+  const value = window.prompt("Folder path (for example Work/Agentbox). Leave empty to ungroup. Saved on the server and shared across devices.", sessionFolders.get(sessionFolderKey(session, historical)) || "");
+  if (value !== null) return assignSessionFolder(session, historical, value);
+}
+async function assignSessionFolder(session, historical, value) {
+  if (!canMoveSession({ session, historical })) return;
   const key = sessionFolderKey(session, historical);
-  if (foldersLoading || movingFolders.has(key) || !folderProfiles.has(session.profile)) return;
-  const value = window.prompt("Folder path (for example Work/Agentbox). Leave empty to ungroup. Saved on the server and shared across devices.", sessionFolders.get(key) || "");
-  if (value === null) return;
   const ownEpoch = epoch;
   movingFolders.add(key); folderVersion++; renderSessions();
   try {
@@ -401,6 +419,9 @@ async function moveSession(session, historical) {
 function renderSessions() {
   hideSessionPreview();
   updateTabTitle();
+  // Polls and streaming events must not detach the native drag source/targets.
+  if (sessionDrag.isDragging()) return;
+  rowSources.clear();
   const root = $("sessions");
   const focusedKey = root.contains(document.activeElement) ? document.activeElement.dataset.sessionKey : null;
   const focusedFolder = root.contains(document.activeElement) ? document.activeElement.dataset.folderKey : null;
@@ -414,6 +435,8 @@ function renderSessions() {
   function row(session, historical, container = root) {
     const button = element("button", `session-item${!historical && current?.id === session.id ? " active" : ""}`);
     button.dataset.sessionKey = `${historical ? session.profile : "runtime"}:${session.id}`;
+    rowSources.set(button.dataset.sessionKey, { session, historical });
+    button.draggable = canMoveSession({ session, historical });
     button.dataset.activity = historical ? "history" : attention.activity(session);
     if (!historical && current?.id === session.id) button.setAttribute("aria-current", "page");
     button.title = `${displayTitle(session)}\n${historical ? "Resume" : activityLabel(session)} / ${session.profile}`;
@@ -444,7 +467,7 @@ function renderSessions() {
     rename.addEventListener("click", () => renameSession(session));
     const move = element("button", "text-button", "↳");
     move.dataset.sessionKey = `${button.dataset.sessionKey}:folder`;
-    move.disabled = readOnly || foldersLoading || !folderProfiles.has(session.profile) || movingFolders.has(sessionFolderKey(session, historical)) || (!historical && !session.nativeSessionId);
+    move.disabled = !canMoveSession({ session, historical });
     move.title = "Move to folder";
     move.setAttribute("aria-label", `Move to folder: ${displayTitle(session)}`);
     move.addEventListener("click", () => moveSession(session, historical));
@@ -457,29 +480,46 @@ function renderSessions() {
     if (hoveredKey === button.dataset.sessionKey) previewSession(button);
   }
   function grouped(items, historical, container, sectionKey) {
+    if (!items.length) return;
     const folders = new Map();
+    function group(name, path, parent) {
+      const details = element("details", "session-folder");
+      details.dataset.folderPath = path;
+      const key = `${sectionKey}:${path ? `/${path}` : ""}`;
+      details.open = folderOpen.get(key) !== false;
+      const summary = element("summary", "folder-heading", name);
+      summary.dataset.folderKey = key;
+      summary.title = path ? `Toggle ${path}; drop a session here to move it` : "Toggle Ungrouped; drop a session here to remove it from its folder";
+      const children = element("div", "folder-children");
+      details.append(summary, children);
+      // Save immediately rather than waiting for the queued native toggle event:
+      // a poll may rebuild this element before that event runs.
+      summary.addEventListener("click", (event) => {
+        event.preventDefault();
+        details.open = !details.open;
+        folderOpen.set(key, details.open);
+      });
+      details.addEventListener("toggle", () => { if (details.isConnected) folderOpen.set(key, details.open); });
+      parent.append(details);
+      if (focusedFolder === key) summary.focus({ preventScroll: true });
+      return children;
+    }
+    const ungrouped = [];
     for (const session of items) {
       const path = sessionFolders.get(sessionFolderKey(session, historical)) || "";
+      if (!path) { ungrouped.push(session); continue; }
       let target = container, prefix = "";
-      for (const name of path.split("/").filter(Boolean)) {
-        prefix += `/${name}`;
-        if (!folders.has(prefix)) {
-          const details = element("details", "session-folder");
-          const key = `${sectionKey}:${prefix}`;
-          details.open = folderOpen.get(key) !== false;
-          const summary = element("summary", "folder-heading", name);
-          summary.dataset.folderKey = key;
-          const children = element("div", "folder-children");
-          details.append(summary, children);
-          details.addEventListener("toggle", () => { if (details.isConnected) folderOpen.set(key, details.open); });
-          target.append(details);
-          if (focusedFolder === key) summary.focus({ preventScroll: true });
-          folders.set(prefix, children);
-        }
+      for (const name of path.split("/")) {
+        prefix = prefix ? `${prefix}/${name}` : name;
+        if (!folders.has(prefix)) folders.set(prefix, group(name, prefix, target));
         target = folders.get(prefix);
       }
       row(session, historical, target);
     }
+    // Keep an empty drop target available even when every session has a folder.
+    const target = group("Ungrouped", "", container);
+    for (const session of ungrouped) row(session, historical, target);
+    if (!ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
   }
   if (live.length) root.append(element("div", "list-heading", "IN THIS RUNTIME"));
   grouped(live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))), false, root, "live");
@@ -1457,6 +1497,7 @@ function logout(message = "") {
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
   $("new-profile").replaceChildren(); $("new-dialog").close(); drawer(false); showNotice("");
+  sessionDrag.cancel();
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
   if (!$("login-dialog").open) $("login-dialog").showModal();

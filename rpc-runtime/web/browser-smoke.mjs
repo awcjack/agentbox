@@ -360,6 +360,24 @@ try {
       await page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).click();
       await until(() => page.locator(".session-folder .session-folder .session-item").filter({ hasText: session.name }).count().then((count) => count === 1), "folder write reflected in sidebar");
       assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox");
+      const workFolder = page.locator('.session-folder[data-folder-path="Work"]');
+      await workFolder.locator(":scope > summary").press("Enter");
+      await page.waitForTimeout(1700); // A session poll must preserve the collapsed state.
+      assert.equal(await workFolder.getAttribute("open"), null);
+      await workFolder.locator(":scope > summary").press("Enter");
+      assert.notEqual(await workFolder.getAttribute("open"), null);
+      if (label === "desktop") {
+        const row = () => page.locator(".session-item").filter({ hasText: session.name });
+        await row().dragTo(workFolder.locator(":scope > summary"));
+        await until(() => serverFolders.get(session.nativeSessionId) === "Work", "drag moves into parent folder");
+        await until(() => page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).isEnabled(), "drag save finished");
+        await row().dragTo(page.locator('.session-folder[data-folder-path=""] > summary').first());
+        await until(() => serverFolders.get(session.nativeSessionId) === "", "drop into Ungrouped persists removal");
+        await until(() => page.locator('.session-folder[data-folder-path=""] .session-item').filter({ hasText: session.name }).count().then((count) => count === 1), "session appears under Ungrouped");
+        page.once("dialog", (dialog) => dialog.accept("Work/Agentbox"));
+        await page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).click();
+        await until(() => page.locator('.session-folder[data-folder-path="Work/Agentbox"] .session-item').count().then((count) => count === 1), "restore nested folder");
+      }
       const otherDevice = await browser.newContext();
       try {
         await otherDevice.addInitScript(({ id }) => localStorage.setItem("agentbox.pi.session-folders.v1", JSON.stringify([[JSON.stringify(["default", id]), "Stale/local"]])), { id: session.nativeSessionId });
@@ -388,7 +406,8 @@ try {
       await until(() => session.name === originalName, "original name restored");
       page.once("dialog", (dialog) => dialog.accept(""));
       await page.getByRole("button", { name: `Move to folder: ${originalName}`, exact: true }).click();
-      await until(() => page.locator(".session-folder").count().then((count) => count === 0), "server folder removed");
+      await until(() => page.locator('.session-folder[data-folder-path]:not([data-folder-path=""])').count().then((count) => count === 0), "server folder removed");
+      assert.equal(await page.locator('.session-folder[data-folder-path=""] .session-item').filter({ hasText: session.name }).count(), 1);
       assert.equal(serverFolders.get(session.nativeSessionId), "");
       const legacyDevice = await browser.newContext();
       try {
@@ -397,7 +416,7 @@ try {
         await legacyPage.goto(origin); await login(legacyPage);
         await until(() => legacyPage.evaluate(() => localStorage.getItem("agentbox.pi.session-folders.v1") === "[]"), "legacy migration respects server ungrouping");
         assert.equal(serverFolders.get(session.nativeSessionId), "");
-        assert.equal(await legacyPage.locator(".session-folder").count(), 0);
+        assert.equal(await legacyPage.locator('.session-folder[data-folder-path]:not([data-folder-path=""])').count(), 0);
       } finally { await legacyDevice.close(); }
       await page.locator(".session-item").filter({ hasText: session.name }).click();
       await drawerClosed();
@@ -892,14 +911,14 @@ try {
       const historical = page.locator(".session-item").filter({ hasText: session.name });
       await page.locator("#refresh-sessions").click();
       await new Promise((resolve) => setTimeout(resolve, 1700));
-      assert.equal(await page.locator("#sessions > .session-item").filter({ hasText: session.name }).count(), 0, "ended session stays out of ordinary history");
-      await page.locator(".archived-sessions summary").click();
+      assert.equal(await page.locator("#sessions > .session-folder .session-item").filter({ hasText: session.name }).count(), 0, "ended session stays out of ordinary history");
+      await page.locator(".archived-sessions > summary").click();
       await historical.waitFor();
       assert.ok(saved.has(session.nativeSessionId), "ending does not delete saved history");
       await page.locator("#logout").click();
       await page.locator("#token").fill("smoke-token"); await page.locator("#login-submit").click();
       await openSidebar();
-      await page.locator(".archived-sessions summary").click();
+      await page.locator(".archived-sessions > summary").click();
       await historical.waitFor();
       await historical.click();
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "history resumed");

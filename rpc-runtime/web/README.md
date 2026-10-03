@@ -30,8 +30,15 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   require `sessions:write` and a persisted session in the profile's `sessionDir`.
   Existing browser-saved folders are imported at login when no server assignment
   exists; failed imports are retained locally for retry. Server assignments win.
-  Folders group each lifecycle section; closed folders still expose session
-  bubbles when the sidebar is collapsed.
+  Folders group each lifecycle section; sessions without an assignment appear
+  under **Ungrouped**. Click a folder heading (or press Enter/Space when focused)
+  to collapse or expand it; this state survives sidebar refreshes. Closed folders
+  still expose session bubbles when the sidebar itself is collapsed.
+- On desktop, drag a session onto a folder heading or its contents to move it.
+  Drop onto **Ungrouped** to remove its folder assignment; this target remains
+  available even when empty. Closed folder headings accept drops, and the target
+  highlights while dragging. Moves use the same server persistence as the **↳**
+  button, which remains available for touch and keyboard users.
 - Use **✎ Rename session** on a running runtime row to persist its name through
   Pi's `set_session_name` RPC (write access required). Reopen historical or
   archived conversations first to rename them. Cancel leaves the name unchanged.

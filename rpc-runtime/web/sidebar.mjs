@@ -44,6 +44,83 @@ export function saveSessionFolders(storage, folders) {
   } catch { return false; }
 }
 
+// Transfer data is only a compatibility marker, never a session identity.
+export function initSessionDragDrop(root, { getSource, canMove, move, onEnd }) {
+  let source;
+  let highlighted;
+  function highlight(target) {
+    if (highlighted === target) return;
+    highlighted?.classList.remove("drag-over");
+    highlighted = target;
+    highlighted?.classList.add("drag-over");
+  }
+  function closest(node, selector) {
+    const target = node?.closest?.(selector);
+    return target && root.contains(target) ? target : undefined;
+  }
+  function clear() {
+    const previous = source;
+    source = undefined;
+    highlight(undefined);
+    return previous;
+  }
+  function cancel() {
+    if (clear()) onEnd?.();
+  }
+  root.addEventListener("dragstart", (event) => {
+    cancel();
+    const button = closest(event.target, ".session-item");
+    if (!button) return;
+    const candidate = getSource(button.dataset.sessionKey);
+    if (!button.draggable || !candidate || !canMove(candidate)) {
+      event.preventDefault();
+      return;
+    }
+    source = candidate;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      // Some browsers restrict custom transfer formats.
+      try { event.dataTransfer.setData("application/x-agentbox-session", "session"); } catch {}
+      try { event.dataTransfer.setData("text/plain", "session"); } catch {}
+    }
+  });
+  root.addEventListener("dragover", (event) => {
+    const target = closest(event.target, "[data-folder-path]");
+    if (!source || !canMove(source) || !target) {
+      highlight(undefined);
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    highlight(target);
+  });
+  root.addEventListener("dragleave", (event) => {
+    if (highlighted && highlighted.contains(event.target) && !highlighted.contains(event.relatedTarget)) {
+      highlight(undefined);
+    }
+  });
+  root.addEventListener("drop", (event) => {
+    const target = closest(event.target, "[data-folder-path]");
+    const allowed = source && target && canMove(source);
+    const folder = target?.dataset.folderPath;
+    const previous = clear();
+    if (!previous) return;
+    try {
+      if (allowed) {
+        event.preventDefault();
+        move(previous, folder);
+      }
+    } finally {
+      onEnd?.();
+    }
+  });
+  root.addEventListener("dragend", cancel);
+  (root.ownerDocument || root).addEventListener("keydown", (event) => {
+    if (event.key === "Escape") cancel();
+  });
+  return { isDragging: () => Boolean(source), cancel };
+}
+
 export function initSidebarResize(doc = document) {
   const win = doc.defaultView;
   const workspace = doc.getElementById("workspace");
