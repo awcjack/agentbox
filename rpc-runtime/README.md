@@ -208,6 +208,8 @@ present, it must exactly match `allowedOrigins`.
 | `GET /health/ready` | public | Readiness; returns 503 during shutdown |
 | `GET /v1/profiles` | `profiles:read` | Configured profile names |
 | `GET /v1/history?profile=default` | `sessions:read` | Native Pi history from the approved profile's session directory |
+| `GET /v1/session-folders?profile=default` | `sessions:read` | Shared folder assignments as `{folders:[{id,folder}]}` |
+| `PUT /v1/session-folders?profile=default` | `sessions:write` | Assign a native session with `{id,folder}`; empty folder ungroups |
 | `POST /v1/sessions` | `sessions:create` | Create or resume a supervised child |
 | `GET /v1/sessions` | `sessions:read` | List in-memory sessions |
 | `GET /v1/sessions/:id` | `sessions:read` | Session state and bounded stderr tail |
@@ -273,6 +275,22 @@ rewritten: private `.archived-<native-uuid>` marker files live in the profile's
 session directory. Markers are written only after the child exits. An archive
 failure returns `archive_failed` and retains the stopped runtime slot for an
 explicit DELETE retry. Ephemeral profiles have no history to archive.
+
+Session folder assignments are stored in the profile's `sessionDir/.session-folders/`
+as private, atomically replaced per-conversation sidecars, isolated by profile
+name and working directory. Native Pi JSONL files are not changed. Include this
+hidden directory in backups and keep `sessionDir` on persistent storage for
+container replacements. Folder names are labels, not filesystem paths; slash
+separates up to 12 nested levels (80 characters per level). Writes validate native
+session ownership, and profiles without accessible persistent storage return 409.
+Assignments are shared by authorized clients of the runtime, not private per token.
+Updates to different sessions cannot overwrite one another; for the same session,
+the last successful write wins. The browser refreshes assignments every 15 seconds
+and on manual Refresh. Legacy browser assignments are imported on login using
+`{id,folder,importOnly:true}`: atomic create-if-absent returns the stored winner
+without overwriting another device's assignment. Ungrouping persists an empty
+folder tombstone (also returned by GET), preventing an older browser from
+resurrecting removed assignments.
 
 `GET /v1/history?profile=default&includeArchived=true` includes archived history
 with an `archived` boolean on each history entry. History includes `createdAt`

@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, utimes,
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { archiveHistory, createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
+import { listSessionFolders, writeSessionFolder, normalizeSessionFolder, sessionFolderDirectory, archiveHistory, createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
 
 const ID = "01991817-3dac-7000-8123-0123456789ab";
 const OLD_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
@@ -270,7 +270,108 @@ test("resume fails closed when more than 10000 direct entries prevent a unique s
   for (let i = 0; i < 9999; i++) await writeFile(join(root, `${i}.txt`), "");
   assert.equal(await resolveHistorySession(profile, ID), await realpath(file));
   assert.equal((await listHistory(profile, "default")).truncated, false);
+  await writeSessionFolder(root, profile, "default", ID, "at-limit");
+  assert.equal(await resolveHistorySession(profile, ID), await realpath(file));
+  assert.equal((await listHistory(profile, "default")).truncated, false);
+  assert.deepEqual(await listSessionFolders(root, profile, "default"), [{ id: ID, folder: "at-limit" }]);
+  // Even excessive stale metadata does not consume the native budget or the
+  // bounded set of exact metadata lookups.
+  for (let i = 0; i < 10000; i++) await writeFile(join(root, ".session-folders", `${i}.stale`), "");
+  await writeSessionFolder(root, profile, "default", ID, "updated");
+  assert.deepEqual(await listSessionFolders(root, profile, "default"), [{ id: ID, folder: "updated" }]);
+  assert.equal(await resolveHistorySession(profile, ID), await realpath(file));
   await writeFile(join(root, "overflow.txt"), "");
   assert.equal(await resolveHistorySession(profile, ID), null);
   assert.equal((await listHistory(profile, "default")).truncated, true);
+});
+
+test("folder sidecars are private, bounded, no-follow and independently atomic", async (t) => {
+  const { root, profile } = await fixture(t);
+  await writeFile(join(root, `${ID}.jsonl`), header());
+  await writeFile(join(root, `${OLD_ID}.jsonl`), header(OLD_ID));
+  assert.equal(await sessionFolderDirectory(profile), root);
+  await Promise.all([writeSessionFolder(root, profile, "default", ID, "one"), writeSessionFolder(root, profile, "default", OLD_ID, "two")]);
+  assert.equal((await listSessionFolders(root, profile, "default")).length, 2);
+  const storage = join(root, ".session-folders");
+  assert.equal((await stat(storage)).mode & 0o777, 0o700);
+  const name = (await readdir(storage)).find((name) => name.startsWith(".session-folder-") && name.endsWith(`${ID}.json`));
+  const path = join(storage, name);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  const outside = join(root, "outside");
+  const content = JSON.stringify({ id: ID, folder: "secret" });
+  await writeFile(outside, content);
+  await rm(path);
+  await symlink(outside, path);
+  await assert.rejects(writeSessionFolder(root, profile, "default", ID, "import", { importOnly: true }));
+  assert.equal(await readFile(outside, "utf8"), content);
+  assert.deepEqual((await listSessionFolders(root, profile, "default")).map(({ id }) => id), [OLD_ID]);
+  await writeSessionFolder(root, profile, "default", ID, "replacement");
+  assert.equal(await readFile(outside, "utf8"), content);
+  await writeFile(path, "x".repeat(8193));
+  assert.equal((await listSessionFolders(root, profile, "default")).length, 1);
+  await writeFile(path, '{"id":');
+  await assert.rejects(writeSessionFolder(root, profile, "default", ID, "import", { importOnly: true }));
+  assert.equal(await readFile(path, "utf8"), '{"id":');
+  assert.equal((await listSessionFolders(root, profile, "default")).length, 1);
+  await rm(path);
+  execFileSync("mkfifo", [path]);
+  assert.equal((await listSessionFolders(root, profile, "default")).length, 1);
+  await rm(path);
+  await mkdir(path);
+  await assert.rejects(writeSessionFolder(root, profile, "default", ID, "fail"));
+  assert.equal((await readdir(storage)).some((name) => name.startsWith(".session-folder-tmp-")), false);
+  await assert.rejects(writeSessionFolder(root, profile, "default", "../escape", "fail"));
+  await writeSessionFolder(root, profile, "default", OLD_ID, "");
+  await writeSessionFolder(root, profile, "default", OLD_ID, "");
+  assert.deepEqual(await listSessionFolders(root, profile, "default"), [{ id: OLD_ID, folder: "" }]);
+  const max = Array(12).fill("x".repeat(80)).join("/");
+  assert.equal(normalizeSessionFolder(max), max);
+});
+
+
+test("folder storage rejects directory symlinks and non-directories; absent storage is empty", async (t) => {
+  const { root, profile } = await fixture(t);
+  assert.deepEqual(await listSessionFolders(root, profile, "default"), []);
+  await writeSessionFolder(root, profile, "default", ID, "");
+  assert.deepEqual(await readdir(root), [".session-folders"]);
+  await rm(join(root, ".session-folders"), { recursive: true });
+  const storage = join(root, ".session-folders");
+  const outside = await mkdtemp(join(tmpdir(), "pi-folder-outside-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await symlink(outside, storage);
+  await assert.rejects(listSessionFolders(root, profile, "default"));
+  await assert.rejects(writeSessionFolder(root, profile, "default", ID, "no"));
+  await assert.rejects(writeSessionFolder(root, profile, "default", ID, ""));
+  assert.deepEqual(await readdir(outside), []);
+  await rm(storage);
+  await writeFile(storage, "not a directory");
+  await assert.rejects(listSessionFolders(root, profile, "default"));
+  await assert.rejects(writeSessionFolder(root, profile, "default", ID, "no"));
+});
+
+
+test("imports preserve assignments and tombstones and race safely with updates", async (t) => {
+  const { root, profile } = await fixture(t);
+  await writeFile(join(root, `${ID}.jsonl`), header());
+  const write = (folder, importOnly = false) => writeSessionFolder(root, profile, "default", ID, folder, { importOnly });
+  const imports = await Promise.all(Array.from({ length: 20 }, (_, i) => write(`legacy-${i}`, true)));
+  assert.equal(new Set(imports).size, 1);
+  assert.match(imports[0], /^legacy-/);
+  assert.deepEqual(await listSessionFolders(root, profile, "default"), [{ id: ID, folder: imports[0] }]);
+  await write("current");
+  assert.equal(await write("stale", true), "current");
+  await write("");
+  assert.equal(await write("resurrected", true), "");
+  assert.deepEqual(await listSessionFolders(root, { ...profile }, "default"), [{ id: ID, folder: "" }]);
+  for (const folder of ["updated", ""]) {
+    // Start from absent metadata to exercise either publication order.
+    for (let i = 0; i < 10; i++) {
+      await rm(join(root, ".session-folders"), { recursive: true });
+      const [imported] = await Promise.all([write("migration", true), write(folder)]);
+      assert.ok(["migration", folder].includes(imported));
+      assert.deepEqual(await listSessionFolders(root, profile, "default"), [{ id: ID, folder }]);
+      assert.equal(await write("late migration", true), folder);
+    }
+  }
+  assert.equal((await readdir(join(root, ".session-folders"))).some((name) => name.startsWith(".session-folder-tmp-")), false);
 });

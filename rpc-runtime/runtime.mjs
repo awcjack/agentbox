@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { messageTitle } from "./web/session-title.mjs";
 
@@ -1018,7 +1018,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         if (origin === undefined) throw new HttpError(400, "origin_required", "Origin is required for preflight");
         response.statusCode = 204;
         response.setHeader("Access-Control-Allow-Headers", "authorization, content-type, last-event-id, x-pi-session-id");
-        response.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        response.setHeader("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS");
         response.setHeader("Access-Control-Max-Age", "600");
         return response.end();
       }
@@ -1027,6 +1027,37 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       if (url.pathname === "/v1/profiles" && request.method === "GET") {
         authenticate(request, config, "profiles:read");
         return json(response, 200, { profiles: [...config.profiles.keys()] });
+      }
+      if (url.pathname === "/v1/session-folders" && ["GET", "PUT"].includes(request.method)) {
+        authenticate(request, config, request.method === "GET" ? "sessions:read" : "sessions:write");
+        const profileName = url.searchParams.get("profile");
+        if (!config.profiles.has(profileName)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
+        const profile = config.profiles.get(profileName);
+        let body, folder;
+        if (request.method === "PUT") {
+          body = await readJson(request, config.limits.maxBodyBytes);
+          if (!body || typeof body !== "object" || Array.isArray(body)
+            || Object.keys(body).some((key) => !["id", "folder", "importOnly"].includes(key))
+            || (Object.hasOwn(body, "importOnly") && typeof body.importOnly !== "boolean")
+            || typeof body.id !== "string" || !NATIVE_SESSION_ID_RE.test(body.id)) {
+            throw new HttpError(400, "invalid_session_folder", "expected {id: native session UUID, folder: string, importOnly?: boolean}");
+          }
+          try { folder = normalizeSessionFolder(body.folder); }
+          catch (error) { throw new HttpError(400, "invalid_session_folder", error.message); }
+        }
+        let root;
+        try { root = await sessionFolderDirectory(profile); }
+        catch (error) { throw new HttpError(409, "session_folders_unavailable", error.message); }
+        if (body && !await resolveHistorySession(profile, body.id)) {
+          throw new HttpError(404, "session_not_found", "an exact, unique Pi session for this profile was not found");
+        }
+        try {
+          if (!body) return json(response, 200, { folders: await listSessionFolders(root, profile, profileName) });
+          folder = await writeSessionFolder(root, profile, profileName, body.id, folder, { importOnly: body.importOnly });
+          return json(response, 200, { id: body.id, folder });
+        } catch {
+          throw new HttpError(409, "session_folders_unavailable", "session folder storage is inaccessible, over its directory limit, or could not be updated");
+        }
       }
       if (url.pathname === "/v1/history" && request.method === "GET") {
         authenticate(request, config, "sessions:read");

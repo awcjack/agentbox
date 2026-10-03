@@ -1,5 +1,6 @@
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, open, opendir, realpath, unlink } from "node:fs/promises";
+import { link, lstat, mkdir, open, opendir, realpath, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { messageTitle } from "./web/session-title.mjs";
@@ -77,6 +78,7 @@ export async function resolveHistorySession(profile, id) {
     const directory = await opendir(root);
     let visited = 0, match = null;
     for await (const entry of directory) {
+      if (entry.name === ".session-folders" && entry.isDirectory()) continue;
       // An incomplete scan cannot establish that a match is unique.
       if (++visited > MAX_ENTRIES) return null;
       if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.slice(-42, -6) !== id) continue;
@@ -166,6 +168,7 @@ export async function listHistory(profile, profileName, { includeArchived = fals
   const files = [];
   let visited = 0, truncated = false;
   for await (const entry of directory) {
+    if (entry.name === ".session-folders" && entry.isDirectory()) continue;
     if (++visited > MAX_ENTRIES) { truncated = true; break; }
     if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
     const id = entry.name.slice(-42, -6);
@@ -222,4 +225,139 @@ export async function listHistory(profile, profileName, { includeArchived = fals
     finally { await handle?.close(); }
   }
   return { sessions: sessions.filter((session) => !duplicates.has(session.id)), truncated };
+}
+
+// Folder names are labels, never filesystem paths. Keep normalization identical
+// to web/sidebar.mjs (including empty slash components and JS string lengths).
+export function normalizeSessionFolder(value) {
+  if (typeof value !== "string") throw new Error("folder must be a string");
+  const parts = value.trim().split("/").map((part) => part.trim()).filter(Boolean);
+  if (parts.length > 12 || parts.some((part) => part === "." || part === ".." || part.length > 80)) {
+    throw new Error("Use up to 12 folder levels, with names of at most 80 characters (not . or ..).");
+  }
+  return parts.join("/");
+}
+
+export async function sessionFolderDirectory(profile) {
+  try {
+    const root = await historyDirectory(profile);
+    if (root) return root;
+  } catch { /* Surface unavailable storage consistently, including permissions. */ }
+  throw new Error("session folders require an accessible profile sessionDir directory");
+}
+
+function folderPrefix(profile, profileName) {
+  // Profiles sharing storage must not share assignments. No supplied path or
+  // profile name is interpolated into a filename.
+  const scope = createHash("sha256").update(JSON.stringify([profileName, profile.cwd])).digest("hex");
+  return `.session-folder-${scope}-`;
+}
+
+// Pin both directory lookups with no-follow handles. The Linux runtime uses
+// procfs descriptor paths as openat-style anchors: replacing the subdirectory
+// with a symlink after validation cannot redirect reads, writes or cleanup.
+async function openFolderStorage(root, create) {
+  const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+  const parent = await open(root, flags);
+  try {
+    const path = `/proc/self/fd/${parent.fd}/.session-folders`;
+    if (create) {
+      try { await mkdir(path, { mode: 0o700 }); }
+      catch (error) { if (error.code !== "EEXIST") throw error; }
+    }
+    let directory;
+    try { directory = await open(path, flags); }
+    catch (error) { if (!create && error.code === "ENOENT") return null; throw error; }
+    try {
+      if (create) await parent.sync();
+      return directory;
+    } catch (error) { await directory.close(); throw error; }
+  } finally { await parent.close(); }
+}
+
+async function readSessionFolder(path, id) {
+  const handle = await open(path, READ_FLAGS);
+  try {
+    const info = await handle.stat();
+    // Worst-case JSON escaping of 12 * 80 UTF-16 units fits in 8 KiB.
+    if (!info.isFile() || info.size > 8192) throw new Error("invalid folder sidecar");
+    const buffer = Buffer.alloc(8193);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead !== info.size) throw new Error("folder sidecar changed");
+    const value = JSON.parse(buffer.subarray(0, bytesRead).toString("utf8"));
+    if (value?.id !== id || normalizeSessionFolder(value.folder) !== value.folder) {
+      throw new Error("invalid folder sidecar");
+    }
+    return value.folder;
+  } finally { await handle.close(); }
+}
+
+export async function writeSessionFolder(root, profile, profileName, id, folder, { importOnly = false } = {}) {
+  if (typeof id !== "string" || !NATIVE_SESSION_ID_RE.test(id)) throw new Error("invalid session ID");
+  if (typeof importOnly !== "boolean") throw new Error("importOnly must be a boolean");
+  folder = normalizeSessionFolder(folder);
+  const directory = await openFolderStorage(root, true);
+  try {
+    const base = `/proc/self/fd/${directory.fd}`;
+    const path = join(base, `${folderPrefix(profile, profileName)}${id}.json`);
+    const temporary = join(base, `.session-folder-tmp-${randomUUID()}`);
+    const handle = await open(temporary, "wx", 0o600);
+    try {
+      // Empty folders are persistent tombstones, not absent metadata.
+      await handle.writeFile(JSON.stringify({ id, folder }));
+      await handle.sync();
+      if (importOnly) {
+        // Atomic create-if-absent across processes, including concurrent updates.
+        try { await link(temporary, path); }
+        catch (error) { if (error.code !== "EEXIST") throw error; }
+      } else {
+        // Atomic per-session replacement, without following destination symlinks.
+        await rename(temporary, path);
+      }
+    } finally {
+      await handle.close();
+      await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+    }
+    await directory.sync();
+    // A losing import must report stored metadata, never the proposed label.
+    return importOnly ? await readSessionFolder(path, id) : folder;
+  } finally { await directory.close(); }
+}
+
+export async function listSessionFolders(root, profile, profileName) {
+  const storage = await openFolderStorage(root, false);
+  if (!storage) return [];
+  try {
+    const prefix = folderPrefix(profile, profileName);
+    const folders = [], native = new Set(), duplicates = new Set();
+    const directory = await opendir(root);
+    let visited = 0;
+    for await (const entry of directory) {
+      if (entry.name === ".session-folders" && entry.isDirectory()) continue;
+      if (++visited > MAX_ENTRIES) throw new Error("native session directory exceeds 10000 entries");
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const id = entry.name.slice(-42, -6);
+      if (!NATIVE_SESSION_ID_RE.test(id)) continue;
+      let handle;
+      try {
+        handle = await open(join(root, entry.name), READ_FLAGS);
+        if (await readHeader(handle, id, profile.cwd)) {
+          if (native.has(id)) duplicates.add(id);
+          native.add(id);
+        }
+      } catch { /* Same best-effort native discovery as history listing. */ }
+      finally { await handle?.close(); }
+    }
+    // Bounded exact lookups rather than a metadata directory scan. At most
+    // MAX_ENTRIES sidecars are read, regardless of stale files, other scopes or
+    // concurrent temporary writes. Metadata accumulation cannot brick GET.
+    for (const id of native) {
+      if (duplicates.has(id)) continue;
+      try {
+        const folder = await readSessionFolder(`/proc/self/fd/${storage.fd}/${prefix}${id}.json`, id);
+        folders.push({ id, folder });
+      } catch { /* Ignore corrupt, symlinked, non-regular or removed sidecars. */ }
+    }
+    return folders.sort((a, b) => a.id.localeCompare(b.id));
+  } finally { await storage.close(); }
 }

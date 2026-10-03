@@ -1504,3 +1504,66 @@ test("uploads enforce decoded size and separate session storage", async (t) => {
   }
   assert.notEqual(first.body.path, second.body.path);
 });
+
+test("session folder API validates scopes, labels, storage and native profile ownership", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-folders-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ["default", "alias", "other"]) await mkdir(join(root, name));
+  const source = join(root, "default", `${RESUME_ID}.jsonl`);
+  const original = JSON.stringify({ type: "session", id: RESUME_ID, cwd: "/workspace" }) + "\n";
+  await writeFile(source, original);
+  const settings = config({ profiles: {
+    default: { cwd: "/workspace", sessionDir: join(root, "default") },
+    alias: { cwd: "/workspace", sessionDir: join(root, "alias") },
+    other: { cwd: "/other", sessionDir: join(root, "other") },
+    ephemeral: { cwd: "/workspace" },
+    missing: { cwd: "/workspace", sessionDir: join(root, "missing") },
+  } });
+  const first = await fixture(t, settings);
+  const path = "/v1/session-folders?profile=default";
+  const put = (body, options = {}) => request(first.baseUrl, path, { method: "PUT", body, ...options });
+  for (const method of ["GET", "PUT"]) {
+    assert.equal((await request(first.baseUrl, path, { method, auth: false })).response.status, 401);
+  }
+  for (const folder of [null, 5, ".", "a/../b", "x".repeat(81), Array(13).fill("x").join("/")]) {
+    assert.equal((await put({ id: RESUME_ID, folder })).response.status, 400);
+  }
+  for (const id of ["../../outside", "", null]) assert.equal((await put({ id, folder: "x" })).response.status, 400);
+  assert.equal((await put({ id: "00000000-0000-4000-8000-000000000000", folder: "x" })).response.status, 404);
+  for (const profile of ["", "unconfigured"]) {
+    assert.equal((await request(first.baseUrl, `/v1/session-folders?profile=${profile}`)).response.status, 400);
+  }
+  for (const profile of ["ephemeral", "missing"]) {
+    for (const method of ["GET", "PUT"]) {
+      const result = await request(first.baseUrl, `/v1/session-folders?profile=${profile}`, { method, body: method === "PUT" ? { id: RESUME_ID, folder: "x" } : undefined });
+      assert.equal(result.response.status, 409);
+      assert.equal(result.body.error.code, "session_folders_unavailable");
+    }
+  }
+  assert.equal((await request(first.baseUrl, "/v1/session-folders?profile=other", { method: "PUT", body: { id: RESUME_ID, folder: "x" } })).response.status, 404);
+  for (const importOnly of [null, 0, "true", {}, []]) {
+    assert.equal((await put({ id: RESUME_ID, folder: "x", importOnly })).response.status, 400);
+  }
+  assert.deepEqual((await put({ id: RESUME_ID, folder: "Legacy", importOnly: true })).body, { id: RESUME_ID, folder: "Legacy" });
+  assert.deepEqual((await put({ id: RESUME_ID, folder: " / Work // Project / " })).body, { id: RESUME_ID, folder: "Work/Project" });
+  assert.deepEqual((await put({ id: RESUME_ID, folder: "Stale", importOnly: true })).body, { id: RESUME_ID, folder: "Work/Project" });
+  await first.runtime.close();
+  const second = await fixture(t, settings);
+  assert.deepEqual((await request(second.baseUrl, path)).body, { folders: [{ id: RESUME_ID, folder: "Work/Project" }] });
+  for (const profile of ["alias", "other"]) {
+    assert.deepEqual((await request(second.baseUrl, `/v1/session-folders?profile=${profile}`)).body, { folders: [] });
+  }
+  assert.equal((await request(second.baseUrl, path, { method: "PUT", body: { id: RESUME_ID, folder: " / / " } })).response.status, 200);
+  assert.deepEqual((await request(second.baseUrl, path)).body, { folders: [{ id: RESUME_ID, folder: "" }] });
+  await second.runtime.close();
+  const third = await fixture(t, settings);
+  assert.deepEqual((await request(third.baseUrl, path)).body, { folders: [{ id: RESUME_ID, folder: "" }] });
+  assert.deepEqual((await request(third.baseUrl, path, { method: "PUT", body: { id: RESUME_ID, folder: "Stale", importOnly: true } })).body, { id: RESUME_ID, folder: "" });
+  assert.deepEqual((await request(third.baseUrl, path)).body, { folders: [{ id: RESUME_ID, folder: "" }] });
+  assert.equal(await readFile(source, "utf8"), original);
+  for (const scope of ["sessions:read", "sessions:write", "profiles:read"]) {
+    const scoped = await fixture(t, config({ auth: { tokens: [{ sha256: TOKEN_HASH, scopes: [scope] }] }, profiles: { default: { cwd: "/workspace", sessionDir: join(root, "default") } } }));
+    assert.equal((await request(scoped.baseUrl, path)).response.status, scope === "sessions:read" ? 200 : 403);
+    assert.equal((await request(scoped.baseUrl, path, { method: "PUT", body: { id: RESUME_ID, folder: "x" } })).response.status, scope === "sessions:write" ? 200 : 403);
+  }
+});
