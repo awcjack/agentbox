@@ -100,12 +100,12 @@ jobs:
       - name: Build agentbox image
         run: |
           nix build .#packages.x86_64-linux.agentboxImage \
-            --print-build-logs --no-update-lock-file
-          ls -lL result
+            --out-link result-agentbox --print-build-logs --no-update-lock-file
+          ls -lL result-agentbox
 
       - name: Test network policies
         run: |
-          nix build .#packages.x86_64-linux.network-policy-test --no-update-lock-file
+          nix build .#packages.x86_64-linux.network-policy-test --no-link --no-update-lock-file
           nixpkgs_path="$(nix eval --impure --raw --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath')"
           nix-instantiate --eval --strict --json tests/network-modules.nix --arg nixpkgs "$nixpkgs_path"
           nix build .#packages.x86_64-linux.agentboxNetworkImage --out-link result-network --no-update-lock-file
@@ -114,7 +114,7 @@ jobs:
 
       - name: Load into Docker
         run: |
-          docker load < result
+          docker load < result-agentbox
           docker image ls agentbox
 
       # Publish only on default-branch pushes and tags — never on PRs.
