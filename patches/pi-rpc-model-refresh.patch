@@ -1,12 +1,26 @@
 --- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
 +++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
-@@ -484,6 +484,9 @@
+@@ -488,6 +488,12 @@
  			}
  
  			case "get_available_models": {
-+				// Reload catalogs updated by `pi update --models` in other processes.
-+				// Keep picker reads local: remote refresh retains its own lifecycle.
-+				await session.modelRuntime.refresh({ allowNetwork: false });
++				// Use Pi's official catalogs, cached fallback and PI_OFFLINE policy.
++				// Explicit browser Refresh bypasses the catalog freshness TTL.
++				await session.modelRuntime.refresh({
++					force: command.refresh === true,
++					signal: AbortSignal.timeout(10_000),
++				});
  				const models = session.modelRuntime.getAvailableSnapshot();
  				return success(id, "get_available_models", { models });
  			}
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -32,7 +32,7 @@
+ 	// Model
+ 	| { id?: string; type: "set_model"; provider: string; modelId: string }
+ 	| { id?: string; type: "cycle_model" }
+-	| { id?: string; type: "get_available_models" }
++	| { id?: string; type: "get_available_models"; refresh?: boolean }
+ 
+ 	// Thinking
+ 	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }

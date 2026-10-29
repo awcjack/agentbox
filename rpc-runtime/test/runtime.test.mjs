@@ -1567,3 +1567,38 @@ test("session folder API validates scopes, labels, storage and native profile ow
     assert.equal((await request(scoped.baseUrl, path, { method: "PUT", body: { id: RESUME_ID, folder: "x" } })).response.status, scope === "sessions:write" ? 200 : 403);
   }
 });
+
+test("folder sessions start concurrently in selected cwd and resume there after restart", async (t) => {
+  const { realpath } = await import("node:fs/promises");
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-folder-rpc-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "project"), sessionDir = join(root, "history");
+  await mkdir(cwd); await mkdir(sessionDir);
+  const settings = config({ profiles: { default: { cwd: root, sessionDir, env: { PROJECT_VALUE: "yes" } } } });
+  const first = await fixture(t, settings);
+  const folders = await request(first.baseUrl, `/v1/folders?path=${encodeURIComponent(root)}`);
+  assert.equal(folders.response.status, 200);
+  assert.ok(folders.body.directories.some((entry) => entry.path === cwd));
+  const created = await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { cwd, name: "Project" } });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.body.session.cwd, cwd);
+  assert.equal(first.spawns[0].options.cwd, cwd);
+  assert.equal(first.spawns[0].options.env.PROJECT_VALUE, "yes");
+  await createSession(first.baseUrl, { cwd });
+  assert.equal(first.spawns.length, 2);
+  assert.notEqual(first.spawns[0].args.join(" "), first.spawns[1].args.join(" "));
+  const id = created.body.session.nativeSessionId;
+  await writeFile(join(sessionDir, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd }) + "\n");
+  await first.runtime.close();
+  const second = await fixture(t, settings);
+  const history = await request(second.baseUrl, "/v1/history?profile=default");
+  assert.equal(history.body.sessions[0].cwd, cwd);
+  const resumed = await request(second.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: id } });
+  assert.equal(resumed.response.status, 201);
+  assert.equal(second.spawns[0].options.cwd, cwd);
+  for (const body of [{ cwd: `${root}-outside` }, { cwd: root, resume: id }, { cwd: 42 }]) {
+    assert.equal((await request(second.baseUrl, "/v1/sessions", { method: "POST", body })).response.status, 400);
+  }
+  assert.equal((await request(second.baseUrl, "/v1/folders", { auth: false })).response.status, 401);
+  assert.equal((await request(second.baseUrl, "/v1/folders", { token: "bad" })).response.status, 401);
+});

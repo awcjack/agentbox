@@ -14,8 +14,19 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 
 ## Features
 
-- Warm charcoal, responsive chat workspace with a mobile session drawer,
-  profile filtering, named sessions, and persisted-history resume.
+- Responsive chat workspace with a mobile session drawer, profile filtering,
+  named sessions, and persisted-history resume. The compact sidebar uses title-only
+  rows, subtle selection, right-side progress spinners and blue unread dots.
+  Status, profile, cwd and date stay in tooltips and accessible labels. Rename and
+  move controls appear on hover/focus, or on the selected row on touch devices.
+- New session selects a working folder on the server, without a profile picker.
+  Browse approved roots and subfolders, or enter an absolute path. The supervisor
+  selects the profile and starts Pi directly in that folder. Folder assignments
+  in the sidebar organize conversations; they do not change a session's cwd.
+- Each opened session has a tab. Switch tabs with the mouse or Left/Right,
+  Home/End keys; drafts and approvals remain independent. Closing a tab leaves
+  Pi running and its draft available when reopened from the sidebar. End & archive
+  stops it. Tab navigation and drafts stay in page memory, cleared on reload/logout.
 - Drag the desktop sidebar's right edge to resize it. The focused separator also
   supports Left/Right arrows, Shift for larger steps, and Home/End for limits.
   The transcript and composer resize with it. Drag below 180px (or press Home)
@@ -168,12 +179,16 @@ Settings includes browser-local display preferences (no credentials are stored):
   hidden list. New models are visible by default. This does not change model access,
   Pi defaults, or other browsers.
 - **Hide Profile section:** hides the sidebar filter and resets it to All profiles.
-  The new-session profile picker remains available.
+  New session always uses the working-folder picker.
 Preferences persist across page reloads when local storage is available; if storage
 is blocked, the UI reports that changes apply only to the current page.
 
 Model discovery runs after the initial/reconnect snapshot and on explicit Refresh,
-without another SSE connection. Routine transcript snapshots do not poll models.
+without another SSE connection. Pi refreshes its official provider catalogs using
+its cache policy; explicit Refresh also bypasses catalog freshness with
+`get_available_models.refresh:true`. A ten-second bound retains the cached fallback,
+and `PI_OFFLINE` disables catalog network access. Routine transcript snapshots do
+not poll models.
 Transient network/timeouts and HTTP 408/429/500/502/503/504 failures get at most two
 retries (250 ms, then 1 s); auth/command denials are not retried. Successful catalogs,
 including empty or incomplete lists, are accepted without retries. Selection changes,
@@ -220,6 +235,7 @@ PLAYWRIGHT_MODULE=/tmp/opencode-work/opencode/node_modules/playwright/index.mjs 
 SMOKE_OUTPUT_DIR=/tmp/opencode-work/opencode node web/browser-smoke.mjs
 ```
 
+Set `FOLDERS_TABS_ONLY=1` for the folder/tab/catalog desktop/mobile smoke path.
 Set `SETTINGS_ONLY=1` for the desktop/mobile Settings regression path (including
 subagent cap/status/reset, validation, notifications, draft preservation, idle and
 native-replacement guards, and unsupported-command handling).

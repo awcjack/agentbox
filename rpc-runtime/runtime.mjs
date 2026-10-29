@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
 import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
+import { browseFolders, selectFolder } from "./folders.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
 const WEB_ASSETS = new Map([
@@ -332,6 +333,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env) {
     }
     profiles.set(name, {
       cwd: profile.cwd,
+      allowSubdirectories: true,
       sessionDir,
       args,
       env: resolvedEnv,
@@ -1028,6 +1030,11 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         authenticate(request, config, "profiles:read");
         return json(response, 200, { profiles: [...config.profiles.keys()] });
       }
+      if (url.pathname === "/v1/folders" && request.method === "GET") {
+        authenticate(request, config, "profiles:read");
+        try { return json(response, 200, await browseFolders(config.profiles, url.searchParams.get("path"))); }
+        catch { throw new HttpError(400, "invalid_folder", "Choose an accessible folder within a configured workspace."); }
+      }
       if (url.pathname === "/v1/session-folders" && ["GET", "PUT"].includes(request.method)) {
         authenticate(request, config, request.method === "GET" ? "sessions:read" : "sessions:write");
         const profileName = url.searchParams.get("profile");
@@ -1074,12 +1081,20 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         const body = await readJson(request, config.limits.maxBodyBytes);
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "invalid_session", "session request must be an object");
         const keys = Object.keys(body);
-        if (keys.some((key) => !["profile", "resume", "name"].includes(key))) throw new HttpError(400, "invalid_session", "session request contains an unknown field");
-        if (typeof body.profile !== "string" || !config.profiles.has(body.profile)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
+        if (keys.some((key) => !["profile", "cwd", "resume", "name"].includes(key))) throw new HttpError(400, "invalid_session", "session request contains an unknown field");
+        if (body.profile !== undefined && (typeof body.profile !== "string" || !config.profiles.has(body.profile))) throw new HttpError(400, "invalid_profile", "a configured profile is required");
+        if (body.profile === undefined && body.cwd === undefined) body.profile = config.profiles.has("default") ? "default" : config.profiles.keys().next().value;
+        let selectedFolder;
+        if (body.cwd !== undefined) {
+          if (body.resume !== undefined) throw new HttpError(400, "invalid_folder", "resumed sessions retain their saved folder");
+          try { selectedFolder = await selectFolder(config.profiles, body.cwd, body.profile); }
+          catch { throw new HttpError(400, "invalid_folder", "Choose an accessible folder within a configured workspace."); }
+          body.profile = selectedFolder.name;
+        }
         if (body.resume !== undefined && (typeof body.resume !== "string" || !NATIVE_SESSION_ID_RE.test(body.resume))) {
           throw new HttpError(400, "invalid_resume", "resume must be an exact UUID session ID");
         }
-        const profile = config.profiles.get(body.profile);
+        let profile = selectedFolder?.profile ?? config.profiles.get(body.profile);
         if (body.resume !== undefined && profile.sessionDir === undefined) {
           throw new HttpError(400, "invalid_resume", "resume requires a profile-owned session directory");
         }
@@ -1100,7 +1115,12 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         const creationKey = body.resume ? resumeKey : id;
         creating.add(creationKey);
         try {
-          const resumePath = body.resume ? await resolveHistorySession(profile, body.resume) : undefined;
+          const saved = body.resume ? await resolveHistorySession(profile, body.resume, { details: true }) : undefined;
+          const resumePath = saved?.path;
+          if (saved && saved.cwd !== profile.cwd) {
+            try { profile = (await selectFolder(config.profiles, saved.cwd, body.profile)).profile; }
+            catch { throw new HttpError(400, "invalid_folder", "The saved session folder is unavailable or outside its workspace."); }
+          }
           if (body.resume && !resumePath) throw new HttpError(404, "resume_not_found", "an exact, unique Pi session for this profile was not found");
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
           session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, config, spawnProcess, signalProcessGroup, now, uuid });

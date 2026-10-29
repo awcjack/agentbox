@@ -31,7 +31,7 @@ This is separate from `services.agentbox.autoStart`, which controls container
 startup at host boot, and from `agentbox pi`, the on-demand interactive CLI.
 
 Open the root URL without SSH, enter the raw bearer token/password, and select
-an approved profile. The password stays in page memory, not localStorage,
+a working folder within an approved workspace root. The password stays in page memory, not localStorage,
 sessionStorage, or URLs; reload or log out to clear it. Browser API requests
 use the Authorization header, including the fetch-based SSE connection. Configure
 the exact browser origin (scheme, host, and port) in `allowedOrigins`, including
@@ -92,8 +92,10 @@ not a misleading off state. The browser refuses to send `/auto` to the model in
 that case. Deploy the updated runtime and policy extension and start a new Pi
 session; merely refreshing the page does not upgrade an existing child process.
 
-Working directories and history roots are administrator-owned profile settings,
-not arbitrary browser input. The UI uses native Pi sessions and credentials;
+Profiles define administrator-owned workspace roots and history directories.
+New sessions select an existing folder at or below a profile's cwd; the server
+checks both its path and canonical target so symlinks cannot escape that root.
+The UI uses native Pi sessions and credentials;
 it does not convert OpenCode conversations or import OpenCode authentication.
 Each additional profile needs a distinct, non-overlapping persistent session
 directory. Pi provider credentials in environment variables must be explicitly
@@ -180,7 +182,9 @@ Extension dialogs must use the checked UI endpoint.
 Resume accepts only a complete UUIDv4 or UUIDv7, never a path or partial
 identifier, and requires the selected profile to have a `sessionDir`. The
 supervisor resolves an exact, unique regular file with matching header ID and
-working directory, rejects symlinks, then passes that server-owned path to Pi.
+working directory within the profile root, rejects session-file symlinks, then
+passes that server-owned path to Pi. Resume restores the header's cwd after
+checking that its folder still exists within the approved root.
 New sessions receive a supervisor-owned `--session-id` immediately; concurrent
 resumes of the same native ID are rejected across all profiles, including
 directory aliases or copied files retaining that ID. This does not lock out an
@@ -192,7 +196,9 @@ latest 1,000 candidate files; the response includes `truncated` when capped.
 Only bounded header/tail windows are read, so very old display names may fall
 back to the first prompt or an untitled label. For normal CLI continuity in
 `/workspace`, use `/home/agent/.pi/agent/sessions/--workspace--`, not its parent
-directory. Other working directories need separately configured profiles.
+directory. Browser-created subfolder sessions share the profile's configured
+sessionDir and retain their own cwd in the session header; CLI sessions in other
+per-cwd directories are not automatically imported.
 
 ## API
 
@@ -207,6 +213,8 @@ present, it must exactly match `allowedOrigins`.
 | `GET /health/live` | public | Process liveness |
 | `GET /health/ready` | public | Readiness; returns 503 during shutdown |
 | `GET /v1/profiles` | `profiles:read` | Configured profile names |
+| `GET /v1/folders` | `profiles:read` | Approved workspace roots as `{roots:[{profile,path}]}` |
+| `GET /v1/folders?path=...` | `profiles:read` | Folder path, root, parent, child directories and truncation flag |
 | `GET /v1/history?profile=default` | `sessions:read` | Native Pi history from the approved profile's session directory |
 | `GET /v1/session-folders?profile=default` | `sessions:read` | Shared folder assignments as `{folders:[{id,folder}]}` |
 | `PUT /v1/session-folders?profile=default` | `sessions:write` | Assign a native session with `{id,folder}`; empty folder ungroups |
@@ -226,8 +234,14 @@ The read-command set is `get_available_models`,
 `get_session_stats`, `get_state`, and `get_tree`. A write-only token cannot use
 these commands as a way to read session data.
 
-Create requests are `{"profile":"default"}`, optionally with `name` and a full
-UUID `resume` session ID. Exited sessions remain available for inspection until
+Create requests accept `{"cwd":"/workspace/project","name":"Project"}`. The
+server selects the most specific matching profile; an optional `profile` can
+constrain that choice. `{"profile":"default"}` remains supported and starts at
+its configured cwd. Omitted profile/cwd uses the default profile, or the first
+configured profile if none is named default. Names are optional. Resume uses
+`{"profile":"default","resume":"<full UUID>"}` and cannot override the saved cwd.
+Folder listing scans at most 10,000 entries and returns at most 1,000 directories;
+`truncated:true` means users should enter the desired path directly. Exited sessions remain available for inspection until
 idle cleanup but do not consume the active-session quota. Idle cleanup (30 minutes
 by default) only stops disconnected sessions without outstanding commands, active
 agent work, compaction, or pending UI dialogs. Quiet tools such as a long `sleep`
@@ -475,6 +489,11 @@ PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node web/browser-smoke.
 ```
 
 `SETTINGS_ONLY=1` runs just the Settings desktop/mobile regression scenarios.
+`FOLDERS_TABS_ONLY=1` covers folder selection, session tabs, keyboard navigation,
+independent drafts, close/reopen without stopping Pi, and explicit catalog refresh.
+For a portable Nix check, run `nix build path:.#checks.aarch64-darwin.pi-rpc-workspace`
+from the Agentbox root, substituting the desired system. The full
+`pi-rpc-runtime-test` also exercises Linux procfs history storage.
 `CHROMIUM_EXECUTABLE` can select a system Chromium. The desktop/mobile smoke test
 covers Settings commands, native write headers, draft preservation, unchanged
 live model/auto, confirmation/decline, concurrent-write locks, missing command

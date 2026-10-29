@@ -84,6 +84,10 @@
       # Direct builds: `nix build .#agentboxImage`, `nix build .#agentbox`.
       packages = forAllSystems packageSetFor;
 
+      checks = forAllSystems (system: {
+        pi-rpc-workspace = (packageSetFor system).pi-rpc-workspace-test;
+      });
+
       # Platform modules. Both import the shared option schema from
       # ./modules/common-options.nix and add only their platform-specific
       # top-level options + config. `.default` is the conventional attr;

@@ -77,3 +77,76 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .markdown-table{max-width:100%;overflow-x:auto;margin:15px 0}.markdown-table table{width:100%;border-collapse:collapse;font-size:inherit}.markdown-table th,.markdown-table td{border:1px solid var(--border);padding:8px 12px;text-align:left;vertical-align:top;min-width:100px}.markdown-table th{background:var(--raised);font-weight:600}.markdown-table tr:nth-child(even){background:#211f1c}
 .markdown-preview{padding:14px}.code-heading>span{margin-right:auto}
 #settings{border:1px solid var(--border);border-radius:6px;text-align:left;font-size:13px;padding:10px 13px;margin:-17px 0 20px;color:var(--text)}#settings-model{overflow-wrap:anywhere}
+
+/* Open conversations share the workspace; closing a tab leaves Pi running. */
+.session-tabs { display: flex; flex: 0 0 auto; overflow-x: auto; gap: 4px; padding: 8px 12px 0; max-width: 100%; border-bottom: 1px solid var(--border, #393734); }
+.session-tabs[hidden] { display: none; }
+.session-tab { display: flex; flex: 0 0 auto; max-width: 240px; border: 1px solid #494641; border-radius: 8px 8px 0 0; }
+.session-tab.active { background: #393734; border-bottom-color: #e4bd87; }
+.session-tab button { color: inherit; background: transparent; border: 0; padding: 9px; cursor: pointer; }
+.session-tab-select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab-close { flex-shrink: 0; }
+.folder-path { display: flex; gap: 8px; }
+.folder-path input { min-width: 0; flex: 1; }
+.folder-browser { max-height: 220px; overflow-y: auto; display: grid; gap: 4px; }
+.folder-choice { text-align: left; color: inherit; background: #302e2a; border: 1px solid #494641; border-radius: 6px; padding: 9px 12px; cursor: pointer; overflow-wrap: anywhere; }
+
+/* Compact conversation navigation: titles lead, activity stays at the right. */
+.sidebar { background: #1e1e1e; border-right-color: #2c2c2c; }
+.sidebar .session-list { padding-top: 6px; }
+.sidebar .session-row { position: relative; display: flex; margin: 1px 0; gap: 0; }
+.sidebar .session-item {
+  width: 100%; align-items: center; gap: 10px; min-height: 36px;
+  margin: 0; padding: 8px 10px; border: 0; border-radius: 6px;
+  color: #d7d7d7; background: transparent; font-weight: 400;
+}
+.sidebar .session-item:hover { background: #292929; }
+.sidebar .session-item.active { background: #303030; }
+.sidebar .session-copy { order: 0; }
+.sidebar .session-copy strong { font-size: 14px; font-weight: 400; line-height: 20px; }
+.sidebar .session-copy .session-meta { margin: 0; padding: 0; }
+.sidebar .session-symbol {
+  order: 1; position: relative; width: 14px; height: 14px; padding: 0;
+  flex: 0 0 14px; font-size: 0; color: #969696;
+}
+.sidebar .session-symbol::after {
+  content: ""; position: absolute; inset: 3px; border-radius: 50%;
+}
+.sidebar .session-item[data-activity="finished"] .session-symbol::after { background: #3887f6; }
+.sidebar .session-item:is([data-activity="running"], [data-activity="starting"], [data-activity="stopping"]) .session-symbol::after {
+  inset: 0; border: 2px solid #737373; border-right-color: #dedede;
+  animation: session-progress 1s linear infinite;
+}
+.sidebar .session-item:is([data-activity="waiting_reply"], [data-activity="waiting_action"]) .session-symbol::after { background: #e9b75f; }
+.sidebar .session-item[data-activity="exited"] .session-symbol::after { background: #c98e87; }
+.sidebar .session-item:is([data-activity="waiting_action"], [data-activity="waiting_reply"]) .session-copy strong { color: #e6e6e6; font-weight: 400; }
+.sidebar .session-actions {
+  position: absolute; right: 30px; top: 50%; transform: translateY(-50%);
+  opacity: 0; pointer-events: none; background: #292929; border-radius: 4px;
+}
+.sidebar .session-actions button { width: 24px; height: 28px; font-size: 13px; }
+.sidebar .session-row:is(:hover, :focus-within) .session-actions { opacity: 1; pointer-events: auto; }
+.sidebar .session-row:is(:hover, :focus-within) .session-copy { padding-right: 48px; }
+.sidebar .session-row:has(.session-item.active) .session-actions { background: #303030; }
+.sidebar .session-folder.ungrouped-only { margin: 0; }
+.sidebar .session-folder.ungrouped-only > .folder-heading { display: none; }
+.sidebar .session-folder.ungrouped-only > .folder-children { padding-left: 0; }
+.sidebar .folder-heading { color: #989898; font-size: 12px; }
+.sidebar .archived-sessions { margin-top: 12px; }
+.sidebar .archived-sessions > summary { font-family: var(--sans); letter-spacing: 0; font-size: 12px; }
+@keyframes session-progress { to { transform: rotate(360deg); } }
+@media (hover: none) {
+  .sidebar .session-row:has(.session-item.active) .session-actions { opacity: 1; pointer-events: auto; }
+  .sidebar .session-item.active .session-copy { padding-right: 48px; }
+}
+/* Preserve the existing collapsed navigation rail independently of list styling. */
+@media (min-width: 721px) {
+  .sidebar-collapsed .sidebar .session-row { display: block; margin: 0; }
+  .sidebar-collapsed .sidebar .session-item { justify-content: center; padding: 9px 0; margin-bottom: 8px; }
+  .sidebar-collapsed .sidebar .session-actions { display: none; }
+  .sidebar-collapsed .sidebar .session-symbol { width: 30px; height: 30px; flex-basis: 30px; }
+  .sidebar-collapsed .sidebar .session-symbol::after { inset: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar .session-symbol::after { animation: none; }
+}

@@ -73,6 +73,11 @@ const server = createServer(async (request, response) => {
       body = JSON.parse(Buffer.concat(chunks).toString());
     }
     if (url.pathname === "/v1/profiles") return json(response, 200, { profiles: ["default"] });
+    if (url.pathname === "/v1/folders") {
+      if (!url.searchParams.has("path")) return json(response, 200, { roots: [{ profile: "default", path: "/workspace" }] });
+      const path = url.searchParams.get("path");
+      return json(response, 200, { path, root: "/workspace", parent: path === "/workspace" ? null : "/workspace", directories: path === "/workspace" ? [{ name: "project", path: "/workspace/project" }] : [] });
+    }
     if (url.pathname === "/v1/session-folders") {
       if (request.method === "GET") return json(response, 200, { folders: [...serverFolders].map(([id, folder]) => ({ id, folder })) });
       assert.equal(request.method, "PUT");
@@ -330,11 +335,17 @@ try {
       } else assert.equal(await page.locator("#sidebar-resizer").isVisible(), false);
       await openSidebar(); await page.locator("#new-session").click();
       const sessionName = `${label} coding session [slow snapshot]`;
+      assert.equal(await page.locator("#new-profile").count(), 0, "new session has no profile picker");
+      await page.waitForFunction(() => document.getElementById("new-folder").value === "/workspace");
+      await page.getByRole("button", { name: "project", exact: true }).click();
+      await page.waitForFunction(() => document.getElementById("new-folder").value === "/workspace/project");
       await page.locator("#new-name").fill(sessionName);
       await page.locator("#create-session").click();
       await until(() => [...sessions.values()].some((session) => session.name === sessionName && session.releaseSnapshot), "initial get_messages reached fixture gate");
       const session = [...sessions.values()].find((session) => session.name === sessionName);
       assert.ok(session);
+      assert.equal(calls.find((call) => call.method === "POST" && call.body?.name === sessionName).body.cwd, "/workspace/project");
+      assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 1);
       await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_state"), "initial state RPC arrived");
       assert.equal(calls.some((call) => call.id === session.id && call.command?.type === "get_available_models"), false, "catalog waits for initial snapshot");
       const initialTraffic = traffic(session);
@@ -354,6 +365,50 @@ try {
       await until(() => session.clients.size === 1 && page.locator("#connection-label").textContent().then((text) => text === "Connected"), "initial stream connected");
       await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "session ready");
       assert.equal(session.subscriptions, 1);
+      if (process.env.FOLDERS_TABS_ONLY === "1") {
+        await page.locator("#prompt").fill("First session draft");
+        await openSidebar(); await page.locator("#new-session").click();
+        await page.waitForFunction(() => !document.getElementById("create-session").disabled);
+        await page.locator("#new-name").fill(`${label} second tab`);
+        await page.screenshot({ path: join(output, `pi-folder-picker-${label}.png`) });
+        await page.locator("#create-session").click();
+        await until(() => page.locator("#session-title").textContent().then((text) => text === `${label} second tab`), "second tab selected");
+        await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "second tab ready");
+        const second = [...sessions.values()].find((item) => item.name === `${label} second tab`);
+        await page.locator("#prompt").fill("Second session draft");
+        assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 2);
+        await page.locator("#session-tabs .session-tab-select").first().click();
+        assert.equal(await page.locator("#prompt").inputValue(), "First session draft");
+        await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "first tab ready again");
+        await page.locator("#session-tabs .session-tab-select").first().press("ArrowRight");
+        assert.equal(await page.locator("#prompt").inputValue(), "Second session draft");
+        await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "second tab ready again");
+        second.catalog = [...models, { provider: "fixture", id: "latest", name: "Latest catalog model" }];
+        await openSidebar(); await page.locator("#refresh-sessions").click();
+        await until(() => calls.some((call) => call.id === second.id && call.command?.type === "get_available_models" && call.command.refresh === true), "Refresh requests current remote catalog");
+        await until(() => page.locator("#model").textContent().then((text) => text.includes("Latest catalog model")), "latest model appears");
+        if (label === "mobile") await page.locator("#close-drawer").click();
+        await drawerClosed();
+        if (label === "mobile") await page.waitForFunction(() => document.getElementById("sidebar").getBoundingClientRect().right <= 0);
+        await noOverflow(page);
+        await page.screenshot({ path: join(output, `pi-session-tabs-${label}.png`) });
+        const before = creations();
+        await page.getByRole("button", { name: `Close tab: ${second.name}`, exact: true }).click();
+        assert.ok(sessions.has(second.id), "closing tab leaves Pi running");
+        assert.equal(await page.locator("#prompt").inputValue(), "First session draft");
+        await openSidebar(); await page.locator(".session-item").filter({ hasText: second.name }).click();
+        await drawerClosed();
+        assert.equal(await page.locator("#prompt").inputValue(), "Second session draft");
+        assert.equal(creations(), before, "reopening a tab reuses its session");
+        assert.equal(calls.some((call) => call.id === second.id && call.method === "DELETE"), false);
+        await page.getByRole("button", { name: `Close tab: ${second.name}`, exact: true }).click();
+        await page.getByRole("button", { name: `Close tab: ${session.name}`, exact: true }).click();
+        assert.equal(await page.locator("#session-tabs").isVisible(), false);
+        assert.equal(await page.locator("#prompt").inputValue(), "");
+        assert.deepEqual(errors, [], "no JS or CSP errors");
+        console.log(`${label}: PASS folder browsing, no profile picker, parallel session tabs, keyboard navigation, drafts, close/reopen without stop, live catalog refresh, overflow`);
+        continue;
+      }
       // Folder paths nest rows, and collapsed previews escape the scroll container.
       await openSidebar();
       page.once("dialog", (dialog) => dialog.accept("Work/Agentbox"));
@@ -742,6 +797,7 @@ try {
       await until(() => page.locator("#messages").textContent().then((text) => text.includes("Snapshot-only fixture message")), "healthy Refresh fetches new snapshot without an SSE event");
       await page.waitForTimeout(250);
       assert.deepEqual(traffic(session), { ...healthyTraffic, metadata: healthyTraffic.metadata + 1, rpc: [...healthyTraffic.rpc, "get_messages", "get_state", "get_available_thinking_levels", "get_available_models"] }, "healthy Refresh fetches one snapshot and refreshes catalogs without a new stream");
+      assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "get_available_models").at(-1).command.refresh, true);
       assert.deepEqual([...session.clients], [healthyStream], "Refresh keeps the original stream open");
       assert.ok((await page.locator("#model").textContent()).includes("New catalog model"), "Refresh discovers newly available providers");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this selected-session draft");
@@ -951,6 +1007,7 @@ try {
       await page.locator("#prompt").fill("delayed acceptance"); await page.locator("#prompt").press("Enter");
       await until(() => Boolean(resumed.releasePrompt), "delayed write arrived");
       await openSidebar(); await page.locator("#new-session").click();
+      await page.waitForFunction(() => Boolean(document.getElementById("new-folder").value));
       await page.locator("#new-name").fill(`${label} other session`); await page.locator("#create-session").click();
       await until(() => page.locator("#session-title").textContent().then((text) => text === `${label} other session`), "other session selected");
       await page.locator("#prompt").fill("Keep this other draft");
@@ -978,9 +1035,10 @@ try {
       assert.equal(await page.locator("#session-title").textContent(), `${label} other session`);
       const other = [...sessions.values()].find((entry) => entry.name === `${label} other session`);
       await until(() => other.clients.size === 1 && resumed.clients.size === 0, "creating another session closes prior stream");
+      assert.ok(await page.locator("#session-tabs .session-tab-select").count() >= 2);
       const creationCount = creations(), runtimeIds = [...sessions.keys()].sort();
       const resumedSubscriptions = resumed.subscriptions, otherSubscriptions = other.subscriptions;
-      await openSidebar(); await page.locator(".session-item").filter({ hasText: session.name }).click();
+      await page.locator("#session-tabs .session-tab-select").filter({ hasText: session.name }).click();
       await drawerClosed();
       await until(() => resumed.clients.size === 1 && other.clients.size === 0, "switch subscribes to existing session and closes other stream");
       assert.equal(resumed.subscriptions, resumedSubscriptions + 1);
@@ -989,7 +1047,7 @@ try {
       assert.equal(creations(), creationCount, "switching to a running session sends no creation/resume POST");
       assert.deepEqual([...sessions.keys()].sort(), runtimeIds, "switching does not create a duplicate runtime process");
       await until(() => page.locator("#prompt").inputValue().then((text) => text === ""), "accepted original draft cleared on return");
-      await openSidebar(); await page.locator(".session-item").filter({ hasText: `${label} other session` }).click();
+      await page.locator("#session-tabs .session-tab-select").filter({ hasText: `${label} other session` }).click();
       await drawerClosed();
       await until(() => other.clients.size === 1 && resumed.clients.size === 0, "return switches subscription and closes prior stream");
       assert.equal(other.subscriptions, otherSubscriptions + 1);
@@ -997,7 +1055,13 @@ try {
       assert.equal(creations(), creationCount, "return sends no creation/resume POST");
       assert.deepEqual([...sessions.keys()].sort(), runtimeIds, "return does not create a duplicate runtime process");
       assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
-      // Exercise history actions separately from the original streaming/history fixtures.
+      await page.getByRole("button", { name: `Close tab: ${other.name}`, exact: true }).click();
+      assert.ok(sessions.has(other.id), "closing a tab keeps its process running");
+      assert.equal(calls.some((call) => call.id === other.id && call.method === "DELETE"), false);
+      await openSidebar(); await page.locator(".session-item").filter({ hasText: other.name }).click();
+      await drawerClosed();
+      assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft", "closing/reopening retains draft");
+            // Exercise history actions separately from the original streaming/history fixtures.
       const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=" };
       const raw = "Raw **markdown** and `code`\n\n```js\nconst copied = true;\n```";
       complete(other, { role: "user", content: "Retained prefix", timestamp: ++tick });
@@ -1171,7 +1235,7 @@ try {
       if (label === "mobile") await page.locator("#close-drawer").click();
       await drawerClosed();
       await until(() => group.locator(".tool-detail[open]").count().then((count) => count === 1), "expanded action survives refresh");
-      assert.deepEqual(await page.evaluate(() => ({ local: Object.keys(localStorage).sort(), session: sessionStorage.length, cookies: document.cookie })), { local: ["agentbox.pi.hidden-models.v1", "agentbox.pi.hide-profile.v1"], session: 0, cookies: "" }, "only display preferences persist, not auth or drafts");
+      assert.deepEqual(await page.evaluate(() => ({ local: Object.keys(localStorage).filter((key) => key !== "agentbox.pi.session-folders.v1").sort(), session: sessionStorage.length, cookies: document.cookie })), { local: ["agentbox.pi.hidden-models.v1", "agentbox.pi.hide-profile.v1"], session: 0, cookies: "" }, "only display preferences persist, not auth or drafts");
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
       assert.equal(await page.locator("#token").inputValue(), "");
       assert.equal(await page.title(), "Pi Agent | Agentbox", "logout clears tab counters");
@@ -1185,7 +1249,7 @@ try {
     } finally { await context.close(); }
   }
   assert.deepEqual(serverErrors, []);
-  if (process.env.SETTINGS_ONLY !== "1") console.log(`Screenshots: ${join(output, "pi-workspace-desktop.png")} and ${join(output, "pi-workspace-mobile.png")}`);
+  if (process.env.SETTINGS_ONLY !== "1" && process.env.FOLDERS_TABS_ONLY !== "1") console.log(`Screenshots: ${join(output, "pi-workspace-desktop.png")} and ${join(output, "pi-workspace-mobile.png")}`);
 } finally {
   await browser.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
 }

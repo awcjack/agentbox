@@ -636,18 +636,27 @@ services.agentbox.settings.piRpcApi = {
 ```
 
 Open the UI directly in a browser, enter the raw bearer token/password (not its
-digest), and select an administrator-approved profile. The browser keeps the
+digest), and choose a working folder within an administrator-approved workspace. The browser keeps the
 password in page memory, not localStorage or a URL; reload or log out to
 clear it. Allow the exact browser origin, including its scheme and port, even
 when the UI and API share an origin. Use TLS or a trusted VPN for remote access.
 
-Profiles fix the working directory and persistent Pi session directory on the
-server. The browser cannot choose arbitrary filesystem paths. Native Pi history
+Profiles define workspace roots and persistent Pi session directories on the
+server. New session browses folders within those roots and starts Pi in the
+selected folder. The server rejects paths and symlinks outside the root. Sessions
+open in tabs, with independent drafts and background processes; closing a tab
+leaves Pi running, while End & archive stops it. The compact sidebar retains
+nested conversation folders and shows running/unread indicators on the right. Native Pi history
 is separate from OpenCode: there is no OpenCode conversation conversion or
 automatic credential migration. Existing Pi auth/settings under `~/.pi/agent`
 remain available. Provider environment credentials, if needed, must be explicitly
 mapped in the profile; a Claude Code token is not assumed to be a Pi provider key.
 RPC authentication secrets are excluded from the Pi child environment.
+Model discovery uses Pi's official provider catalogs with cached/offline fallback;
+Refresh bypasses catalog freshness. The same patched Pi package is available as
+`packages.<system>.pi-coding-agent` for native deployments. The UI, runtime,
+provider patches and portable workspace check are all maintained in Agentbox;
+consumers only configure host paths, authentication, networking and services.
 
 `profiles`, command allowlists, token scopes, origins, and resource/time limits
 are typed. Session-switch/fork/clone/new-session, direct bash, HTML export, and

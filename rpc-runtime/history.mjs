@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, opendir, realpath, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { containsFolder } from "./folders.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
 // Pi currently creates UUIDv7 IDs; older persisted conversations use UUIDv4.
@@ -58,7 +59,7 @@ async function historyDirectory(profile) {
   return realpath(path);
 }
 
-async function readHeader(handle, id, cwd) {
+async function readHeader(handle, id, cwd, allowSubdirectories = false) {
   const info = await handle.stat();
   if (!info.isFile()) return null;
   const first = Buffer.alloc(Math.min(WINDOW_BYTES, info.size));
@@ -66,11 +67,11 @@ async function readHeader(handle, id, cwd) {
   const lines = first.subarray(0, bytesRead).toString("utf8").split("\n");
   if (info.size > bytesRead) lines.pop();
   const header = JSON.parse(lines.shift());
-  if (header?.type !== "session" || header.id !== id || header.cwd !== cwd) return null;
+  if (header?.type !== "session" || header.id !== id || !(header.cwd === cwd || (allowSubdirectories && containsFolder(header.cwd, cwd)))) return null;
   return { info, header, lines };
 }
 
-export async function resolveHistorySession(profile, id) {
+export async function resolveHistorySession(profile, id, { details = false } = {}) {
   if (typeof id !== "string" || !NATIVE_SESSION_ID_RE.test(id)) return null;
   try {
     const root = await historyDirectory(profile);
@@ -86,9 +87,10 @@ export async function resolveHistorySession(profile, id) {
       let handle;
       try {
         handle = await open(path, READ_FLAGS);
-        if (!(await readHeader(handle, id, profile.cwd))) continue;
+        const parsed = await readHeader(handle, id, profile.cwd, profile.allowSubdirectories);
+        if (!parsed) continue;
         if (match) return null;
-        match = path;
+        match = details ? { path, cwd: parsed.header.cwd } : path;
       } catch { /* Corrupt, unreadable or replaced entries are not sessions. */ }
       finally { await handle?.close(); }
     }
@@ -193,7 +195,7 @@ export async function listHistory(profile, profileName, { includeArchived = fals
     try {
       // Never follow a session-file symlink, or block on a replaced FIFO.
       handle = await open(file.path, READ_FLAGS);
-      const parsed = await readHeader(handle, file.id, profile.cwd);
+      const parsed = await readHeader(handle, file.id, profile.cwd, profile.allowSubdirectories);
       if (!parsed) continue;
       const { info, header, lines } = parsed;
       if (seen.has(header.id)) { duplicates.add(header.id); continue; }
@@ -341,7 +343,7 @@ export async function listSessionFolders(root, profile, profileName) {
       let handle;
       try {
         handle = await open(join(root, entry.name), READ_FLAGS);
-        if (await readHeader(handle, id, profile.cwd)) {
+        if (await readHeader(handle, id, profile.cwd, profile.allowSubdirectories)) {
           if (native.has(id)) duplicates.add(id);
           native.add(id);
         }

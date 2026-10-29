@@ -28,6 +28,7 @@
       <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Session navigation width" aria-controls="sidebar" aria-orientation="vertical" tabindex="0" title="Resize sessions: drag, Left/Right arrows, Home or End" hidden></div>
     </aside>
     <main class="main">
+      <nav id="session-tabs" class="session-tabs" aria-label="Open sessions" hidden></nav>
       <header class="topbar">
         <button id="open-drawer" class="icon-button mobile-only" aria-label="Open sessions" aria-expanded="false" aria-controls="sidebar">&#9776;</button>
         <div class="session-heading"><h1 id="session-title">Pi coding workspace</h1><p id="session-subtitle">Code, tools, and persistent conversations.</p></div>
@@ -118,8 +119,12 @@
   </dialog>
   <dialog id="new-dialog" aria-labelledby="new-title">
     <form id="new-form" class="dialog-body">
-      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a workspace profile and give this conversation a name.</p>
-      <label for="new-profile">Profile</label><select id="new-profile" required></select>
+      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a working folder and give this conversation a name.</p>
+      <label for="new-folder">Working folder</label>
+      <div class="folder-path"><input id="new-folder" required autocomplete="off" spellcheck="false" aria-describedby="folder-help"><button id="browse-folder" class="text-button" type="button">Browse</button></div>
+      <p id="folder-help" class="field-note">Choose a folder on the server. Pi starts directly in this folder.</p>
+      <div id="folder-browser" class="folder-browser" aria-label="Server folders"></div>
+      <p id="folder-status" class="field-note" role="status"></p>
       <label for="new-name">Session name <span class="muted">(optional)</span></label><input id="new-name" maxlength="200" placeholder="What are we working on?" autocomplete="off">
       <p id="new-error" class="form-error" role="alert" hidden></p><button id="create-session" class="primary-button" type="submit">Create session <span aria-hidden="true">&rarr;</span></button>
     </form>

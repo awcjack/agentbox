@@ -34,6 +34,7 @@ in
     agentbox-pi-goal-runtime
     agentbox-pi-rpc-runtime
     pi-agentbox-mcp-runtime
+    pi-coding-agent
     ;
 
   pi-codex-wrapper-test = import ./tests/pi-codex-wrapper.nix { inherit pkgs; };
@@ -200,12 +201,15 @@ in
       touch $out
     '';
 
+  pi-rpc-workspace-test = import ./rpc-runtime/workspace-test.nix { inherit pkgs; };
+
   pi-rpc-runtime-test =
     let
       testSource = pkgs.runCommand "pi-rpc-runtime-test-source" { } ''
         mkdir -p $out/test
         cp ${./rpc-runtime/runtime.mjs} $out/runtime.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs
+        cp ${./rpc-runtime/folders.mjs} $out/folders.mjs
         cp ${./rpc-runtime/supervise.sh} $out/supervise.sh
         cp ${./rpc-runtime/test}/*.test.mjs $out/test/
         cp -r ${./rpc-runtime/web} $out/web

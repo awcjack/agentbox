@@ -31,6 +31,8 @@ $("profile-section").hidden = hideProfile;
 $("hide-profile-section").checked = hideProfile;
 const api = createTransport(() => token);
 let token = "", auth = new AbortController(), epoch = 0, selection = 0, listVersion = 0;
+let tabsSignature = "";
+let openTabs = [], folderRequest = 0, folderLoading = false;
 let current = null, sessions = [], profiles = [], history = [], readOnly = false, createDenied = false, createBusy = false;
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
@@ -417,6 +419,7 @@ async function assignSessionFolder(session, historical, value) {
   }
 }
 function renderSessions() {
+  renderTabs();
   hideSessionPreview();
   updateTabTitle();
   // Polls and streaming events must not detach the native drag source/targets.
@@ -449,8 +452,10 @@ function renderSessions() {
     const date = (historical && isArchived(session) && session.createdAt) || session.modifiedAt || session.lastActivityAt || session.createdAt;
     const parsed = new Date(date);
     const when = Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    copy.append(element("small", "", `${session.profile} / ${historical ? "resume" : activityLabel(session)}${when ? ` / ${when}` : ""}`));
+    copy.append(element("small", "session-meta sr-only", `${session.profile} / ${historical ? "resume" : activityLabel(session)}${when ? ` / ${when}` : ""}`));
     button.append(copy);
+    button.title += `${session.cwd ? `\n${session.cwd}` : ""}${when ? `\n${when}` : ""}`;
+    button.setAttribute("aria-label", button.title);
     button.addEventListener("click", () => historical ? resume(session) : activate(session));
     button.disabled = historical ? createDenied || createBusy : Boolean(records.get(session.id)?.ending);
     button.addEventListener("pointerenter", () => previewSession(button));
@@ -518,15 +523,19 @@ function renderSessions() {
     }
     // Keep an empty drop target available even when every session has a folder.
     const target = group("Ungrouped", "", container);
+    if (!folders.size) {
+      target.parentElement.classList.add("ungrouped-only");
+      target.parentElement.open = true;
+    }
     for (const session of ungrouped) row(session, historical, target);
     if (!ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
   }
-  if (live.length) root.append(element("div", "list-heading", "IN THIS RUNTIME"));
+  if (live.length) root.append(element("div", "list-heading sr-only", "IN THIS RUNTIME"));
   grouped(live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))), false, root, "live");
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
   const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
   const past = available.filter((session) => !isArchived(session));
-  if (past.length) root.append(element("div", "list-heading", "PICK UP WHERE YOU LEFT OFF"));
+  if (past.length) root.append(element("div", "list-heading sr-only", "PICK UP WHERE YOU LEFT OFF"));
   grouped(past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))), true, root, "past");
   if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   if (token) {
@@ -628,7 +637,7 @@ function persistModelVisibility(ctx) {
 // Independent of SSE and routine transcript reconciliation. Each request owns its
 // retries, and cancellation also guards against fetch implementations resolving late.
 function cancelModels(ctx) { ctx.modelController?.abort(); }
-function refreshModels(ctx) {
+function refreshModels(ctx, force = false) {
   cancelModels(ctx);
   const controller = new AbortController(), nativeId = ctx.meta.nativeSessionId;
   ctx.modelController = controller;
@@ -636,7 +645,7 @@ function refreshModels(ctx) {
   ctx.controller.signal.addEventListener("abort", abort, { once: true });
   const valid = () => active(ctx) && !controller.signal.aborted && ctx.meta.nativeSessionId === nativeId;
   retryCatalogRead(() => api.request(path(ctx, "/rpc"), {
-    body: { type: "get_available_models" }, signal: controller.signal,
+    body: { type: "get_available_models", ...(force ? { refresh: true } : {}) }, signal: controller.signal,
   }), controller.signal).then((value) => {
     if (!valid()) return;
     ctx.record.models = value?.data?.models || [];
@@ -975,7 +984,7 @@ async function snapshot(ctx, initial = false) {
   for (const message of ctx.record.messages) if (message.role === "toolResult") ctx.tools.delete(message.toolCallId);
   ctx.ready = true;
   if (freshState) refreshThinkingLevels(ctx, initial);
-  if (initial || ctx.modelsRequested) { ctx.modelsRequested = false; refreshModels(ctx); }
+  if (initial || ctx.modelsRequested) { const force = ctx.forceModelsRequested; ctx.modelsRequested = false; ctx.forceModelsRequested = false; refreshModels(ctx, force); }
   renderModels(ctx); renderSessions(); scheduleRender();
   return cursor;
 }
@@ -1195,8 +1204,69 @@ $("conversation-action-form").addEventListener("submit", async (event) => {
   }
 });
 $("close-copy").addEventListener("click", () => $("copy-dialog").close());
+function renderTabs() {
+  openTabs = openTabs.filter((id) => sessions.some((session) => session.id === id));
+  const root = $("session-tabs");
+  const signature = JSON.stringify([current?.id, openTabs.map((id) => {
+    const meta = sessions.find((session) => session.id === id);
+    return [id, displayTitle(meta), meta.cwd];
+  })]);
+  if (signature === tabsSignature) return;
+  tabsSignature = signature;
+  const scroll = root.scrollLeft, changed = root.dataset.active !== (current?.id || "");
+  const focused = root.contains(document.activeElement) ? {
+    id: document.activeElement.closest(".session-tab")?.dataset.id,
+    close: document.activeElement.classList.contains("session-tab-close"),
+  } : null;
+  root.dataset.active = current?.id || "";
+  root.replaceChildren(); root.hidden = !openTabs.length;
+  for (const id of openTabs) {
+    const meta = sessions.find((session) => session.id === id);
+    const group = element("div", "session-tab"); group.dataset.id = id;
+    group.classList.toggle("active", current?.id === id);
+    const button = element("button", "session-tab-select", displayTitle(meta));
+    button.type = "button"; button.setAttribute("aria-current", current?.id === id ? "page" : "false");
+    button.title = `${displayTitle(meta)} — ${meta.cwd || ""}`;
+    button.addEventListener("click", () => activate(meta));
+    button.addEventListener("keydown", (event) => {
+      const index = openTabs.indexOf(id);
+      const next = event.key === "ArrowRight" ? (index + 1) % openTabs.length
+        : event.key === "ArrowLeft" ? (index - 1 + openTabs.length) % openTabs.length
+        : event.key === "Home" ? 0 : event.key === "End" ? openTabs.length - 1 : -1;
+      if (next >= 0) {
+        event.preventDefault(); activate(sessions.find((session) => session.id === openTabs[next]));
+        root.querySelectorAll(".session-tab-select")[next]?.focus();
+      }
+    });
+    const close = element("button", "session-tab-close", "×"); close.type = "button";
+    close.setAttribute("aria-label", `Close tab: ${displayTitle(meta)}`);
+    close.title = "Close tab (session keeps running)";
+    close.addEventListener("click", () => closeTab(id));
+    group.append(button, close); root.append(group);
+    if (focused?.id === id) (focused.close ? close : button).focus({ preventScroll: true });
+  }
+  root.scrollLeft = scroll;
+  if (changed) root.querySelector(".session-tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+function closeTab(id) {
+  const index = openTabs.indexOf(id);
+  openTabs = openTabs.filter((value) => value !== id);
+  if (current?.id === id) {
+    current.controller.abort(); clearTimeout(current.refreshTimer); selection++;
+    current = null;
+    const next = sessions.find((session) => session.id === openTabs[Math.min(index, openTabs.length - 1)]);
+    if (next) activate(next);
+    else {
+      $("approvals").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
+      restoreDraft(); renderMessages(); updateControls(); updateTabTitle(null);
+    }
+  }
+  renderSessions();
+}
+
 function activate(meta, { reconnect = false } = {}) {
   if (records.get(meta.id)?.ending) return;
+  if (!openTabs.includes(meta.id)) openTabs.push(meta.id);
   updateTabTitle(meta.id);
   // Selecting the current conversation is navigation, not a reconnect request.
   if (!reconnect && current?.id === meta.id && active(current)) { drawer(false); return; }
@@ -1211,7 +1281,7 @@ function activate(meta, { reconnect = false } = {}) {
 }
 
 async function createSession(body) {
-  if (createBusy || createDenied || !token) return;
+  if (createBusy || createDenied || !token || (body.cwd !== undefined && folderLoading)) return;
   createBusy = true; const ownEpoch = epoch, ownSelection = selection;
   $("create-session").disabled = true; $("new-error").hidden = true; updateControls(); renderSessions();
   try {
@@ -1231,6 +1301,41 @@ async function createSession(body) {
     report(new ApiError(message, error.status, error.code));
   } finally { if (ownEpoch === epoch) { createBusy = false; $("create-session").disabled = createDenied; updateControls(); renderSessions(); } }
 }
+async function browseFolder(path = null) {
+  const request = ++folderRequest, ownEpoch = epoch;
+  folderLoading = true; $("create-session").disabled = true; $("new-folder").value = path ?? "";
+  $("folder-status").textContent = "Loading folders...";
+  $("folder-browser").replaceChildren();
+  try {
+    const result = await api.request(`/v1/folders${path === null ? "" : `?path=${encodeURIComponent(path)}`}`, { signal: auth.signal });
+    if (request !== folderRequest || ownEpoch !== epoch || !$("new-dialog").open) return;
+    if (result.roots) {
+      if (result.roots.length === 1) return browseFolder(result.roots[0].path);
+      $("new-folder").value = "";
+      for (const root of result.roots) addFolderButton(root.path, root.path);
+    } else {
+      $("new-folder").value = result.path;
+      addFolderButton("Workspaces", null);
+      if (result.parent) addFolderButton("↑ Parent folder", result.parent);
+      for (const folder of result.directories) addFolderButton(folder.name, folder.path);
+    }
+    $("folder-status").textContent = result.truncated ? "Some folders were omitted. Enter a path to browse directly." : result.roots ? "Choose a workspace folder." : "Create the session in the selected folder, or open a subfolder.";
+  } catch (error) {
+    if (request === folderRequest && ownEpoch === epoch) $("folder-status").textContent = error.message;
+  } finally {
+    if (request === folderRequest && ownEpoch === epoch) { folderLoading = false; $("create-session").disabled = createBusy || createDenied; }
+  }
+}
+function addFolderButton(label, path) {
+  const button = element("button", "folder-choice", label); button.type = "button";
+  button.addEventListener("click", () => browseFolder(path));
+  $("folder-browser").append(button);
+}
+$("browse-folder").addEventListener("click", () => browseFolder($("new-folder").value.trim() || null));
+$("new-folder").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") { event.preventDefault(); browseFolder($("new-folder").value.trim() || null); }
+});
+
 async function resume(session) {
   const existing = sessions.find((item) => item.profile === session.profile && item.nativeSessionId === session.id && item.status === "running");
   if (existing) activate(existing);
@@ -1240,8 +1345,9 @@ function openNew() {
   if (!token || !profiles.length || createDenied || createBusy) return;
   drawer(false);
   $("new-error").hidden = true;
-  $("new-profile").value = $("profile-filter").value || current?.meta.profile || profiles[0];
-  $("new-dialog").showModal(); $("new-name").focus();
+  $("new-dialog").showModal();
+  browseFolder(current?.meta.cwd ?? null);
+  $("new-folder").focus();
 }
 
 $("settings").addEventListener("click", () => {
@@ -1487,7 +1593,7 @@ function logout(message = "") {
   attention.clear(); document.title = baseTitle;
   dismissedCommands = null; commandKey = ""; hideCommandSuggestions();
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
-  current = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
+  current = null; openTabs = []; folderRequest++; folderLoading = false; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
   conversationTarget = null; $("conversation-action-dialog").close(); $("copy-dialog").close();
   settingsTarget = null; $("settings-dialog").close(); $("settings-model").textContent = ""; $("settings-help").textContent = "";
@@ -1496,7 +1602,7 @@ function logout(message = "") {
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
-  $("new-profile").replaceChildren(); $("new-dialog").close(); drawer(false); showNotice("");
+  $("new-folder").value = ""; $("folder-browser").replaceChildren(); $("new-dialog").close(); drawer(false); showNotice("");
   sessionDrag.cancel();
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
@@ -1516,7 +1622,7 @@ $("login-form").addEventListener("submit", async (event) => {
     if (ownEpoch !== epoch) return;
     for (const profile of profiles) {
       const option = element("option", "", profile); option.value = profile;
-      $("profile-filter").append(option); $("new-profile").append(option.cloneNode(true));
+      $("profile-filter").append(option);
     }
     $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshFolders(true); refreshSessions(); scheduleSessionPoll();
   } catch (error) { if (ownEpoch === epoch) logout(error.message); }
@@ -1526,9 +1632,9 @@ $("login-dialog").addEventListener("cancel", (event) => event.preventDefault());
 $("logout").addEventListener("click", () => logout());
 $("new-session").addEventListener("click", openNew);
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
-$("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ profile: $("new-profile").value, ...(name ? { name } : {}) }); });
+$("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ cwd: $("new-folder").value.trim(), ...(name ? { name } : {}) }); });
 $("refresh-sessions").addEventListener("click", () => {
-  if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; current.modelsRequested = true; cancelModels(current); }
+  if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; current.modelsRequested = true; current.forceModelsRequested = true; cancelModels(current); }
   refreshSessions();
   if (current?.online && current.ready) requestRefresh(current);
   else if (current) activate(current.meta, { reconnect: true });
