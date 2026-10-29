@@ -14,6 +14,7 @@ on:
       - "image.nix"
       - "network-image.nix"
       - "packages.nix"
+      - "pi-cursor.nix"
       - "neovim.nix"
       - "package.nix"
       - "extensions/**"
@@ -31,6 +32,7 @@ on:
       - "image.nix"
       - "network-image.nix"
       - "packages.nix"
+      - "pi-cursor.nix"
       - "neovim.nix"
       - "package.nix"
       - "extensions/**"
@@ -89,6 +91,7 @@ jobs:
             pi-policy-extension-test \
             pi-goal-extension-test \
             pi-codex-wrapper-test \
+            pi-cursor-test \
             pi-lsp-client-test \
             pi-mcp-runtime-test \
             pi-rpc-runtime-test \

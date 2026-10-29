@@ -116,6 +116,7 @@
             opencode = opencodePackageFor pkgs.stdenv.hostPlatform.system;
             pi-coding-agent = piPackageFor pkgs.stdenv.hostPlatform.system;
             pi-post = pkgs.callPackage ./pi-post.nix { };
+            pi-cursor = pkgs.callPackage ./pi-cursor.nix { };
           }
           // builtins.removeAttrs args [ "pkgs" ]
         );
