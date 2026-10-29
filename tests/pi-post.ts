@@ -138,6 +138,47 @@ try {
   assert.match(child.messages[1].content, /Result from a process/)
   assert.equal(child.messages[1].details.message.replyTo, parentAddress)
 
+  // Closing is resumable; archiving is not a messaging target. Even mail
+  // queued before the archive must never start a turn when the file is opened.
+  await resumed.emit("session_shutdown")
+  const beforeArchive = await child.tool("send_message", { to: "sibling", body: "Must not wake an archive" })
+  const siblingAddress = beforeArchive.details.receipts[0].address
+  fs.writeFileSync(join(root, "history", `.archived-${siblingId}`), "")
+  assert.equal(child.sameMain(siblingAddress), false, "archived peers must not bypass policy")
+  const all = await child.tool("list_sessions", { all: true })
+  assert.doesNotMatch(all.content[0].text, /sibling/)
+  for (const target of ["sibling", siblingId, siblingId.slice(0, 8), siblingAddress, siblingCwd]) {
+    await assert.rejects(child.tool("send_message", { to: target, body: "Must be rejected" }))
+  }
+  const parentCount = parent.messages.length
+  await assert.rejects(child.tool("send_message", { to: [parentAddress, siblingAddress], body: "No partial send" }))
+  assert.equal(parent.messages.length, parentCount)
+  const openedArchive = await start(siblingId, "sibling", siblingCwd, mainId)
+  assert.equal(openedArchive.messages.length, 0, "archived queued mail must not trigger a turn")
+  const cliList = await promisify(execFile)(process.execPath, [join(postDir, "bin/pi-post.mjs"), "list", "--all"])
+  assert.doesNotMatch(cliList.stdout, /sibling/)
+  for (const target of ["sibling", siblingId, siblingAddress, siblingCwd]) {
+    await assert.rejects(promisify(execFile)(process.execPath, [
+      join(postDir, "bin/pi-post.mjs"), "send", "--to", target, "--body", "Must be rejected",
+    ]))
+  }
+
+  // Archive after resolution/deposit but before the watcher delivers: the
+  // receiving side must recheck the marker, not rely on a sender's snapshot.
+  const inFlight = parent.tool("send_message", { to: "child", body: "In flight at archive time" })
+  fs.writeFileSync(join(root, "history", ".archived-22222222-2222-4222-8222-222222222222"), "")
+  const raced = await inFlight
+  assert.equal(raced.details.receipts[0].status, "queued")
+  assert.equal(child.messages.length, 2, "an archive must not be woken by an in-flight delivery")
+
+  // Old pi-post records have no trustworthy session-file/archive location.
+  // They must re-register instead of bypassing the archive filter.
+  const parentRecord = join(process.env.PI_POST_DIR!, "registry", `${parentAddress}.json`)
+  const legacy = JSON.parse(fs.readFileSync(parentRecord, "utf8"))
+  delete legacy.sessionFile
+  fs.writeFileSync(parentRecord, JSON.stringify(legacy))
+  assert.doesNotMatch((await parent.tool("list_sessions", { all: true })).content[0].text, /parent/)
+  await assert.rejects(parent.tool("send_message", { to: parentAddress, body: "Unknown archive state" }), /unregistered or archived/)
   console.log("pi-post integration tests passed")
 } finally {
   for (const session of sessions) await session.emit("session_shutdown")

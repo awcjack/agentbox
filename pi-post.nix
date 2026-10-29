@@ -18,7 +18,10 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   };
 
   nativeBuildInputs = [ makeWrapper ];
-  patches = [ ./patches/pi-post-session-roots.patch ];
+  patches = [
+    ./patches/pi-post-session-roots.patch
+    ./patches/pi-post-archived-sessions.patch
+  ];
   dontBuild = true;
 
   installPhase = ''

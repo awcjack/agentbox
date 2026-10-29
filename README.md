@@ -109,6 +109,15 @@ browser sessions. No runtime install is needed. Pi gets two model tools:
   Live sessions receive it automatically; offline sessions receive queued mail
   when resumed. Ambiguous targets fail instead of guessing.
 
+Archived sessions are excluded, including with `all: true` or `/sessions all`.
+Agentbox patches pi-post to honor the native Pi UI's `.archived-<session-id>`
+marker beside the JSONL session file. Sending by name, ID, directory, or a known
+address fails for an archive; queued or in-flight mail cannot wake it, including
+if its file is opened again. The CLI applies the same filter. Ordinary closed
+sessions can still receive queued messages. Records from an older messaging
+installation without a session-file location stay hidden until the session
+re-registers, so unknown archive state cannot bypass this rule.
+
 `/sessions` lists peers and `/inbox` previews queued messages. Shell tools and
 hooks can use the bundled `pi-post` CLI. Registry and mailbox data persist in
 `~/.pi/agent/post` on the existing Pi volume, shared by sessions in the same
