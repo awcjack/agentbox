@@ -714,6 +714,127 @@ nix build .#agentboxImage      # -> ./result (a docker image tarball)
 docker load < result           # loads agentbox:latest
 ```
 
+## Outbound network policies
+
+Network policies are opt-in. With `settings.network.enable = false` (the
+default), both platforms retain their existing host networking. Restricted
+mode currently requires Docker; the NixOS Podman backend is rejected.
+
+To block specific networks while allowing other destinations:
+
+```nix
+services.agentbox.settings.network = {
+  enable = true;
+  defaultAction = "allow";
+  deniedNetworks = [
+    { cidr = "10.20.0.0/16"; } # production network
+    { cidr = "169.254.169.254/32"; } # cloud metadata
+    { cidr = "fd12:3456::/32"; }
+    { cidr = "203.0.113.5"; protocol = "tcp"; ports = [ 5432 ]; }
+  ];
+};
+```
+
+For an IP allowlist, set `defaultAction = "deny"` and populate
+`allowedNetworks` with the same rule format. Rules accept IPv4/IPv6 addresses
+and CIDRs, `protocol = "all" | "tcp" | "udp"`, and optional destination
+`ports`. Ports require TCP or UDP. Denied rules win over allowed rules.
+Loopback, return traffic for existing connections, and IPv6 neighbor discovery
+remain available. `dnsServers` defaults to `[ "1.1.1.1" ]`; TCP/UDP port 53 to
+these resolvers is allowed unless a denied rule blocks it. Set `dnsServers =
+[ ]` with an empty allowlist and default deny for no new external connections.
+Permitted DNS is an explicit network exception, including arbitrary queries.
+
+For a mandatory HTTP/HTTPS domain allowlist:
+
+```nix
+services.agentbox.settings.network = {
+  enable = true;
+  domains = {
+    enable = true;
+    defaultAction = "deny";
+    allowed = [ ".github.com" "registry.npmjs.org" ];
+    denied = [ "blocked.example.com" ];
+  };
+  deniedNetworks = [
+    { cidr = "10.0.0.0/8"; }
+    { cidr = "172.16.0.0/12"; }
+    { cidr = "192.168.0.0/16"; }
+    { cidr = "169.254.0.0/16"; }
+    { cidr = "fc00::/7"; }
+    { cidr = "fe80::/10"; }
+  ];
+};
+```
+
+A leading dot matches the domain and all subdomains; other entries match
+exactly. Domain denies win. Use `domains.defaultAction = "allow"` with
+`domains.denied` for a domain blocklist. Both domain modes require the proxy:
+direct outbound traffic, direct DNS, QUIC, and SSH are blocked. Use Git over
+HTTPS. Add actual provider, login, registry, CDN, and download domains required
+by your enabled agents; the example is not a complete agent bootstrap list.
+The generated upper/lowercase proxy environment variables configure compatible
+clients; clients that ignore the proxy fail closed. Domain mode rejects
+`allowedNetworks` because direct exceptions could bypass it.
+
+Domain filtering checks HTTP request destinations and HTTPS CONNECT hostnames;
+it does not decrypt TLS or inspect data sent to an allowed service. IP deny
+rules are also enforced on the proxy's outbound connections after DNS
+resolution, including when an allowed domain resolves to a denied subnet.
+Domain blocklists match the supplied hostname; aliases and literal IPs are
+different destinations. Use a domain allowlist or destination subnet denies
+when those alternatives must also be restricted.
+
+Restricted mode starts a separate firewall companion before the agent and
+removes `NET_ADMIN`, `NET_RAW`, and `SYS_ADMIN` from the agent's capability
+bounding set. In-container sudo cannot edit the firewall. Domain mode adds a
+separate Squid companion, so becoming root in the agent cannot impersonate a
+privileged proxy process. Docker-in-Docker (`enableDocker = true`) is rejected.
+The existing restricted Docker API proxy remains reachable on loopback.
+Rules are installed for both IP families, with Docker's embedded DNS blocked
+before NAT. A firewall setup error prevents the agent from starting.
+
+The network companion owns published ports. Defaults expose only the UI ports
+on host loopback: `127.0.0.1:4096:4096` and `127.0.0.1:4097:4097`. Set
+`network.publishedPorts` to explicit Docker publish specs to add SSH (for
+example `127.0.0.1:2222:22`), dev servers, UDP, or remote bindings. An explicit
+host IP is required. Existing host-loopback services are no longer directly
+reachable from the agent; grant access to their routable IPs if needed.
+
+The helper image builds separately on Linux:
+
+```bash
+nix build .#agentboxNetworkImage
+```
+
+NixOS defaults `settings.network.image` to this package through the overlay.
+On Darwin, set that option to the Linux-built tarball (just as for the main
+image). The launcher loads it automatically when creating the companions.
+The Docker Linux host/VM must support IPv6 bridge networking and IPv4/IPv6
+iptables. Rules are applied inside that VM, independently of macOS PF.
+
+Apply policy changes by recreating the containers: `agentbox restart` on
+Darwin, or rebuild/restart `docker-agentbox` on NixOS. The NixOS unit starts and
+stops the companions in dependency order. On Darwin, restricted containers
+do not auto-restart after a Docker daemon restart: run `agentbox start` to
+reinstall/check the policy before starting them. Stopping Agentbox removes its
+companions. A policy change cannot replace the namespace of a running agent.
+
+Validation:
+
+```bash
+python3 tests/network-policy.py scripts/network-policy.py scripts/network-host.py
+nix build .#network-policy-test
+nix-instantiate --eval --strict --json tests/network-modules.nix --arg nixpkgs /path/to/nixpkgs
+docker load < result # after building agentboxNetworkImage
+python3 tests/network-integration.py
+```
+
+The integration test uses isolated, uniquely named containers and the helper
+image only. It checks IPv4/IPv6 allow/deny rules, HTTP/CONNECT filtering, direct
+and DNS bypass attempts, root capabilities, and proxy failure without internet
+access. It requires a running Docker daemon.
+
 ### CI
 
 `.github/workflows/build-image.yml` evaluates the flake, builds every extension
