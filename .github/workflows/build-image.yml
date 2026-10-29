@@ -1,12 +1,12 @@
 name: build-image
 
 # Builds the agentbox OCI image with Nix and (on pushes to the default branch
-# or tags) publishes it to GitHub Container Registry. The flake depends only on
-# nixpkgs, so no secrets are needed to *build* — only to push.
+# or tags) publishes it to GitHub Container Registry. Builds use public pinned
+# inputs, so no secrets are needed to build — only to push.
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*"]
     paths:
       - "flake.nix"
@@ -128,7 +128,7 @@ jobs:
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker tag agentbox:latest "$IMAGE:${{ github.sha }}"
           docker push "$IMAGE:${{ github.sha }}"
-          # Tag pushes also get a clean semver tag; main pushes get :latest.
+          # Tag pushes also get a clean semver tag; branch pushes get :latest.
           if [ "${{ github.ref_type }}" = "tag" ]; then
             docker tag agentbox:latest "$IMAGE:${{ github.ref_name }}"
             docker push "$IMAGE:${{ github.ref_name }}"

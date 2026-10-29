@@ -865,10 +865,9 @@ access. It requires a running Docker daemon.
 
 ### CI
 
-`.github/workflows/build-image.yml` runs for path-filtered pushes to `main`,
-`v*` tag pushes, path-filtered pull requests, and manual dispatch. Its current
-push branch filter is `main`, so a push to `master` alone does not trigger it.
-README-only changes are outside its path filters.
+`.github/workflows/build-image.yml` runs for path-filtered pushes to `master`,
+`v*` tag pushes, path-filtered pull requests, and manual dispatch. README-only
+changes are outside its path filters.
 
 The workflow evaluates the flake, builds its listed extension/runtime tests and
 main image, then builds the network helper and runs policy, module, and live
