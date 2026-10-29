@@ -19,6 +19,7 @@ let
 
   # Pre-configured neovim baked into the image; also exposed on its own.
   agentbox-neovim = pkgs.callPackage ./neovim.nix { };
+  pi-post = pkgs.callPackage ./pi-post.nix { };
   pi-agentbox-mcp-runtime = pkgs.callPackage ./runtime { };
   agentbox-pi-goal-runtime = pkgs.callPackage ./goal-runtime { };
   agentbox-pi-rpc-runtime = pkgs.callPackage ./rpc-runtime { inherit pi-coding-agent; };
@@ -47,6 +48,7 @@ in
     agentbox-pi-rpc-runtime
     pi-agentbox-mcp-runtime
     pi-coding-agent
+    pi-post
     ;
 
   pi-codex-wrapper-test = import ./tests/pi-codex-wrapper.nix { inherit pkgs; };
@@ -106,6 +108,7 @@ in
           opencode
           pi-agentbox-mcp-runtime
           pi-coding-agent
+          pi-post
           ;
         # The extra-agent args default to null inside image.nix; override here
         # to bake one in.
@@ -235,4 +238,19 @@ in
       TEST_BASH=${pkgs.bash}/bin/bash node --test "''${tests[@]}"
       touch $out
     '';
+
+  pi-post-test =
+    pkgs.runCommand "pi-post-integration-test"
+      {
+        nativeBuildInputs = [ pkgs.nodejs_22 ];
+        AGENTBOX_PI_POST_POLL_WATCH = if pkgs.stdenv.hostPlatform.isDarwin then "1" else "0";
+      }
+      ''
+        export PI_CODING_AGENT_DIR="$TMPDIR/pi-agent"
+        mkdir -p "$PI_CODING_AGENT_DIR"
+        node --experimental-strip-types ${./tests/pi-post.ts} \
+          ${pi-post}/share/pi-post \
+          ${pi-coding-agent}/lib/node_modules/pi-monorepo
+        touch $out
+      '';
 }

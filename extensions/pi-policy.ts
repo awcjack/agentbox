@@ -117,6 +117,7 @@ export const TOOL_INPUT_TARGETS: Readonly<Record<string, readonly string[]>> = O
   grep: ["path"],
   ls: ["path"],
   read: ["path", "filePath", "file_path", "notebook_path"],
+  send_message: ["to"],
   task: ["prompt"],
   web_fetch: ["url"],
   web_search: ["query"],
@@ -1001,6 +1002,17 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         const decision = managedDecision(config, event.toolName, targetGroups)
         if (decision === "allow") return
         if (decision === "deny") return { block: true, reason: "Denied by managed Pi policy" }
+        if (decision === "defaultAsk") {
+          if (event.toolName === "list_sessions") return
+          if (event.toolName === "send_message") {
+            let sameMain = false
+            pi.events.emit("agentbox:session-message-scope", {
+              to: input.to,
+              reply: (allowed: boolean) => { sameMain = allowed === true },
+            })
+            if (sameMain) return
+          }
+        }
         // Like OpenCode auto mode: both explicit and default asks are approved.
         // No model request, context dependency, or fallback approval prompt.
         if (autoEnabled && config.auto?.enable) return

@@ -97,6 +97,46 @@ configured otherwise. Todo/task state follows the current session branch,
 delegation has concurrency/job/step/output limits, and `question` works in both
 the TUI and an RPC-provided UI.
 
+### Pi session communication
+
+The image also bundles [pi-post](https://github.com/vieko/pi-post) **0.8.1**,
+pinned by hash and force-loaded alongside the Agentbox extension for CLI and
+browser sessions. No runtime install is needed. Pi gets two model tools:
+
+- `list_sessions` discovers registered sessions, their addresses, presence, and
+  resume handles.
+- `send_message` sends text to a session name, address, session ID, or directory.
+  Live sessions receive it automatically; offline sessions receive queued mail
+  when resumed. Ambiguous targets fail instead of guessing.
+
+Archived sessions are excluded, including with `all: true` or `/sessions all`.
+Agentbox patches pi-post to honor the native Pi UI's `.archived-<session-id>`
+marker beside the JSONL session file. Sending by name, ID, directory, or a known
+address fails for an archive; queued or in-flight mail cannot wake it, including
+if its file is opened again. The CLI applies the same filter. Ordinary closed
+sessions can still receive queued messages. Records from an older messaging
+installation without a session-file location stay hidden until the session
+re-registers, so unknown archive state cannot bypass this rule.
+
+`/sessions` lists peers and `/inbox` previews queued messages. Shell tools and
+hooks can use the bundled `pi-post` CLI. Registry and mailbox data persist in
+`~/.pi/agent/post` on the existing Pi volume, shared by sessions in the same
+container. Messaging does not create subagents.
+
+Agentbox's Pi instructions allow a main session and its child, sibling, and
+nested subagents to communicate and reply without asking for approval by
+default. Communication with unrelated main sessions follows the user's
+existing authorization. The managed policy permits messages by default when
+every target shares the sender's main session ID, inherited by workflow
+children. Explicit policy asks and denials still apply. Incoming messages are
+labeled as peer context and cannot grant permissions. Receipt is automatic
+by default (`PI_POST_INBOUND=accept`); users can explicitly select `ask` or
+`refuse`. Set `PI_POST_RESUME=stage` to hold offline mail for the first user
+prompt instead of waking the session on resume.
+
+Run `nix build .#pi-agentbox-extension-test .#pi-post-test` to check the policy
+and live/queued delivery using the bundled Pi loader without model calls.
+
 ### Pi goal mode
 
 Agentbox bundles upstream [`@narumitw/pi-goal` 0.53.1](https://github.com/narumiruna/pi-extensions/tree/86a5eda01aaf271ff0865b36d1a711dc972232e9/packages/pi-goal),

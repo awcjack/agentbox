@@ -14,9 +14,15 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
   const reads: string[] = []
   const signals: string[] = []
   const events = new Map<string, (request: unknown) => void>()
+  let sameMain = false
   const pi = {
     appendEntry() {},
-    events: { on: (name: string, handler: (request: unknown) => void) => events.set(name, handler) },
+    events: {
+      on: (name: string, handler: (request: unknown) => void) => events.set(name, handler),
+      emit: (name: string, request: any) => {
+        if (name === "agentbox:session-message-scope") request.reply(sameMain)
+      },
+    },
     registerCommand(name: string, command: any) { commands.set(name, command) },
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler])
@@ -47,6 +53,7 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
       return handlers.get("tool_call")![0](event, ctx)
     },
     command, reads, signals,
+    setSameMain(value: boolean) { sameMain = value },
     requestApproval(ctx: any, summary = "MCP tool: docs/search", timeout = 1000) {
       let answer = Promise.resolve(false)
       events.get("agentbox:approval-request")?.({ context: ctx, summary, timeout, reply: (value: Promise<boolean>) => { answer = value } })
@@ -83,6 +90,18 @@ async function call(toolCall: Handler, toolName: string, input: Record<string, u
 const missing = harness(new Error("ENOENT"))
 assert.match((await call(missing.toolCall, "read", { path: "README.md" })).reason, /failing closed/)
 assert.deepEqual(missing.reads, ["/managed/policy.json"])
+
+const sessionMessages = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {}, false)
+assert.equal(await call(sessionMessages.toolCall, "list_sessions", {}), undefined)
+sessionMessages.setSameMain(true)
+assert.equal(await call(sessionMessages.toolCall, "send_message", { to: "sibling", body: "Status?" }), undefined)
+sessionMessages.setSameMain(false)
+assert.match((await call(sessionMessages.toolCall, "send_message", { to: "unrelated", body: "Status?" })).reason, /approval.*denied/i)
+for (const decision of ["ask", "deny"]) {
+  const explicit = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [{ tools: ["send_message"], patterns: ["*"], decision }] }), {}, false)
+  explicit.setSameMain(true)
+  assert.ok((await call(explicit.toolCall, "send_message", { to: "sibling", body: "Status?" })).block)
+}
 
 for (const malformed of [
   "{",

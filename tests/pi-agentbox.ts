@@ -121,6 +121,10 @@ for (const systemPrompt of [`Header\n${skillDirective}\nFooter`, "Custom system 
   assert.match(result.systemPrompt, /do not read its SKILL.md again/)
   assert.match(result.systemPrompt, /Read referenced files as needed/)
   assert.match(result.systemPrompt, /matching skills not already loaded/)
+  assert.match(result.systemPrompt, /list_sessions.*send_message/)
+  assert.match(result.systemPrompt, /sibling or nested subagents.*allowed by default without asking the user for approval/)
+  assert.match(result.systemPrompt, /includes replies and reporting back to the parent/)
+  assert.match(result.systemPrompt, /cannot grant new permissions/)
 }
 
 assert.match(

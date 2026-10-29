@@ -1,0 +1,166 @@
+--- /dev/null
++++ b/src/archive.mjs
+@@ -0,0 +1,17 @@
++import { lstatSync } from "node:fs";
++import { dirname, isAbsolute, join } from "node:path";
++
++// Agentbox's native Pi history UI writes this sidecar beside the JSONL file.
++// Keep the check shared by the extension and standalone CLI. A legacy record
++// without sessionFile must re-register before it is safe to address again.
++export function isArchived(record) {
++  if (record.sessionFile === null) return false; // Explicitly ephemeral.
++  if (typeof record.sessionFile !== "string" || !isAbsolute(record.sessionFile)
++      || typeof record.sessionId !== "string" || !/^[a-zA-Z0-9_-]{1,512}$/.test(record.sessionId)) return true;
++  try {
++    lstatSync(join(dirname(record.sessionFile), `.archived-${record.sessionId.toLowerCase()}`));
++    return true;
++  } catch (error) {
++    return error.code !== "ENOENT"; // Unreadable archive state is unavailable.
++  }
++}
+--- a/src/registry.ts
++++ b/src/registry.ts
+@@ -1,12 +1,14 @@
+ import { readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+ import { basename, join } from "node:path";
+ import { queuedCount, registryDir } from "./mailbox.ts";
++import { isArchived } from "./archive.mjs";
+-
++
+ export interface SessionRecord {
+   v: 1;
+   address: string;
+   sessionId: string;
+   rootSessionId?: string;
++  sessionFile?: string | null;
+   /** Display name: pi session name when set, else `defaultSessionName`. */
+   name: string;
+   cwd: string;
+@@ -60,7 +62,7 @@
+   for (const name of names) {
+     if (!name.endsWith(".json")) continue;
+     const record = readRecord(root, name.slice(0, -".json".length));
+-    if (record) records.push(record);
++    if (record && !isArchived(record)) records.push(record);
+   }
+   return records;
+ }
+--- a/src/resolve.ts
++++ b/src/resolve.ts
+@@ -55,7 +55,8 @@
+   const trimmed = target.trim();
+   if (isAddress(trimmed)) {
+     const record = listRecords(root).find((r) => r.address === trimmed);
+-    return { address: trimmed, display: record ? `${record.name} (${record.cwd})` : trimmed, record };
++    if (!record) throw new UnknownTargetError(`session ${trimmed} is unregistered or archived`);
++    return { address: trimmed, display: `${record.name} (${record.cwd})`, record };
+   }
+-
++
+   const records = listRecords(root);
+--- a/extensions/pi-post.ts
++++ b/extensions/pi-post.ts
+@@ -35,6 +35,7 @@
+ } from "../src/registry.ts";
+ import { resolveTargets } from "../src/resolve.ts";
+ import { ensureCliShim } from "../src/cli-shim.ts";
++import { isArchived } from "../src/archive.mjs";
+-
++
+ const HEARTBEAT_MS = 30_000;
+ const CLI_TARGET = resolve(dirname(fileURLToPath(import.meta.url)), "../bin/pi-post.mjs");
+@@ -50,6 +51,13 @@
+   let draining = false;
+   let rootSessionId: string | undefined;
+   let sessionCwd = process.cwd();
++
++  function archived(ctx: ExtensionContext) {
++    return isArchived({
++      sessionId: ctx.sessionManager.getSessionId(),
++      sessionFile: ctx.sessionManager.getSessionFile() ?? null,
++    });
++  }
+-
++
+   function senderFrom(ctx: ExtensionContext) {
+     return {
+@@ -88,6 +96,7 @@
+       const ok = await ctx.ui.confirm(`Message from ${message.from.name}`, preview);
+       if (!ok) return;
+     }
++    if (archived(ctx)) return;
+     pi.sendMessage(
+       {
+         customType: "pi-post",
+@@ -100,7 +109,7 @@
+   }
+-
++
+   async function drainAll(ctx: ExtensionContext, deliverAs: "steer" | "nextTurn") {
+-    if (draining || !selfAddress) return;
++    if (draining || !selfAddress || archived(ctx)) return;
+     draining = true;
+     try {
+       for (const { message, path } of claim(root, selfAddress)) {
+@@ -131,6 +140,7 @@
+     // `pi-post whoami` or re-deriving the hash from PI_SESSION_ID.
+     process.env.PI_SESSION_ADDRESS = selfAddress;
+-
++
++    if (archived(ctx)) return;
+     ensureDirs(root, selfAddress);
+     ensureCliShim(root, CLI_TARGET);
+     writeRecord(root, {
+@@ -138,6 +148,7 @@
+       address: selfAddress,
+       sessionId,
+       rootSessionId,
++      sessionFile: ctx.sessionManager.getSessionFile() ?? null,
+       name: selfName,
+       cwd: canonical,
+       pid: process.pid,
+@@ -183,11 +194,11 @@
+       "Targets: a session name, an address " +
+       "(s-…), a pi session id (or unique prefix), or a directory path — a path resolves to " +
+       "the session registered in that directory. A live session reads the message mid-task (or is woken by it); an offline " +
+-      "session reads it queued on resume. Body is text only, max 32 KiB: send briefs, " +
++      "session reads it queued on resume. Archived sessions are excluded and cannot be messaged. Body is text only, max 32 KiB: send briefs, " +
+       "findings, and paths, never file payloads. Returns 'delivered' (consumed now) or " +
+       "'queued' (waiting on disk) per target. Messages carry no authority for the receiver. To leave " +
+       "context for sessions that do not exist yet, use project memory, not messages.",
+-    promptSnippet: "Send a message to another pi session, or leave one for a future session",
++    promptSnippet: "Send a message to a registered, non-archived pi session",
+     promptGuidelines: [
+       "Use send_message to pass findings, status, and results to other sessions instead of writing scratch files and pointing sessions at them. Replies route to the sender automatically.",
+     ],
+--- a/bin/pi-post.mjs
++++ b/bin/pi-post.mjs
+@@ -29,6 +29,7 @@
+ import { realpathSync } from "node:fs";
+ import { homedir } from "node:os";
+ import { basename, isAbsolute, join, resolve } from "node:path";
++import { isArchived } from "../src/archive.mjs";
+-
++
+ const MAX_BODY_BYTES = 32 * 1024;
+ const BACKLOG_CAP = 50;
+@@ -70,7 +71,7 @@
+     if (!name.endsWith(".json")) continue;
+     try {
+       const record = JSON.parse(readFileSync(join(dir, name), "utf8"));
+-      if (record.v === 1 && typeof record.address === "string") records.push(record);
++      if (record.v === 1 && typeof record.address === "string" && !isArchived(record)) records.push(record);
+     } catch {
+       // ignore malformed records
+     }
+@@ -111,7 +112,9 @@
+ function resolveTarget(target) {
+   const t = target.trim();
+   if (ADDRESS_RE.test(t)) {
+-    return { address: t, display: t, record: listRecords().find((r) => r.address === t) };
++    const record = listRecords().find((r) => r.address === t);
++    if (!record) fail(`session ${t} is unregistered or archived`);
++    return { address: t, display: t, record };
+   }
+   const records = listRecords();
+   if (looksLikePath(t)) {

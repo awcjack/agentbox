@@ -70,6 +70,7 @@
   codex,
   opencode,
   pi-coding-agent,
+  pi-post,
   pi-agentbox-mcp-runtime,
   agentbox-pi-goal-runtime ? callPackage ./goal-runtime { },
   agentbox-pi-rpc-runtime,
@@ -714,6 +715,7 @@ let
       --no-extensions \
       -e ${piAgentboxExtensions}/pi-agentbox.ts \
       -e ${piWorkflowExtension} \
+      -e ${pi-post.extension} \
       -e ${piMcpExtension} \
       -e ${piAgentboxExtensions}/pi-codex-accounts.ts \
       -e ${piAgentboxExtensions}/pi-openai-fast.ts \
@@ -1330,6 +1332,7 @@ let
     codex
     opencode
     piAgentboxCli
+    pi-post
     pi-agentbox-mcp-runtime
     agentbox-pi-rpc-runtime
     # Language servers
