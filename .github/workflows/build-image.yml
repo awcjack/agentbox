@@ -12,6 +12,7 @@ on:
       - "flake.nix"
       - "flake.lock"
       - "image.nix"
+      - "network-image.nix"
       - "packages.nix"
       - "neovim.nix"
       - "package.nix"
@@ -28,6 +29,7 @@ on:
     paths:
       - "flake.nix"
       - "image.nix"
+      - "network-image.nix"
       - "packages.nix"
       - "neovim.nix"
       - "package.nix"
@@ -100,6 +102,15 @@ jobs:
           nix build .#packages.x86_64-linux.agentboxImage \
             --print-build-logs --no-update-lock-file
           ls -lL result
+
+      - name: Test network policies
+        run: |
+          nix build .#packages.x86_64-linux.network-policy-test --no-update-lock-file
+          nixpkgs_path="$(nix eval --impure --raw --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath')"
+          nix-instantiate --eval --strict --json tests/network-modules.nix --arg nixpkgs "$nixpkgs_path"
+          nix build .#packages.x86_64-linux.agentboxNetworkImage --out-link result-network --no-update-lock-file
+          docker load < result-network
+          python3 tests/network-integration.py
 
       - name: Load into Docker
         run: |
