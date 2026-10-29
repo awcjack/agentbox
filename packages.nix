@@ -29,6 +29,8 @@ in
 
   agentbox-desktop = if isLinux then pkgs.callPackage ./desktop.nix { } else null;
 
+  agentboxNetworkImage = if isLinux then import ./network-image.nix { inherit pkgs; } else null;
+
   inherit
     agentbox-neovim
     agentbox-pi-goal-runtime
