@@ -48,8 +48,9 @@ Auth directly.
 
 Pi runs through an immutable wrapper that rejects `-e`/`--extension`, disables
 extension discovery, and force-loads trusted Agentbox extensions in this order:
-core integration, workflow, MCP, Codex accounts, upstream Goal (parent sessions
-only), and final managed policy.
+core integration, workflow, session messaging, MCP, Codex accounts, OpenAI Fast,
+Cursor subscription provider, upstream Goal (parent sessions only), and final
+managed policy.
 Delegated workflow jobs and RPC sessions re-enter the same wrapper. Pi's
 positional package/config/auth management commands remain available, but their
 installed extensions are not discovered by agent runs. The final policy fails closed
@@ -96,6 +97,30 @@ pinning a provider or model. Roles inherit the active Pi selection unless
 configured otherwise. Todo/task state follows the current session branch,
 delegation has concurrency/job/step/output limits, and `question` works in both
 the TUI and an RPC-provided UI.
+
+### Cursor subscription in Pi
+
+The image bundles [`@rahularya01/pi-cursor`](https://github.com/Rahularya01/pi-cursor)
+**1.4.39** and its protobuf runtime, pinned by hash and force-loaded for CLI and
+browser sessions. No runtime package install or separate model API key is needed.
+In Pi, run:
+
+```text
+/login cursor
+/cursor.models
+```
+
+Open the sign-in URL in your browser; the extension polls Cursor to complete
+login, so no callback port or host Cursor credentials need to be mounted into
+the container. Credentials persist in Pi's existing `~/.pi/agent/auth.json`.
+Select an available model with `/model cursor/<id>`. `/cursor.usage` shows plan
+usage, and `/cursor.doctor` shows provider diagnostics.
+
+This is an unofficial integration using Cursor's reverse-engineered protocol;
+Cursor can change it independently. Available models and usage limits depend on
+the signed-in account. Run `nix build .#pi-cursor-test` to verify offline provider
+loading alongside the Agentbox guards and pi-post, without credentials or model
+calls.
 
 ### Pi session communication
 
