@@ -1602,3 +1602,65 @@ test("folder sessions start concurrently in selected cwd and resume there after 
   assert.equal((await request(second.baseUrl, "/v1/folders", { auth: false })).response.status, 401);
   assert.equal((await request(second.baseUrl, "/v1/folders", { token: "bad" })).response.status, 401);
 });
+
+test("session folder creation validates labels and scopes before starting Pi", async (t) => {
+  const first = await fixture(t);
+  for (const folder of [null, 42, "..", "Work/../Project", "x".repeat(81)]) {
+    const result = await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", folder } });
+    assert.equal(result.response.status, 400);
+    assert.equal(result.body.error.code, "invalid_session_folder");
+  }
+  assert.equal((await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", folder: "Work", resume: RESUME_ID } })).response.status, 400);
+  assert.equal(first.spawns.length, 0);
+  const scoped = await fixture(t, config({ auth: { tokens: [{ sha256: TOKEN_HASH, scopes: ["sessions:create"] }] } }));
+  assert.equal((await request(scoped.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", folder: "Work" } })).response.status, 403);
+  assert.equal(scoped.spawns.length, 0);
+  assert.equal((await request(scoped.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).response.status, 201);
+});
+
+test("session folder creation persists grouping before a prompt without changing cwd", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-new-session-group-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = config({ profiles: { default: { cwd: "/workspace", sessionDir: root } } });
+  const first = await fixture(t, settings);
+  const result = await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { folder: " / brian // Work / ", name: "Grouped session" } });
+  assert.equal(result.response.status, 201);
+  assert.equal(result.body.session.folder, "brian/Work");
+  assert.equal(first.spawns[0].options.cwd, "/workspace");
+  const id = result.body.session.nativeSessionId;
+  assert.deepEqual((await request(first.baseUrl, "/v1/session-folders?profile=default")).body.folders, [{ id, folder: "brian/Work" }]);
+  assert.equal((await request(first.baseUrl, "/v1/session-folders?profile=default", { method: "PUT", body: { id, folder: "brian/Other" } })).response.status, 200);
+  assert.deepEqual((await request(first.baseUrl, "/v1/session-folders?profile=default")).body.folders, [{ id, folder: "brian/Other" }]);
+  await writeFile(join(root, `${id}.jsonl`), JSON.stringify({ type: "session", version: 3, id, cwd: "/workspace" }) + "\n");
+  await first.runtime.close();
+  const second = await fixture(t, settings);
+  assert.deepEqual((await request(second.baseUrl, "/v1/session-folders?profile=default")).body.folders, [{ id, folder: "brian/Other" }]);
+  const ephemeral = await fixture(t, config({ profiles: { default: { cwd: "/workspace" } } }));
+  assert.equal((await request(ephemeral.baseUrl, "/v1/sessions", { method: "POST", body: { folder: "brian" } })).response.status, 409);
+  assert.equal(ephemeral.spawns.length, 0);
+});
+
+test("saved history archive requires delete scope, retains history and never starts Pi", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-history-archive-api-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, `${RESUME_ID}.jsonl`);
+  const original = JSON.stringify({ type: "session", version: 3, id: RESUME_ID, cwd: "/workspace" }) + "\n";
+  await writeFile(file, original);
+  const profiles = { default: { cwd: "/workspace", sessionDir: root } };
+  const first = await fixture(t, config({ profiles }));
+  const path = `/v1/history/${RESUME_ID}?profile=default`;
+  assert.equal((await request(first.baseUrl, path, { method: "DELETE", auth: false })).response.status, 401);
+  const scoped = await fixture(t, config({ profiles, auth: { tokens: [{ sha256: TOKEN_HASH, scopes: ["sessions:read"] }] } }));
+  assert.equal((await request(scoped.baseUrl, path, { method: "DELETE" })).response.status, 403);
+  await createSession(first.baseUrl, { profile: "default", resume: RESUME_ID });
+  assert.equal((await request(first.baseUrl, path, { method: "DELETE" })).response.status, 409);
+  await first.runtime.close();
+  const second = await fixture(t, config({ profiles }));
+  assert.equal((await request(second.baseUrl, path, { method: "DELETE" })).response.status, 204);
+  assert.equal((await request(second.baseUrl, path, { method: "DELETE" })).response.status, 204);
+  assert.equal(second.spawns.length, 0);
+  assert.equal(await readFile(file, "utf8"), original);
+  assert.equal((await request(second.baseUrl, "/v1/history?profile=default")).body.sessions.length, 0);
+  assert.equal((await request(second.baseUrl, "/v1/history?profile=default&includeArchived=true")).body.sessions[0].archived, true);
+  assert.equal((await request(second.baseUrl, `/v1/history/${RESUME_ID}?profile=other`, { method: "DELETE" })).response.status, 400);
+});

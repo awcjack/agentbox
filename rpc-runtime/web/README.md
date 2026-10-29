@@ -18,11 +18,12 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   named sessions, and persisted-history resume. The compact sidebar uses title-only
   rows, subtle selection, right-side progress spinners and blue unread dots.
   Status, profile, cwd and date stay in tooltips and accessible labels. Rename and
-  move controls appear on hover/focus, or on the selected row on touch devices.
-- New session selects a working folder on the server, without a profile picker.
-  Browse approved roots and subfolders, or enter an absolute path. The supervisor
-  selects the profile and starts Pi directly in that folder. Folder assignments
-  in the sidebar organize conversations; they do not change a session's cwd.
+  archive controls appear on hover/focus and stay visible on touch devices.
+- New session selects a session folder, without a profile or directory picker.
+  Choose an existing label or type a new one, such as `Work/Project`; empty means
+  Ungrouped. Pi starts in the configured profile cwd. A folder heading's **+**
+  action opens the same dialog with that group preselected, even while collapsed.
+  It does not toggle the heading. Creation expands the chosen group.
 - Each opened session has a tab. Switch tabs with the mouse or Left/Right,
   Home/End keys; drafts and approvals remain independent. Closing a tab leaves
   Pi running and its draft available when reopened from the sidebar. End & archive
@@ -33,12 +34,13 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   to collapse to a 64px conversation-bubble rail; drag right or press Right to
   expand. Bubbles have status-colored auras and title/status previews on hover
   or keyboard focus, displayed outside the scrolling rail.
-- Use a row's **↳ Move to folder** button to create or assign nested folders such
-  as `Work/Agentbox`; an empty path ungroups it. Folder membership is saved on
+- Create sessions in nested sidebar folders such as `Work/Agentbox` using New
+  session or a folder heading's **+** action. Folder membership is saved on
   the server, keyed by profile and native conversation ID, so it follows
   resume/archive and runtime restarts across browsers and devices. Other devices
   refresh assignments every 15 seconds, or immediately with Refresh. Changes
-  require `sessions:write` and a persisted session in the profile's `sessionDir`.
+  require `sessions:write` and persistent profile session storage. New sessions
+  receive their assignment before the first prompt is written to Pi history.
   Existing browser-saved folders are imported at login when no server assignment
   exists; failed imports are retained locally for retry. Server assignments win.
   Folders group each lifecycle section; sessions without an assignment appear
@@ -48,8 +50,8 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - On desktop, drag a session onto a folder heading or its contents to move it.
   Drop onto **Ungrouped** to remove its folder assignment; this target remains
   available even when empty. Closed folder headings accept drops, and the target
-  highlights while dragging. Moves use the same server persistence as the **↳**
-  button, which remains available for touch and keyboard users.
+  highlights while dragging. Moves use the shared server-side assignments.
+  Session rows show Archive instead of a Move to folder button.
 - Use **✎ Rename session** on a running runtime row to persist its name through
   Pi's `set_session_name` RPC (write access required). Reopen historical or
   archived conversations first to rename them. Cancel leaves the name unchanged.
@@ -62,6 +64,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   assignments are server-side (legacy local assignments are removed after import).
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,
   streaming steering/follow-up selection, queue counts, and stop-current-run.
+- A row's Archive button opens confirmation for that row without selecting it.
+  Running sessions use the same end/archive flow as the header; saved history uses
+  `DELETE /v1/history/:nativeId?profile=...` and never starts a Pi process.
 - End & archive with confirmation uses `DELETE /v1/sessions/:id` to stop the
   process and persistently hide saved history without deleting it. Delete-scope denial disables this
   control independently of write access. Successful empty `204` responses work.
@@ -179,7 +184,7 @@ Settings includes browser-local display preferences (no credentials are stored):
   hidden list. New models are visible by default. This does not change model access,
   Pi defaults, or other browsers.
 - **Hide Profile section:** hides the sidebar filter and resets it to All profiles.
-  New session always uses the working-folder picker.
+  New session always uses the session-folder picker.
 Preferences persist across page reloads when local storage is available; if storage
 is blocked, the UI reports that changes apply only to the current page.
 
@@ -235,7 +240,8 @@ PLAYWRIGHT_MODULE=/tmp/opencode-work/opencode/node_modules/playwright/index.mjs 
 SMOKE_OUTPUT_DIR=/tmp/opencode-work/opencode node web/browser-smoke.mjs
 ```
 
-Set `FOLDERS_TABS_ONLY=1` for the folder/tab/catalog desktop/mobile smoke path.
+Set `FOLDERS_TABS_ONLY=1` for session folders, heading creation, sidebar archive,
+tabs and catalog refresh on desktop/mobile.
 Set `SETTINGS_ONLY=1` for the desktop/mobile Settings regression path (including
 subagent cap/status/reset, validation, notifications, draft preservation, idle and
 native-replacement guards, and unsupported-command handling).

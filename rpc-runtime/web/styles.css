@@ -86,10 +86,6 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .session-tab button { color: inherit; background: transparent; border: 0; padding: 9px; cursor: pointer; }
 .session-tab-select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-tab-close { flex-shrink: 0; }
-.folder-path { display: flex; gap: 8px; }
-.folder-path input { min-width: 0; flex: 1; }
-.folder-browser { max-height: 220px; overflow-y: auto; display: grid; gap: 4px; }
-.folder-choice { text-align: left; color: inherit; background: #302e2a; border: 1px solid #494641; border-radius: 6px; padding: 9px 12px; cursor: pointer; overflow-wrap: anywhere; }
 
 /* Compact conversation navigation: titles lead, activity stays at the right. */
 .sidebar { background: #1e1e1e; border-right-color: #2c2c2c; }
@@ -136,8 +132,8 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .sidebar .archived-sessions > summary { font-family: var(--sans); letter-spacing: 0; font-size: 12px; }
 @keyframes session-progress { to { transform: rotate(360deg); } }
 @media (hover: none) {
-  .sidebar .session-row:has(.session-item.active) .session-actions { opacity: 1; pointer-events: auto; }
-  .sidebar .session-item.active .session-copy { padding-right: 48px; }
+  .sidebar .session-row .session-actions { opacity: 1; pointer-events: auto; }
+  .sidebar .session-item .session-copy { padding-right: 48px; }
 }
 /* Preserve the existing collapsed navigation rail independently of list styling. */
 @media (min-width: 721px) {
@@ -150,3 +146,11 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 @media (prefers-reduced-motion: reduce) {
   .sidebar .session-symbol::after { animation: none; }
 }
+
+/* Folder headings offer creation independently of their collapse toggle. */
+.sidebar .folder-heading { display: flex; align-items: center; gap: 4px; }
+.sidebar .folder-heading::before { flex-shrink: 0; }
+.sidebar .folder-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar .folder-new-session { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 4px; font-size: 18px; color: var(--muted); }
+.sidebar .folder-new-session:hover:not(:disabled) { background: var(--raised); color: var(--text); }
+@media (min-width: 721px) { .sidebar-collapsed .sidebar .folder-heading { display: none; } }

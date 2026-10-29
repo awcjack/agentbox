@@ -6,6 +6,7 @@ import { readFile, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { normalizeFolder } from "./sidebar.mjs";
 
 const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
 const output = process.env.SMOKE_OUTPUT_DIR || tmpdir();
@@ -27,9 +28,9 @@ function conversationSnapshot(session) {
   });
   return { nativeSessionId: session.nativeSessionId, leafId: parentId, messages };
 }
-let tick = Date.now();
+let tick = Date.now(), directoryBrowseCalls = 0;
 const json = (response, status, value) => { response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); response.end(JSON.stringify(value)); };
-const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, fastMode: session.fastMode === undefined ? { available: true, enabled: false } : session.fastMode, autoMode: session.autoMode === undefined ? { available: true, enabled: false } : session.autoMode, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
+const meta = (session) => ({ id: session.id, name: session.name, nativeSessionId: session.nativeSessionId, folder: serverFolders.get(session.nativeSessionId), conversationReplacing: Boolean(session.conversationReplacing), profile: "default", cwd: "/workspace/project", status: "running", activity: session.pendingUi.some((item) => ["confirm", "select"].includes(item.method)) ? "waiting_action" : session.pendingUi.length ? "waiting_reply" : session.streaming ? "running" : "idle", latestEventId: session.cursor, settledEventId: session.settledEventId ?? null, fastMode: session.fastMode === undefined ? { available: true, enabled: false } : session.fastMode, autoMode: session.autoMode === undefined ? { available: true, enabled: false } : session.autoMode, pendingUi: session.pendingUi, createdAt: session.modifiedAt, lastActivityAt: session.modifiedAt });
 function emit(session, event) {
   const frame = `id: ${++session.cursor}\nevent: pi\ndata: ${JSON.stringify(event)}\n\n`;
   session.events.push({ id: session.cursor, frame });
@@ -74,6 +75,7 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/v1/profiles") return json(response, 200, { profiles: ["default"] });
     if (url.pathname === "/v1/folders") {
+      directoryBrowseCalls++;
       if (!url.searchParams.has("path")) return json(response, 200, { roots: [{ profile: "default", path: "/workspace" }] });
       const path = url.searchParams.get("path");
       return json(response, 200, { path, root: "/workspace", parent: path === "/workspace" ? null : "/workspace", directories: path === "/workspace" ? [{ name: "project", path: "/workspace/project" }] : [] });
@@ -93,7 +95,15 @@ const server = createServer(async (request, response) => {
       const session = { id: randomUUID(), nativeSessionId: body.resume || randomUUID(), name: previous?.name || body.name || "Untitled session", modifiedAt: new Date().toISOString(), cursor: 0, pendingUi: [], messages: structuredClone(previous?.messages || []), events: [], clients: new Set(), model: models[0], streaming: false, queued: [], subscriptions: 0 };
       session.holdInitialSnapshot = !body.resume && session.name.includes("[slow snapshot]");
       sessions.set(session.id, session); saved.set(session.nativeSessionId, session);
+      if (body.folder !== undefined) serverFolders.set(session.nativeSessionId, normalizeFolder(body.folder));
       return json(response, 201, { session: meta(session) });
+    }
+    const historical = /^\/v1\/history\/([^/]+)$/.exec(url.pathname);
+    if (historical && request.method === "DELETE") {
+      assert.ok(saved.has(historical[1]));
+      calls.push({ method: "DELETE", path: url.pathname });
+      archived.add(historical[1]);
+      response.writeHead(204); response.end(); return;
     }
     const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|export|auto))?$/.exec(url.pathname);
     const session = match && sessions.get(match[1]);
@@ -336,15 +346,17 @@ try {
       await openSidebar(); await page.locator("#new-session").click();
       const sessionName = `${label} coding session [slow snapshot]`;
       assert.equal(await page.locator("#new-profile").count(), 0, "new session has no profile picker");
-      await page.waitForFunction(() => document.getElementById("new-folder").value === "/workspace");
-      await page.getByRole("button", { name: "project", exact: true }).click();
-      await page.waitForFunction(() => document.getElementById("new-folder").value === "/workspace/project");
+      assert.equal(await page.getByRole("button", { name: "Browse", exact: true }).count(), 0);
+      await page.locator("#new-folder").fill("Work/Agentbox");
       await page.locator("#new-name").fill(sessionName);
       await page.locator("#create-session").click();
       await until(() => [...sessions.values()].some((session) => session.name === sessionName && session.releaseSnapshot), "initial get_messages reached fixture gate");
       const session = [...sessions.values()].find((session) => session.name === sessionName);
       assert.ok(session);
-      assert.equal(calls.find((call) => call.method === "POST" && call.body?.name === sessionName).body.cwd, "/workspace/project");
+      const creation = calls.find((call) => call.method === "POST" && call.body?.name === sessionName).body;
+      assert.equal(creation.folder, "Work/Agentbox");
+      assert.equal(creation.cwd, undefined, "session labels never change cwd");
+      assert.equal(directoryBrowseCalls, 0, "new session never browses server directories");
       assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 1);
       await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_state"), "initial state RPC arrived");
       assert.equal(calls.some((call) => call.id === session.id && call.command?.type === "get_available_models"), false, "catalog waits for initial snapshot");
@@ -367,14 +379,22 @@ try {
       assert.equal(session.subscriptions, 1);
       if (process.env.FOLDERS_TABS_ONLY === "1") {
         await page.locator("#prompt").fill("First session draft");
-        await openSidebar(); await page.locator("#new-session").click();
-        await page.waitForFunction(() => !document.getElementById("create-session").disabled);
+        await openSidebar();
+        const parentFolder = page.locator('summary[data-folder-key="live:/Work"]').locator("..");
+        await parentFolder.locator(":scope > summary").click();
+        assert.equal(await parentFolder.getAttribute("open"), null);
+        await page.getByRole("button", { name: "New session in Work", exact: true }).click();
+        assert.equal(await parentFolder.getAttribute("open"), null, "folder + does not toggle collapse");
+        assert.equal(await page.locator("#new-folder").inputValue(), "Work");
+        assert.ok((await page.locator("#session-folder-options option").evaluateAll((options) => options.map((option) => option.value))).includes("Work/Agentbox"));
         await page.locator("#new-name").fill(`${label} second tab`);
         await page.screenshot({ path: join(output, `pi-folder-picker-${label}.png`) });
         await page.locator("#create-session").click();
         await until(() => page.locator("#session-title").textContent().then((text) => text === `${label} second tab`), "second tab selected");
         await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "second tab ready");
         const second = [...sessions.values()].find((item) => item.name === `${label} second tab`);
+        assert.equal(serverFolders.get(second.nativeSessionId), "Work");
+        assert.equal(await page.locator('summary[data-folder-key="live:/Work"]').locator("..").getAttribute("open"), "");
         await page.locator("#prompt").fill("Second session draft");
         assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 2);
         await page.locator("#session-tabs .session-tab-select").first().click();
@@ -401,18 +421,36 @@ try {
         assert.equal(await page.locator("#prompt").inputValue(), "Second session draft");
         assert.equal(creations(), before, "reopening a tab reuses its session");
         assert.equal(calls.some((call) => call.id === second.id && call.method === "DELETE"), false);
+        await openSidebar();
+        assert.equal(await page.getByRole("button", { name: /Move to folder:/ }).count(), 0);
+        const archiveFirst = page.getByRole("button", { name: `Archive session: ${session.name}`, exact: true });
+        await archiveFirst.focus(); await archiveFirst.click();
+        await page.locator("#cancel-end").click();
+        assert.ok(sessions.has(session.id), "cancel keeps the target alive");
+        await openSidebar(); await archiveFirst.focus(); await archiveFirst.click();
+        await page.locator("#confirm-end").click();
+        await until(() => !sessions.has(session.id), "background session archived");
+        assert.equal(await page.locator("#prompt").inputValue(), "Second session draft", "archiving background row preserves selected draft");
+        const savedOnly = { ...session, id: randomUUID(), nativeSessionId: randomUUID(), name: `${label} saved history`, modifiedAt: new Date().toISOString() };
+        saved.set(savedOnly.nativeSessionId, savedOnly);
+        await openSidebar(); await page.locator("#refresh-sessions").click();
+        const archiveSaved = page.getByRole("button", { name: `Archive session: ${savedOnly.name}`, exact: true });
+        await archiveSaved.waitFor(); await archiveSaved.focus(); await archiveSaved.click();
+        const beforeHistoryArchive = creations();
+        await page.locator("#confirm-end").click();
+        await until(() => archived.has(savedOnly.nativeSessionId), "saved history archived directly");
+        assert.equal(creations(), beforeHistoryArchive, "archiving saved history never creates a process");
+        assert.equal(directoryBrowseCalls, 0);
         await page.getByRole("button", { name: `Close tab: ${second.name}`, exact: true }).click();
-        await page.getByRole("button", { name: `Close tab: ${session.name}`, exact: true }).click();
         assert.equal(await page.locator("#session-tabs").isVisible(), false);
         assert.equal(await page.locator("#prompt").inputValue(), "");
         assert.deepEqual(errors, [], "no JS or CSP errors");
-        console.log(`${label}: PASS folder browsing, no profile picker, parallel session tabs, keyboard navigation, drafts, close/reopen without stop, live catalog refresh, overflow`);
+        console.log(`${label}: PASS session folder picker, collapsed-folder +, no directory browsing, sidebar archive/cancel/history, tabs/drafts/catalogs, overflow`);
         continue;
       }
       // Folder paths nest rows, and collapsed previews escape the scroll container.
       await openSidebar();
-      page.once("dialog", (dialog) => dialog.accept("Work/Agentbox"));
-      await page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).click();
+
       await until(() => page.locator(".session-folder .session-folder .session-item").filter({ hasText: session.name }).count().then((count) => count === 1), "folder write reflected in sidebar");
       assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox");
       const workFolder = page.locator('.session-folder[data-folder-path="Work"]');
@@ -425,12 +463,12 @@ try {
         const row = () => page.locator(".session-item").filter({ hasText: session.name });
         await row().dragTo(workFolder.locator(":scope > summary"));
         await until(() => serverFolders.get(session.nativeSessionId) === "Work", "drag moves into parent folder");
-        await until(() => page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).isEnabled(), "drag save finished");
+        await page.waitForTimeout(100);
         await row().dragTo(page.locator('.session-folder[data-folder-path=""] > summary').first());
         await until(() => serverFolders.get(session.nativeSessionId) === "", "drop into Ungrouped persists removal");
         await until(() => page.locator('.session-folder[data-folder-path=""] .session-item').filter({ hasText: session.name }).count().then((count) => count === 1), "session appears under Ungrouped");
-        page.once("dialog", (dialog) => dialog.accept("Work/Agentbox"));
-        await page.getByRole("button", { name: `Move to folder: ${session.name}`, exact: true }).click();
+        serverFolders.set(session.nativeSessionId, "Work/Agentbox");
+        await page.locator("#refresh-sessions").click();
         await until(() => page.locator('.session-folder[data-folder-path="Work/Agentbox"] .session-item').count().then((count) => count === 1), "restore nested folder");
       }
       const otherDevice = await browser.newContext();
@@ -442,25 +480,27 @@ try {
         assert.equal(await otherPage.evaluate(() => localStorage.getItem("agentbox.pi.session-folders.v1")), "[]", "existing server folder wins and removes migrated local entry");
       } finally { await otherDevice.close(); }
       if (label === "desktop") {
-        await page.locator(".folder-heading").filter({ hasText: /^Work$/ }).click();
+        await page.locator('.session-folder[data-folder-path="Work"] > summary').click();
         await page.locator("#sidebar-resizer").press("Home");
         const row = page.locator(".session-item").filter({ hasText: session.name });
         await row.hover();
         assert.equal(await page.locator("#session-preview").isVisible(), true);
         assert.ok((await page.locator("#session-preview").textContent()).includes(session.name));
         await page.locator("#sidebar-resizer").press("ArrowRight");
-        await page.locator(".folder-heading").filter({ hasText: /^Work$/ }).click();
+        await page.locator('.session-folder[data-folder-path="Work"] > summary').click();
       }
       const originalName = session.name;
       page.once("dialog", (dialog) => dialog.accept(`${originalName} renamed`));
+      await page.getByRole("button", { name: `Rename session: ${originalName}`, exact: true }).focus();
       await page.getByRole("button", { name: `Rename session: ${originalName}`, exact: true }).click();
       await until(() => session.name === `${originalName} renamed`, "native rename received");
       await until(() => page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).isEnabled(), "rename finished");
       page.once("dialog", (dialog) => dialog.accept(originalName));
+      await page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).focus();
       await page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).click();
       await until(() => session.name === originalName, "original name restored");
-      page.once("dialog", (dialog) => dialog.accept(""));
-      await page.getByRole("button", { name: `Move to folder: ${originalName}`, exact: true }).click();
+      serverFolders.set(session.nativeSessionId, "");
+      await page.locator("#refresh-sessions").click();
       await until(() => page.locator('.session-folder[data-folder-path]:not([data-folder-path=""])').count().then((count) => count === 0), "server folder removed");
       assert.equal(await page.locator('.session-folder[data-folder-path=""] .session-item').filter({ hasText: session.name }).count(), 1);
       assert.equal(serverFolders.get(session.nativeSessionId), "");

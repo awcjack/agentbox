@@ -645,17 +645,21 @@ services.agentbox.settings.piRpcApi = {
 ```
 
 Open the UI directly in a browser, enter the raw bearer token/password (not its
-digest), and choose a working folder within an administrator-approved workspace. The browser keeps the
+digest), and choose a session folder, or leave it Ungrouped. The browser keeps the
 password in page memory, not localStorage or a URL; reload or log out to
 clear it. Allow the exact browser origin, including its scheme and port, even
 when the UI and API share an origin. Use TLS or a trusted VPN for remote access.
 
 Profiles define workspace roots and persistent Pi session directories on the
-server. New session browses folders within those roots and starts Pi in the
-selected folder. The server rejects paths and symlinks outside the root. Sessions
+server. New session chooses a sidebar session-folder label such as `Work/Project`;
+it starts Pi in the configured profile cwd. Folder headings also have a **+**
+action to start a conversation in that group. Folder labels do not select a server
+directory. API clients requesting an explicit cwd remain confined to the approved
+workspace root. Sessions
 open in tabs, with independent drafts and background processes; closing a tab
-leaves Pi running, while End & archive stops it. The compact sidebar retains
-nested conversation folders and shows running/unread indicators on the right. Native Pi history
+leaves Pi running, while End & archive stops it. Each sidebar row also offers
+Archive, including saved conversations without starting Pi. The compact sidebar
+retains nested conversation folders and shows running/unread indicators on the right. Native Pi history
 is separate from OpenCode: there is no OpenCode conversation conversion or
 automatic credential migration. Existing Pi auth/settings under `~/.pi/agent`
 remain available. Provider environment credentials, if needed, must be explicitly

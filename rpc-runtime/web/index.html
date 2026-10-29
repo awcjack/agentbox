@@ -119,12 +119,11 @@
   </dialog>
   <dialog id="new-dialog" aria-labelledby="new-title">
     <form id="new-form" class="dialog-body">
-      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a working folder and give this conversation a name.</p>
-      <label for="new-folder">Working folder</label>
-      <div class="folder-path"><input id="new-folder" required autocomplete="off" spellcheck="false" aria-describedby="folder-help"><button id="browse-folder" class="text-button" type="button">Browse</button></div>
-      <p id="folder-help" class="field-note">Choose a folder on the server. Pi starts directly in this folder.</p>
-      <div id="folder-browser" class="folder-browser" aria-label="Server folders"></div>
-      <p id="folder-status" class="field-note" role="status"></p>
+      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a session folder and give this conversation a name.</p>
+      <label for="new-folder">Session folder <span class="muted">(optional)</span></label>
+      <input id="new-folder" list="session-folder-options" autocomplete="off" placeholder="Ungrouped" aria-describedby="folder-help">
+      <datalist id="session-folder-options"></datalist>
+      <p id="folder-help" class="field-note">Choose an existing session folder or type a new name, such as Work/Project. Leave empty for Ungrouped.</p>
       <label for="new-name">Session name <span class="muted">(optional)</span></label><input id="new-name" maxlength="200" placeholder="What are we working on?" autocomplete="off">
       <p id="new-error" class="form-error" role="alert" hidden></p><button id="create-session" class="primary-button" type="submit">Create session <span aria-hidden="true">&rarr;</span></button>
     </form>
@@ -132,8 +131,8 @@
   <dialog id="end-dialog" aria-labelledby="end-title">
     <form id="end-form" class="dialog-body">
       <span class="dialog-eyebrow">RELEASE RUNTIME CAPACITY</span><h2 id="end-title">End and archive this session?</h2>
-      <p id="end-description"></p><p>This stops the Pi process and its tools, and archives the conversation. Saved history is retained in Archived conversations in the sidebar, including after restart. Reopen it there to read or continue. Unsent drafts are not saved.</p>
-      <button type="submit" class="primary-button">End &amp; archive</button><button type="button" id="cancel-end" class="text-button">Keep session open</button>
+      <p id="end-description"></p><p id="end-help">This stops the Pi process and its tools, and archives the conversation. Saved history is retained in Archived conversations in the sidebar, including after restart. Reopen it there to read or continue. Unsent drafts are not saved.</p>
+      <button id="confirm-end" type="submit" class="primary-button">End &amp; archive</button><button type="button" id="cancel-end" class="text-button">Keep session open</button>
     </form>
   </dialog>
   <noscript>This workspace requires JavaScript. No build or browser extensions are needed.</noscript>

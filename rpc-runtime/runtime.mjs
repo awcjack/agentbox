@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync, realpathSync } from "node:fs";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -499,7 +499,7 @@ function safeWrite(stream, object) {
 }
 
 class Session extends EventEmitter {
-  constructor({ id, profileName, profile, resume, resumePath, name, config, spawnProcess, signalProcessGroup, now, uuid }) {
+  constructor({ id, profileName, profile, resume, resumePath, name, folder, config, spawnProcess, signalProcessGroup, now, uuid }) {
     super();
     this.id = id;
     this.profileName = profileName;
@@ -507,6 +507,7 @@ class Session extends EventEmitter {
     this.resume = resume ?? null;
     this.nativeSessionId = resume ?? id;
     this.name = name ?? null;
+    this.folder = folder;
     this.previewName = null;
     this.config = config;
     this.now = now;
@@ -573,6 +574,7 @@ class Session extends EventEmitter {
       cwd: this.profile.cwd,
       name: this.name?.trim() || this.previewName,
       nativeSessionId: this.nativeSessionId,
+      ...(this.folder === undefined ? {} : { folder: this.folder }),
       conversationReplacing: this.conversationReplacing,
       latestEventId: this.events.nextId - 1,
       settledEventId: this.settledEventId,
@@ -1055,12 +1057,24 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         let root;
         try { root = await sessionFolderDirectory(profile); }
         catch (error) { throw new HttpError(409, "session_folders_unavailable", error.message); }
-        if (body && !await resolveHistorySession(profile, body.id)) {
-          throw new HttpError(404, "session_not_found", "an exact, unique Pi session for this profile was not found");
+        if (body) {
+          const owned = [...sessions.values()].some((session) => session.profileName === profileName && session.nativeSessionId === body.id && !session.exit);
+          if (!owned && !await resolveHistorySession(profile, body.id)) throw new HttpError(404, "session_not_found", "an exact, unique Pi session for this profile was not found");
         }
         try {
-          if (!body) return json(response, 200, { folders: await listSessionFolders(root, profile, profileName) });
+          if (!body) {
+            const assignments = new Map((await listSessionFolders(root, profile, profileName)).map((item) => [item.id, item.folder]));
+            // Pi may not persist its header until the first prompt. Include new
+            // sessions immediately so other browsers see their chosen group.
+            for (const session of sessions.values()) {
+              if (session.profileName === profileName && session.folder !== undefined && !assignments.has(session.nativeSessionId)) assignments.set(session.nativeSessionId, session.folder);
+            }
+            return json(response, 200, { folders: [...assignments].map(([id, folder]) => ({ id, folder })) });
+          }
           folder = await writeSessionFolder(root, profile, profileName, body.id, folder, { importOnly: body.importOnly });
+          for (const session of sessions.values()) {
+            if (session.profileName === profileName && session.nativeSessionId === body.id) session.folder = folder;
+          }
           return json(response, 200, { id: body.id, folder });
         } catch {
           throw new HttpError(409, "session_folders_unavailable", "session folder storage is inaccessible, over its directory limit, or could not be updated");
@@ -1072,6 +1086,29 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         if (!config.profiles.has(profileName)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
         return json(response, 200, await listHistory(config.profiles.get(profileName), profileName, { includeArchived: url.searchParams.get("includeArchived") === "true" }));
       }
+      const historical = /^\/v1\/history\/([^/]+)$/.exec(url.pathname);
+      if (historical && request.method === "DELETE") {
+        authenticate(request, config, "sessions:delete");
+        const profile = config.profiles.get(url.searchParams.get("profile"));
+        if (!profile) throw new HttpError(400, "invalid_profile", "a configured profile is required");
+        const id = historical[1];
+        if (!NATIVE_SESSION_ID_RE.test(id)) throw new HttpError(400, "invalid_session", "an exact native session UUID is required");
+        if ([...sessions.values(), ...preparing].some((session) => session.nativeSessionId.toLowerCase() === id.toLowerCase() && !session.exit) || creating.has(`resume:${id.toLowerCase()}`) || conversationSources.has(`resume:${id.toLowerCase()}`)) {
+          throw new HttpError(409, "session_active", "Archive the running session instead.");
+        }
+        const reservation = `resume:${id.toLowerCase()}`;
+        creating.add(reservation); // Exclude concurrent resume while archiving.
+        try {
+          if (!await resolveHistorySession(profile, id)) throw new HttpError(404, "session_not_found", "saved session not found");
+          try { await archiveHistory(profile, id); }
+          catch { throw new HttpError(502, "archive_failed", "saved session could not be archived"); }
+          for (const [key, session] of sessions) {
+            if (session.exit && session.nativeSessionId.toLowerCase() === id.toLowerCase()) sessions.delete(key);
+          }
+        } finally { creating.delete(reservation); }
+        response.statusCode = 204;
+        return response.end();
+      }
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
         authenticate(request, config, "sessions:read");
         return json(response, 200, { sessions: [...sessions.values()].map((session) => session.metadata()) });
@@ -1081,9 +1118,16 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         const body = await readJson(request, config.limits.maxBodyBytes);
         if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "invalid_session", "session request must be an object");
         const keys = Object.keys(body);
-        if (keys.some((key) => !["profile", "cwd", "resume", "name"].includes(key))) throw new HttpError(400, "invalid_session", "session request contains an unknown field");
+        if (keys.some((key) => !["profile", "cwd", "resume", "name", "folder"].includes(key))) throw new HttpError(400, "invalid_session", "session request contains an unknown field");
         if (body.profile !== undefined && (typeof body.profile !== "string" || !config.profiles.has(body.profile))) throw new HttpError(400, "invalid_profile", "a configured profile is required");
         if (body.profile === undefined && body.cwd === undefined) body.profile = config.profiles.has("default") ? "default" : config.profiles.keys().next().value;
+        let folder;
+        if (body.folder !== undefined) {
+          authenticate(request, config, "sessions:write");
+          if (body.resume !== undefined) throw new HttpError(400, "invalid_session_folder", "resuming retains the saved session folder");
+          try { folder = normalizeSessionFolder(body.folder); }
+          catch (error) { throw new HttpError(400, "invalid_session_folder", error.message); }
+        }
         let selectedFolder;
         if (body.cwd !== undefined) {
           if (body.resume !== undefined) throw new HttpError(400, "invalid_folder", "resumed sessions retain their saved folder");
@@ -1123,7 +1167,19 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           }
           if (body.resume && !resumePath) throw new HttpError(404, "resume_not_found", "an exact, unique Pi session for this profile was not found");
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
-          session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, config, spawnProcess, signalProcessGroup, now, uuid });
+          if (folder !== undefined) {
+            const owner = config.profiles.get(body.profile);
+            try {
+              if (!owner.sessionDir) throw new Error("persistent session storage is required");
+              await mkdir(owner.sessionDir, { recursive: true, mode: 0o700 });
+              const root = await sessionFolderDirectory(owner);
+              await writeSessionFolder(root, owner, body.profile, id, folder);
+            } catch {
+              throw new HttpError(409, "session_folders_unavailable", "The session folder could not be saved. No session was started.");
+            }
+          }
+          if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
+          session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, folder, config, spawnProcess, signalProcessGroup, now, uuid });
           sessions.set(id, session);
         } catch (error) {
           if (error instanceof HttpError) throw error;

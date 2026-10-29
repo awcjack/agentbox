@@ -32,7 +32,7 @@ $("hide-profile-section").checked = hideProfile;
 const api = createTransport(() => token);
 let token = "", auth = new AbortController(), epoch = 0, selection = 0, listVersion = 0;
 let tabsSignature = "";
-let openTabs = [], folderRequest = 0, folderLoading = false;
+let openTabs = [], newTargetProfile = null;
 let current = null, sessions = [], profiles = [], history = [], readOnly = false, createDenied = false, createBusy = false;
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
@@ -387,16 +387,12 @@ async function refreshFolders(migrate = false) {
   } finally {
     if (ownEpoch === epoch) {
       foldersLoading = false;
+      if ($("new-dialog").open) renderNewFolderOptions();
       renderSessions();
       clearTimeout(folderPoll);
       folderPoll = setTimeout(() => refreshFolders(), 15000);
     }
   }
-}
-function moveSession(session, historical) {
-  if (!canMoveSession({ session, historical })) return;
-  const value = window.prompt("Folder path (for example Work/Agentbox). Leave empty to ungroup. Saved on the server and shared across devices.", sessionFolders.get(sessionFolderKey(session, historical)) || "");
-  if (value !== null) return assignSessionFolder(session, historical, value);
 }
 async function assignSessionFolder(session, historical, value) {
   if (!canMoveSession({ session, historical })) return;
@@ -470,16 +466,22 @@ function renderSessions() {
     rename.dataset.sessionKey = `${button.dataset.sessionKey}:rename`;
     rename.disabled = historical || readOnly || session.status !== "running" || !session.nativeSessionId || renaming.has(session.id) || Boolean(records.get(session.id)?.ending);
     rename.addEventListener("click", () => renameSession(session));
-    const move = element("button", "text-button", "↳");
-    move.dataset.sessionKey = `${button.dataset.sessionKey}:folder`;
-    move.disabled = !canMoveSession({ session, historical });
-    move.title = "Move to folder";
-    move.setAttribute("aria-label", `Move to folder: ${displayTitle(session)}`);
-    move.addEventListener("click", () => moveSession(session, historical));
-    actions.append(rename, move);
+    const archive = element("button", "text-button");
+    archive.title = "Archive session";
+    archive.setAttribute("aria-label", `Archive session: ${displayTitle(session)}`);
+    archive.dataset.sessionKey = `${button.dataset.sessionKey}:archive`;
+    archive.hidden = historical && isArchived(session);
+    archive.disabled = deleteDenied || Boolean(records.get(historical ? `history:${session.profile}:${session.id}` : session.id)?.ending);
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("width", "16"); icon.setAttribute("height", "16");
+    icon.setAttribute("fill", "none"); icon.setAttribute("stroke", "currentColor"); icon.setAttribute("stroke-width", "1.6"); icon.setAttribute("aria-hidden", "true");
+    const outline = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    outline.setAttribute("d", "M3 4h18v4H3zM5 8v12h14V8M10 12h4"); icon.append(outline); archive.append(icon);
+    archive.addEventListener("click", () => requestArchive(session, historical));
+    actions.append(rename, archive);
     wrapper.append(button, actions);
     container.append(wrapper);
-    for (const control of [button, rename, move]) {
+    for (const control of [button, rename, archive]) {
       if (focusedKey === control.dataset.sessionKey) control.focus({ preventScroll: true });
     }
     if (hoveredKey === button.dataset.sessionKey) previewSession(button);
@@ -492,7 +494,25 @@ function renderSessions() {
       details.dataset.folderPath = path;
       const key = `${sectionKey}:${path ? `/${path}` : ""}`;
       details.open = folderOpen.get(key) !== false;
-      const summary = element("summary", "folder-heading", name);
+      const summary = element("summary", "folder-heading");
+      summary.append(element("span", "folder-label", name));
+      const add = element("button", "folder-new-session", "+"); add.type = "button";
+      add.setAttribute("aria-label", `New session in ${path || "Ungrouped"}`);
+      add.title = `New session in ${path || "Ungrouped"}`;
+      add.dataset.folderKey = `${key}:new`;
+      add.disabled = !token || createDenied || createBusy || (Boolean(path) && readOnly);
+      add.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
+      add.addEventListener("click", (event) => {
+        event.preventDefault(); event.stopPropagation();
+        const candidates = [...new Set(items.filter((session) => {
+          const assigned = sessionFolders.get(sessionFolderKey(session, historical)) || "";
+          return assigned === path || assigned.startsWith(`${path}/`);
+        }).map((session) => session.profile))];
+        const preferred = $("profile-filter").value || current?.meta.profile;
+        const profile = candidates.includes(preferred) ? preferred : candidates.includes("default") ? "default" : candidates[0];
+        openNew({ folder: path, profile });
+      });
+      summary.append(add);
       summary.dataset.folderKey = key;
       summary.title = path ? `Toggle ${path}; drop a session here to move it` : "Toggle Ungrouped; drop a session here to remove it from its folder";
       const children = element("div", "folder-children");
@@ -507,6 +527,7 @@ function renderSessions() {
       details.addEventListener("toggle", () => { if (details.isConnected) folderOpen.set(key, details.open); });
       parent.append(details);
       if (focusedFolder === key) summary.focus({ preventScroll: true });
+      if (focusedFolder === `${key}:new`) add.focus({ preventScroll: true });
       return children;
     }
     const ungrouped = [];
@@ -1281,13 +1302,19 @@ function activate(meta, { reconnect = false } = {}) {
 }
 
 async function createSession(body) {
-  if (createBusy || createDenied || !token || (body.cwd !== undefined && folderLoading)) return;
+  if (createBusy || createDenied || !token) return;
   createBusy = true; const ownEpoch = epoch, ownSelection = selection;
   $("create-session").disabled = true; $("new-error").hidden = true; updateControls(); renderSessions();
   try {
     const { session } = await api.request("/v1/sessions", { body, signal: auth.signal });
     if (ownEpoch !== epoch) return;
     listVersion++;
+    if (typeof session.folder === "string") {
+      const key = sessionFolderKey(session);
+      if (session.folder) sessionFolders.set(key, session.folder); else sessionFolders.delete(key);
+      const parts = session.folder.split("/");
+      for (let size = 1; size <= parts.length; size++) folderOpen.set(`live:/${parts.slice(0, size).join("/")}`, true);
+    }
     sessions = [...sessions.filter((item) => item.id !== session.id), session]; $("new-dialog").close();
     if (ownSelection === selection) activate(session);
     else renderSessions();
@@ -1295,59 +1322,42 @@ async function createSession(body) {
     // Pi is loading the same directory during its cold start.
   } catch (error) {
     if (ownEpoch !== epoch) return;
-    if (error.code === "insufficient_scope") createDenied = true;
+    if (error.code === "insufficient_scope") {
+      if (error.message.includes("sessions:write")) readOnly = true;
+      else createDenied = true;
+    }
     const message = `${error.message}${!error.status || error.status >= 500 ? " Creation may have succeeded. Refresh the session list before trying again." : ""}`;
     $("new-error").textContent = message; $("new-error").hidden = false;
     report(new ApiError(message, error.status, error.code));
   } finally { if (ownEpoch === epoch) { createBusy = false; $("create-session").disabled = createDenied; updateControls(); renderSessions(); } }
 }
-async function browseFolder(path = null) {
-  const request = ++folderRequest, ownEpoch = epoch;
-  folderLoading = true; $("create-session").disabled = true; $("new-folder").value = path ?? "";
-  $("folder-status").textContent = "Loading folders...";
-  $("folder-browser").replaceChildren();
-  try {
-    const result = await api.request(`/v1/folders${path === null ? "" : `?path=${encodeURIComponent(path)}`}`, { signal: auth.signal });
-    if (request !== folderRequest || ownEpoch !== epoch || !$("new-dialog").open) return;
-    if (result.roots) {
-      if (result.roots.length === 1) return browseFolder(result.roots[0].path);
-      $("new-folder").value = "";
-      for (const root of result.roots) addFolderButton(root.path, root.path);
-    } else {
-      $("new-folder").value = result.path;
-      addFolderButton("Workspaces", null);
-      if (result.parent) addFolderButton("↑ Parent folder", result.parent);
-      for (const folder of result.directories) addFolderButton(folder.name, folder.path);
-    }
-    $("folder-status").textContent = result.truncated ? "Some folders were omitted. Enter a path to browse directly." : result.roots ? "Choose a workspace folder." : "Create the session in the selected folder, or open a subfolder.";
-  } catch (error) {
-    if (request === folderRequest && ownEpoch === epoch) $("folder-status").textContent = error.message;
-  } finally {
-    if (request === folderRequest && ownEpoch === epoch) { folderLoading = false; $("create-session").disabled = createBusy || createDenied; }
-  }
-}
-function addFolderButton(label, path) {
-  const button = element("button", "folder-choice", label); button.type = "button";
-  button.addEventListener("click", () => browseFolder(path));
-  $("folder-browser").append(button);
-}
-$("browse-folder").addEventListener("click", () => browseFolder($("new-folder").value.trim() || null));
-$("new-folder").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") { event.preventDefault(); browseFolder($("new-folder").value.trim() || null); }
-});
-
 async function resume(session) {
   const existing = sessions.find((item) => item.profile === session.profile && item.nativeSessionId === session.id && item.status === "running");
   if (existing) activate(existing);
   else await createSession({ profile: session.profile, resume: session.id });
 }
-function openNew() {
+function renderNewFolderOptions() {
+  const choices = new Set();
+  for (const [key, value] of sessionFolders) {
+    if (JSON.parse(key)[0] !== newTargetProfile) continue;
+    const parts = value.split("/");
+    for (let size = 1; size <= parts.length; size++) choices.add(parts.slice(0, size).join("/"));
+  }
+  $("session-folder-options").replaceChildren(...[...choices].filter(Boolean).sort().map((folder) => {
+    const option = element("option", "", folder); option.value = folder; return option;
+  }));
+}
+function openNew({ folder, profile } = {}) {
   if (!token || !profiles.length || createDenied || createBusy) return;
   drawer(false);
+  newTargetProfile = profile || $("profile-filter").value || current?.meta.profile || (profiles.includes("default") ? "default" : profiles[0]);
+  const existing = current ? sessionFolders.get(sessionFolderKey(current.meta)) || "" : "";
+  $("new-folder").value = folder ?? (readOnly ? "" : existing);
+  renderNewFolderOptions();
   $("new-error").hidden = true;
+  $("new-name").value = "";
   $("new-dialog").showModal();
-  browseFolder(current?.meta.cwd ?? null);
-  $("new-folder").focus();
+  $("new-name").focus();
 }
 
 $("settings").addEventListener("click", () => {
@@ -1520,12 +1530,23 @@ $("auto-mode").addEventListener("click", async () => {
   }
 });
 
-$("end-session").addEventListener("click", () => {
-  if (!current || deleteDenied || current.record.ending) return;
-  endTarget = current;
-  $("end-description").textContent = current.state.sessionName || current.meta.name || "Untitled session";
+function requestArchive(session, historical = false) {
+  const target = historical
+    ? { id: session.id, meta: { ...session, nativeSessionId: session.id }, record: record(`history:${session.profile}:${session.id}`), historical: true }
+    : current?.id === session.id ? current : { id: session.id, meta: session, record: record(session.id) };
+  if (!token || deleteDenied || target.record.ending) return;
+  endTarget = target;
+  drawer(false);
+  $("end-description").textContent = displayTitle(session);
+  $("end-title").textContent = historical ? "Archive this session?" : "End and archive this session?";
+  $("end-help").textContent = historical
+    ? "Saved history is retained in Archived conversations. Archiving does not start a Pi process."
+    : "This stops the Pi process and its tools, and archives the conversation. Saved history is retained in Archived conversations in the sidebar, including after restart. Reopen it there to read or continue. Unsent drafts are not saved.";
+  $("confirm-end").textContent = historical ? "Archive" : "End & archive";
+  $("cancel-end").textContent = historical ? "Cancel" : "Keep session open";
   $("end-dialog").showModal(); $("cancel-end").focus();
-});
+}
+$("end-session").addEventListener("click", () => { if (current) requestArchive(current.meta); });
 $("cancel-end").addEventListener("click", () => { $("end-dialog").close(); endTarget = null; });
 $("end-dialog").addEventListener("cancel", () => { endTarget = null; });
 $("end-form").addEventListener("submit", async (event) => {
@@ -1536,19 +1557,19 @@ $("end-form").addEventListener("submit", async (event) => {
   if (current?.id === ctx.id) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   updateControls(); renderSessions();
   try {
-    try { await api.request(path(ctx), { method: "DELETE", signal: auth.signal }); }
+    try { await api.request(ctx.historical ? `/v1/history/${encodeURIComponent(ctx.id)}?profile=${encodeURIComponent(ctx.meta.profile)}` : path(ctx), { method: "DELETE", signal: auth.signal }); }
     catch (error) { if (error.code !== "session_not_found") throw error; }
     if (ownEpoch !== epoch) return;
     listVersion++; // Invalidate list/history requests started before DELETE.
     endedHistory.add(`${ctx.meta.profile}:${ctx.meta.nativeSessionId}`);
-    sessions = sessions.filter((session) => session.id !== ctx.id);
+    sessions = sessions.filter((session) => ctx.historical ? session.nativeSessionId !== ctx.meta.nativeSessionId : session.id !== ctx.id);
     if (current?.id === ctx.id) {
       selection++; current = null; $("approvals").replaceChildren();
       $("model").replaceChildren(element("option", "", "No model selected"));
       restoreDraft(); renderMessages(); setNetwork("online", "Connected");
     }
     renderSessions(); updateControls();
-    showNotice("Session stopped and archived. Reopen it from Archived conversations in the sidebar.");
+    showNotice(ctx.historical ? "Session archived. Saved history is retained." : "Session stopped and archived. Reopen it from Archived conversations in the sidebar.");
     await refreshSessions();
   } catch (error) {
     if (ownEpoch !== epoch) return;
@@ -1593,7 +1614,7 @@ function logout(message = "") {
   attention.clear(); document.title = baseTitle;
   dismissedCommands = null; commandKey = ""; hideCommandSuggestions();
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
-  current = null; openTabs = []; folderRequest++; folderLoading = false; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
+  current = null; openTabs = []; newTargetProfile = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
   conversationTarget = null; $("conversation-action-dialog").close(); $("copy-dialog").close();
   settingsTarget = null; $("settings-dialog").close(); $("settings-model").textContent = ""; $("settings-help").textContent = "";
@@ -1602,7 +1623,7 @@ function logout(message = "") {
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
-  $("new-folder").value = ""; $("folder-browser").replaceChildren(); $("new-dialog").close(); drawer(false); showNotice("");
+  $("new-folder").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); drawer(false); showNotice("");
   sessionDrag.cancel();
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
@@ -1630,9 +1651,15 @@ $("login-form").addEventListener("submit", async (event) => {
 });
 $("login-dialog").addEventListener("cancel", (event) => event.preventDefault());
 $("logout").addEventListener("click", () => logout());
-$("new-session").addEventListener("click", openNew);
+$("new-session").addEventListener("click", () => openNew());
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
-$("new-form").addEventListener("submit", (event) => { event.preventDefault(); const name = $("new-name").value.trim(); createSession({ cwd: $("new-folder").value.trim(), ...(name ? { name } : {}) }); });
+$("new-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  try {
+    const folder = normalizeFolder($("new-folder").value), name = $("new-name").value.trim();
+    createSession({ profile: newTargetProfile, ...(folder ? { folder } : {}), ...(name ? { name } : {}) });
+  } catch (error) { $("new-error").textContent = error.message; $("new-error").hidden = false; }
+});
 $("refresh-sessions").addEventListener("click", () => {
   if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; current.modelsRequested = true; current.forceModelsRequested = true; cancelModels(current); }
   refreshSessions();

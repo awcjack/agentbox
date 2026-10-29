@@ -31,7 +31,7 @@ This is separate from `services.agentbox.autoStart`, which controls container
 startup at host boot, and from `agentbox pi`, the on-demand interactive CLI.
 
 Open the root URL without SSH, enter the raw bearer token/password, and select
-a working folder within an approved workspace root. The password stays in page memory, not localStorage,
+a session folder (or Ungrouped). The password stays in page memory, not localStorage,
 sessionStorage, or URLs; reload or log out to clear it. Browser API requests
 use the Authorization header, including the fetch-based SSE connection. Configure
 the exact browser origin (scheme, host, and port) in `allowedOrigins`, including
@@ -93,8 +93,11 @@ that case. Deploy the updated runtime and policy extension and start a new Pi
 session; merely refreshing the page does not upgrade an existing child process.
 
 Profiles define administrator-owned workspace roots and history directories.
-New sessions select an existing folder at or below a profile's cwd; the server
-checks both its path and canonical target so symlinks cannot escape that root.
+The New Session dialog selects a sidebar session-folder label, leaving the
+working directory at the configured profile cwd. Each sidebar folder has a **+**
+action that preselects that group without toggling its collapsed state. API clients
+may still request an explicit cwd within a profile root; both the path and its
+canonical target are checked so symlinks cannot escape that root.
 The UI uses native Pi sessions and credentials;
 it does not convert OpenCode conversations or import OpenCode authentication.
 Each additional profile needs a distinct, non-overlapping persistent session
@@ -215,6 +218,7 @@ present, it must exactly match `allowedOrigins`.
 | `GET /v1/profiles` | `profiles:read` | Configured profile names |
 | `GET /v1/folders` | `profiles:read` | Approved workspace roots as `{roots:[{profile,path}]}` |
 | `GET /v1/folders?path=...` | `profiles:read` | Folder path, root, parent, child directories and truncation flag |
+| `DELETE /v1/history/:nativeId?profile=default` | `sessions:delete` | Archive saved history without starting Pi; rejects an active session |
 | `GET /v1/history?profile=default` | `sessions:read` | Native Pi history from the approved profile's session directory |
 | `GET /v1/session-folders?profile=default` | `sessions:read` | Shared folder assignments as `{folders:[{id,folder}]}` |
 | `PUT /v1/session-folders?profile=default` | `sessions:write` | Assign a native session with `{id,folder}`; empty folder ungroups |
@@ -234,15 +238,22 @@ The read-command set is `get_available_models`,
 `get_session_stats`, `get_state`, and `get_tree`. A write-only token cannot use
 these commands as a way to read session data.
 
-Create requests accept `{"cwd":"/workspace/project","name":"Project"}`. The
-server selects the most specific matching profile; an optional `profile` can
-constrain that choice. `{"profile":"default"}` remains supported and starts at
-its configured cwd. Omitted profile/cwd uses the default profile, or the first
+The browser creates with `{"profile":"default","folder":"Work/Project","name":"Project"}`.
+`folder` is an optional conversation-group label, not a filesystem path. It uses
+the same normalization and bounds as sidebar assignments, requires `sessions:write`
+as well as `sessions:create`, and is saved in the profile's persistent session
+storage before the child starts. GET `/v1/session-folders` includes active sessions
+before Pi persists their first prompt, so other browsers see the group immediately.
+Omit `folder` for Ungrouped; resuming cannot overwrite an existing assignment.
+The API also accepts `{"cwd":"/workspace/project","name":"Project"}` for an explicit
+working directory. The server selects the most specific matching profile; an
+optional `profile` can constrain that choice. `{"profile":"default"}` remains
+supported and starts at its configured cwd. Omitted profile/cwd uses the default profile, or the first
 configured profile if none is named default. Names are optional. Resume uses
 `{"profile":"default","resume":"<full UUID>"}` and cannot override the saved cwd.
-Folder listing scans at most 10,000 entries and returns at most 1,000 directories;
-`truncated:true` means users should enter the desired path directly. Exited sessions remain available for inspection until
-idle cleanup but do not consume the active-session quota. Idle cleanup (30 minutes
+The optional server-directory API scans at most 10,000 entries and returns at
+most 1,000 directories; `truncated:true` means clients should request the desired
+path directly. Exited sessions remain available for inspection until idle cleanup but do not consume the active-session quota. Idle cleanup (30 minutes
 by default) only stops disconnected sessions without outstanding commands, active
 agent work, compaction, or pending UI dialogs. Quiet tools such as a long `sleep`
 and unanswered approvals are not idle. Once work settles or a dialog closes, its
@@ -253,7 +264,8 @@ RPC requests are Pi command objects. UI requests
 are `{"id":"...","confirmed":true}`, `{"id":"...","value":"..."}`, or
 `{"id":"...","cancelled":true}`. Select values must match an offered option.
 
-Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and
+Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and an
+optional initial `folder` label. It also includes
 pending UI requests. `autoMode` is `null` until the policy extension announces
 support, then `{available, enabled}`. Auto restores the conversation's last explicit
 choice on restart/resume, including from “PICK UP WHERE YOU LEFT OFF”; without a
@@ -489,8 +501,9 @@ PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node web/browser-smoke.
 ```
 
 `SETTINGS_ONLY=1` runs just the Settings desktop/mobile regression scenarios.
-`FOLDERS_TABS_ONLY=1` covers folder selection, session tabs, keyboard navigation,
-independent drafts, close/reopen without stopping Pi, and explicit catalog refresh.
+`FOLDERS_TABS_ONLY=1` covers session-folder selection, creation from collapsed
+folder headings, row archive/cancel for running and saved conversations, session
+tabs, independent drafts, and explicit catalog refresh.
 For a portable Nix check, run `nix build path:.#checks.aarch64-darwin.pi-rpc-workspace`
 from the Agentbox root, substituting the desired system. The full
 `pi-rpc-runtime-test` also exercises Linux procfs history storage.
