@@ -242,6 +242,28 @@ in
       touch $out
     '';
 
+  pi-cursor-test =
+    let
+      testSource = pkgs.runCommand "pi-cursor-integration-test-source" { } ''
+        mkdir -p $out/tests $out/extensions
+        cp ${./tests/pi-cursor.ts} $out/tests/pi-cursor.ts
+        cp ${./extensions/pi-agentbox.ts} $out/extensions/pi-agentbox.ts
+        cp ${./extensions/lsp-client.ts} $out/extensions/lsp-client.ts
+      '';
+    in
+    pkgs.runCommand "pi-cursor-integration-test"
+      {
+        nativeBuildInputs = [ pkgs.nodejs_22 ];
+      }
+      ''
+        node --experimental-strip-types ${testSource}/tests/pi-cursor.ts \
+          ${pi-cursor.extension} \
+          ${pi-coding-agent}/lib/node_modules/pi-monorepo \
+          ${testSource}/extensions/pi-agentbox.ts \
+          ${pi-post.extension}
+        touch $out
+      '';
+
   pi-post-test =
     pkgs.runCommand "pi-post-integration-test"
       {
