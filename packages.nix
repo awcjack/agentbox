@@ -29,6 +29,18 @@ in
 
   agentbox-desktop = if isLinux then pkgs.callPackage ./desktop.nix { } else null;
 
+  agentboxNetworkImage = if isLinux then import ./network-image.nix { inherit pkgs; } else null;
+
+  network-policy-test =
+    pkgs.runCommand "agentbox-network-policy-test"
+      {
+        nativeBuildInputs = [ pkgs.python3 ];
+      }
+      ''
+        python3 ${./tests/network-policy.py} ${./scripts/network-policy.py} ${./scripts/network-host.py}
+        touch $out
+      '';
+
   inherit
     agentbox-neovim
     agentbox-pi-goal-runtime

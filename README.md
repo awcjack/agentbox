@@ -457,7 +457,7 @@ still applies: explicit model choices, restored session models, and trusted
 project settings can override the global model default.
 
 Writes preserve unrelated global settings. Model persistence uses SDK
-`SettingsManager`; the custom auto key reuses Pi 0.84's internal
+`SettingsManager`; the custom auto key reuses Pi's internal
 `FileSettingsStorage` lock because the SDK has no arbitrary-key setter. Settings
 errors are reported rather than claiming success. This compatibility seam is
 covered by an installed-SDK integration test:
@@ -491,8 +491,9 @@ The `openai-codex` provider uses Pi's ChatGPT/Codex login. For an OpenAI API key
 use the `openai` provider and an available model such as `gpt-4.1-mini` instead.
 Model catalog presence does not guarantee account access; verify a live request
 before using review. Unsupported or unconfigured models fall back to human
-approval in review only. Review belongs to one Pi process and is not persisted
-or inherited by workflow children. The web toggle reports auto off during review;
+approval in review only. An explicit review choice is saved and restored with
+the same conversation, like on/off; forks and workflow children do not inherit
+that saved choice. The web toggle reports auto off during review;
 `/auto status` reports the specific mode. The `auto` defaults are `enable = false`,
 `provider = ""`, `model = ""`, and `timeout = 30000`.
 
@@ -596,6 +597,14 @@ explicitly acknowledge plain-HTTP exposure with
 `allowInsecureRemoteAccess = true`, then restrict access with a trusted TLS
 reverse proxy or VPN.
 
+With `settings.network.enable = true`, container loopback is separate from host
+loopback on both platforms, and port 4098 is not published by default. For host
+browser access, use the same explicit bind and acknowledgement above, add
+`"127.0.0.1:4098:4098"` to `network.publishedPorts` while retaining any other
+ports you need, and allow the browser's exact origin. Alternatively, forward
+container loopback through SSH into Agentbox. Publishing a port alone does not
+make a loopback-bound RPC listener reachable.
+
 Only an environment variable name for a bearer token or its hash is placed in
 managed JSON. To reuse an existing runtime password, configure
 `auth.tokens = [ { tokenEnv = "OPENCODE_PASSWORD"; } ];`. The supervisor hashes
@@ -686,11 +695,18 @@ and managed policy boundary. See [upstream Pi](https://github.com/earendil-works
 | **AI CLIs** | **codex**, **opencode**, **pi**, Pi MCP runtime, Pi RPC supervisor (Claude Code is runtime-installed) |
 | Language servers | gopls, nil, typescript-language-server, yaml-language-server, vscode-langservers-extracted |
 | Formatters | nixfmt (RFC), prettier |
-| Cloud CLIs | awscli2, kubectl, kubernetes-helm, google-cloud-sdk (+gke-gcloud-auth-plugin), docker-client |
+| Cloud CLIs (opt-in) | awscli2, kubectl, kubernetes-helm, google-cloud-sdk (+gke-gcloud-auth-plugin), docker-client |
 | VCS / scanning | gh, gitleaks, openssh |
 
 Base core/system utilities are tagged REQUIRED vs CONVENIENCE inline in
 `image.nix` — `readline` and `expect` were dropped from the base as unneeded.
+
+Cloud CLIs are excluded from the base image. On NixOS, set
+`services.agentbox.settings.enableCloudTools = true` to include them in the
+module's default image. On Darwin, or when supplying a custom image, build the
+Linux image with `agentboxImage.override { withCloudTools = true; }`. The
+`docker-client` binary is part of this optional bundle; enabling the Docker API
+proxy alone does not add it to the image.
 
 ## In-container sudo & package installs
 
@@ -718,18 +734,157 @@ just install a thing" workflow, both **on by default**:
 
 ## Build
 
+Build the OCI images on Linux or with a configured Linux Nix builder. The flake
+does not provide native Darwin image derivations; copy the Linux-built tarballs
+to the Mac and configure their paths there.
+
 ```bash
 nix build .#agentboxImage      # -> ./result (a docker image tarball)
 docker load < result           # loads agentbox:latest
 ```
 
+From Darwin with a Linux builder, explicitly select
+`.#packages.aarch64-linux.agentboxImage` (or `x86_64-linux`) instead of the native
+`.#agentboxImage` target. Select the matching Linux target for
+`agentboxNetworkImage` as well.
+
+## Outbound network policies
+
+Network policies are opt-in. With `settings.network.enable = false` (the
+default), both platforms retain their existing host networking. Restricted
+mode currently requires Docker; the NixOS Podman backend is rejected.
+
+To block specific networks while allowing other destinations:
+
+```nix
+services.agentbox.settings.network = {
+  enable = true;
+  defaultAction = "allow";
+  deniedNetworks = [
+    { cidr = "10.20.0.0/16"; } # production network
+    { cidr = "169.254.169.254/32"; } # cloud metadata
+    { cidr = "fd12:3456::/32"; }
+    { cidr = "203.0.113.5"; protocol = "tcp"; ports = [ 5432 ]; }
+  ];
+};
+```
+
+For an IP allowlist, set `defaultAction = "deny"` and populate
+`allowedNetworks` with the same rule format. Rules accept IPv4/IPv6 addresses
+and CIDRs, `protocol = "all" | "tcp" | "udp"`, and optional destination
+`ports`. Ports require TCP or UDP. Denied rules win over allowed rules.
+Loopback, return traffic for existing connections, and IPv6 neighbor discovery
+remain available. `dnsServers` defaults to `[ "1.1.1.1" ]`; TCP/UDP port 53 to
+these resolvers is allowed unless a denied rule blocks it. Set `dnsServers =
+[ ]` with an empty allowlist and default deny for no new external connections.
+Permitted DNS is an explicit network exception, including arbitrary queries.
+
+For a mandatory HTTP/HTTPS domain allowlist:
+
+```nix
+services.agentbox.settings.network = {
+  enable = true;
+  domains = {
+    enable = true;
+    defaultAction = "deny";
+    allowed = [ ".github.com" "registry.npmjs.org" ];
+    denied = [ "blocked.example.com" ];
+  };
+  deniedNetworks = [
+    { cidr = "10.0.0.0/8"; }
+    { cidr = "172.16.0.0/12"; }
+    { cidr = "192.168.0.0/16"; }
+    { cidr = "169.254.0.0/16"; }
+    { cidr = "fc00::/7"; }
+    { cidr = "fe80::/10"; }
+  ];
+};
+```
+
+A leading dot matches the domain and all subdomains; other entries match
+exactly. Domain denies win. Use `domains.defaultAction = "allow"` with
+`domains.denied` for a domain blocklist. Both domain modes require the proxy:
+direct outbound traffic, direct DNS, QUIC, and SSH are blocked. Use Git over
+HTTPS. Add actual provider, login, registry, CDN, and download domains required
+by your enabled agents; the example is not a complete agent bootstrap list.
+The generated upper/lowercase proxy environment variables configure compatible
+clients; clients that ignore the proxy fail closed. Domain mode rejects
+`allowedNetworks` because direct exceptions could bypass it.
+
+Domain filtering checks HTTP request destinations and HTTPS CONNECT hostnames;
+it does not decrypt TLS or inspect data sent to an allowed service. IP deny
+rules are also enforced on the proxy's outbound connections after DNS
+resolution, including when an allowed domain resolves to a denied subnet.
+Domain blocklists match the supplied hostname; aliases and literal IPs are
+different destinations. Use a domain allowlist or destination subnet denies
+when those alternatives must also be restricted.
+
+Restricted mode starts a separate firewall companion before the agent and
+removes `NET_ADMIN`, `NET_RAW`, and `SYS_ADMIN` from the agent's capability
+bounding set. In-container sudo cannot edit the firewall. Domain mode adds a
+separate Squid companion, so becoming root in the agent cannot impersonate a
+privileged proxy process. Docker-in-Docker (`enableDocker = true`) is rejected.
+The existing restricted Docker API proxy remains reachable on loopback.
+Rules are installed for both IP families, with Docker's embedded DNS blocked
+before NAT. A firewall setup error prevents the agent from starting.
+
+The network companion owns published ports. Defaults expose only the UI ports
+on host loopback: `127.0.0.1:4096:4096` and `127.0.0.1:4097:4097`. Set
+`network.publishedPorts` to explicit Docker publish specs to add SSH (for
+example `127.0.0.1:2222:22`), the optional Pi chat UI on port 4098, dev servers,
+UDP, or remote bindings. An explicit host IP is required, and the target
+service must listen on a container interface reachable by Docker port
+forwarding. See the Pi RPC and desktop sections for loopback-only listeners.
+Existing host-loopback services are no longer directly reachable from the
+agent; grant access to their routable IPs if needed.
+
+The helper image builds separately on Linux:
+
+```bash
+nix build .#agentboxNetworkImage
+```
+
+NixOS defaults `settings.network.image` to this package through the overlay.
+On Darwin, set that option to the Linux-built tarball (just as for the main
+image). The launcher loads it automatically when creating the companions.
+The Docker Linux host/VM must support IPv6 bridge networking and IPv4/IPv6
+iptables. Rules are applied inside that VM, independently of macOS PF.
+
+Apply policy changes by recreating the containers: `agentbox restart` on
+Darwin, or rebuild/restart `docker-agentbox` on NixOS. The NixOS unit starts and
+stops the companions in dependency order. On Darwin, restricted containers
+do not auto-restart after a Docker daemon restart: run `agentbox start` to
+reinstall/check the policy before starting them. Stopping Agentbox removes its
+companions. A policy change cannot replace the namespace of a running agent.
+
+Validation:
+
+```bash
+python3 tests/network-policy.py scripts/network-policy.py scripts/network-host.py
+nix build .#network-policy-test
+nix-instantiate --eval --strict --json tests/network-modules.nix --arg nixpkgs /path/to/nixpkgs
+docker load < result # after building agentboxNetworkImage
+python3 tests/network-integration.py
+```
+
+The integration test uses isolated, uniquely named containers and the helper
+image only. It checks IPv4/IPv6 allow/deny rules, HTTP/CONNECT filtering, direct
+and DNS bypass attempts, root capabilities, and proxy failure without internet
+access. It requires a running Docker daemon.
+
 ### CI
 
-`.github/workflows/build-image.yml` evaluates the flake, builds every extension
-and runtime test derivation, then builds the image on every push and PR. On
-pushes to `main` / `v*` tags it publishes to GHCR
-(`ghcr.io/<owner>/agentbox:latest` and `:<sha>` / `:<tag>`). Building needs no
-secrets (nixpkgs-only); only the push uses the built-in `GITHUB_TOKEN`.
+`.github/workflows/build-image.yml` runs for path-filtered pushes to `master`,
+`v*` tag pushes, path-filtered pull requests, and manual dispatch. README-only
+changes are outside its path filters.
+
+The workflow evaluates the flake, builds its listed extension/runtime tests and
+main image, then builds the network helper and runs policy, module, and live
+Docker enforcement checks. Pull requests do not publish images. Non-PR runs
+publish the main image to `ghcr.io/<owner>/agentbox:<sha>` and either `:<tag>`
+for tag runs or `:latest` otherwise. The network helper is built and tested but
+is not pushed to GHCR. Builds use public pinned inputs, including OpenCode's
+upstream flake; publishing uses the built-in `GITHUB_TOKEN`.
 
 ## Use the modules
 
@@ -818,8 +973,8 @@ services.agentbox.settings.desktop = {
 };
 ```
 
-The NixOS module includes the desktop in its default image. If you supply a
-custom image, build it with `agentboxImage.override { withDesktop = true; }`.
+When enabled, the NixOS module includes the desktop in its default image. If you
+supply a custom image, build it with `agentboxImage.override { withDesktop = true; }`.
 Darwin also requires a prebuilt Linux image with that flag. Rebuild and recreate
 the container after changing image or container settings; service start alone
 does not install packages. Consumers pinned to an older Agentbox revision must
@@ -849,10 +1004,34 @@ ssh -N -L 6080:127.0.0.1:6080 your-nixos-host
 
 **Access trusts local users.** VNC and noVNC have no password and bind only to
 IPv4 loopback; X11 uses a private authentication cookie and disables TCP.
-Agentbox uses host networking, so other local host processes can access these
-ports. Never publish them publicly or forward them through an unauthenticated
-proxy. On macOS, loopback belongs to the Docker runtime's Linux network context;
-reach that context through the runtime's supported forwarding mechanism.
+With the default host networking, other local processes on the Linux Docker
+host can access these ports. On macOS, loopback belongs to the Docker runtime's
+Linux network context; reach that context through the runtime's supported
+forwarding mechanism. Never expose these listeners publicly or forward them
+through an unauthenticated proxy.
+
+With network policies enabled, those listeners remain on Agentbox's own
+loopback. The host-level SSH forwarding example above no longer reaches them,
+and adding port 6080 to `network.publishedPorts` alone is insufficient. Publish
+only Agentbox's SSH listener on host loopback alongside the UI ports:
+
+```nix
+services.agentbox.settings.network.publishedPorts = [
+  "127.0.0.1:4096:4096"
+  "127.0.0.1:4097:4097"
+  "127.0.0.1:2222:22"
+];
+```
+
+Then authenticate to the container's SSH server and tunnel its loopback viewer:
+
+```bash
+ssh -N -p 2222 -L 6080:127.0.0.1:6080 agent@127.0.0.1
+```
+
+Open `http://127.0.0.1:6080/vnc.html` on that SSH client's machine. For a remote
+Docker host, reach the published loopback SSH port through your existing trusted
+host connection. Keep the unauthenticated VNC/noVNC listeners private.
 
 The module exports `DISPLAY=:10`, `XAUTHORITY`, and `DBUS_SESSION_BUS_ADDRESS`
 in the container environment. Pi RPC profiles deliberately do not inherit that
@@ -911,8 +1090,8 @@ The sandbox check reports a rendering skip when user namespaces are unavailable.
 
 ## Advanced: baking extra agents in
 
-Beyond the four bundled agents, this standalone ships no others. To add your own
-you have four generic hooks, none of which require forking:
+Beyond the four bundled agents, this standalone ships no others. To add your own,
+use the following extension points without forking:
 
 | Hook | Purpose |
 |---|---|
@@ -958,8 +1137,9 @@ agentbox service stop my-agent
 each service's startup mode and current active or inactive status. The other
 service actions manage on-demand services only.
 
-For a short break, `agentbox pause` freezes every process while preserving tmux
-sessions; `agentbox resume` continues them. `agentbox stop` tears the container
+For a short break, `agentbox pause` freezes the agent container's processes while
+preserving tmux sessions; `agentbox resume` continues them. The network firewall
+and egress proxy companions remain running. `agentbox stop` tears the container
 down and, on NixOS, also stops Docker when no other containers are running.
 The NixOS image-load unit records the source store path and skips importing an
 unchanged `agentbox:latest` image after reboot.

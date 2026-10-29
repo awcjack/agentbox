@@ -138,6 +138,8 @@ let
   );
 in
 {
+  imports = [ ./network-options.nix ];
+
   options.services.agentbox = {
     # ── Generic extension surface ──────────────────────────────────────────
     # Optional add-on modules contribute to the container through these instead

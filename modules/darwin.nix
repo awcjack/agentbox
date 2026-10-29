@@ -57,6 +57,8 @@ let
       (isHttps && (!isBlockedLiteral || (transport.allowInsecureLoopback && isLoopback)))
       || (transport.allowInsecureLoopback && isLoopbackHttp)
     );
+  net = cfg.settings.network;
+  networkRuntime = import ./network-runtime.nix { inherit cfg pkgs lib; };
 
   # Effective permission sets: curated defaults + per-host extras. Kept here so
   # settings.json and managed-settings.json stay in lock-step.
@@ -386,6 +388,7 @@ let
     ++ lib.optional (
       cfg.settings.sshPrivateKeyPath != null
     ) "-v ${cfg.dataDir}/home/.ssh/id_ed25519:/home/agent/.ssh/id_ed25519:ro"
+    ++ lib.optional net.enable "-v ${cfg.dataDir}/network.env.resolv:/etc/resolv.conf:ro"
   );
 
   # H2: container hardening flags. Defaults reduce kernel attack surface (the
@@ -405,7 +408,9 @@ let
     [ "true" ]
     ++ lib.optional cfg.settings.enableOpencode ''(curl -fsS -u "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:4096/global/health >/dev/null)''
     ++ lib.optional cfg.settings.enablePiWeb ''(password="$PI_WEB_PASSWORD"; [ -n "$password" ] || password="$OPENCODE_PASSWORD"; curl -fsS -u "pi:$password" http://127.0.0.1:4097/ >/dev/null)''
-    ++ lib.optional (cfg.settings.piRpcApi.enable && cfg.settings.piRpcApi.autoStart) "(curl -fsS http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready >/dev/null)"
+    ++ lib.optional (
+      cfg.settings.piRpcApi.enable && cfg.settings.piRpcApi.autoStart
+    ) "(curl -fsS http://127.0.0.1:${toString cfg.settings.piRpcApi.port}/health/ready >/dev/null)"
   );
 
   # Click-to-jump handler — runs ONLY when you click an Agentbox notification
@@ -534,11 +539,11 @@ let
       PROXY_ARGS=(
         run -d
         --name "$PROXY_NAME"
-        --network=host
+        ${if net.enable then "--network=container:agentbox-network" else "--network=host"}
         --read-only
         --security-opt no-new-privileges
         --user ${cfg.settings.dockerProxy.user}
-        --restart unless-stopped
+        --restart ${if net.enable then "no" else "unless-stopped"}
         -v ${cfg.settings.dockerProxy.socketPath}:/var/run/docker.sock:ro
         "$PROXY_IMAGE"
         -loglevel=info
@@ -552,7 +557,6 @@ let
     }
 
     stop_proxy() {
-      [ "$PROXY_ENABLED" = "true" ] || return 0
       if docker ps --format '{{.Names}}' | grep -q "^$PROXY_NAME$"; then
         echo "Stopping docker socket proxy..."
         docker stop "$PROXY_NAME" >/dev/null
@@ -562,6 +566,8 @@ let
 
     cmd_start() {
       check_docker
+
+      ${lib.optionalString net.enable "${networkRuntime} start"}
 
       # Bring up the socket proxy first so DOCKER_HOST is reachable from the box.
       start_proxy
@@ -587,7 +593,8 @@ let
       DOCKER_ARGS=(
         run -d
         --name "$CONTAINER_NAME"
-        --network=host
+        ${if net.enable then "--network=container:agentbox-network" else "--network=host"}
+        ${lib.optionalString net.enable "--cap-drop=NET_ADMIN --cap-drop=NET_RAW --cap-drop=SYS_ADMIN"}
         ${securityOptArgs}
         --cpus=${toString cfg.settings.cpuLimits}
         --memory=${cfg.settings.memoryLimits}
@@ -600,13 +607,17 @@ let
         --health-timeout=5s
         --health-retries=3
         --health-start-period=60s
-        --restart unless-stopped
+        --restart ${if net.enable then "no" else "unless-stopped"}
       )
 
       # Add env file if specified
       if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
         DOCKER_ARGS+=(--env-file "$ENV_FILE")
       fi
+
+      ${lib.optionalString net.enable ''
+        DOCKER_ARGS+=(--env-file ${lib.escapeShellArg "${cfg.dataDir}/network.env"})
+      ''}
 
       DOCKER_ARGS+=("$IMAGE_NAME")
 
@@ -632,6 +643,19 @@ let
         echo "Agentbox is not running"
       fi
       stop_proxy
+      ${
+        if net.enable then
+          "${networkRuntime} stop"
+        else
+          ''
+            # Also clean up companions after restricted mode was disabled.
+            for companion in agentbox-network agentbox-egress-proxy; do
+              if docker inspect "$companion" >/dev/null 2>&1; then
+                docker rm -f "$companion" >/dev/null
+              fi
+            done
+          ''
+      }
     }
 
     cmd_restart() {
@@ -718,7 +742,9 @@ let
     }
 
     check_pi_rpc_started() {
-      if [ "${lib.boolToString (cfg.settings.piRpcApi.enable && !cfg.settings.piRpcApi.autoStart)}" = true ] &&
+      if [ "${
+        lib.boolToString (cfg.settings.piRpcApi.enable && !cfg.settings.piRpcApi.autoStart)
+      }" = true ] &&
         ! docker exec -u agent "$CONTAINER_NAME" tmux has-session -t service-pi-rpc 2>/dev/null; then
         echo "Pi RPC API is stopped (configured on-demand). Start it with: agentbox service start pi-rpc" >&2
         return 1

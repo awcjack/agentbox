@@ -1,17 +1,18 @@
 name: build-image
 
 # Builds the agentbox OCI image with Nix and (on pushes to the default branch
-# or tags) publishes it to GitHub Container Registry. The flake depends only on
-# nixpkgs, so no secrets are needed to *build* — only to push.
+# or tags) publishes it to GitHub Container Registry. Builds use public pinned
+# inputs, so no secrets are needed to build — only to push.
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*"]
     paths:
       - "flake.nix"
       - "flake.lock"
       - "image.nix"
+      - "network-image.nix"
       - "packages.nix"
       - "neovim.nix"
       - "package.nix"
@@ -28,6 +29,7 @@ on:
     paths:
       - "flake.nix"
       - "image.nix"
+      - "network-image.nix"
       - "packages.nix"
       - "neovim.nix"
       - "package.nix"
@@ -98,12 +100,21 @@ jobs:
       - name: Build agentbox image
         run: |
           nix build .#packages.x86_64-linux.agentboxImage \
-            --print-build-logs --no-update-lock-file
-          ls -lL result
+            --out-link result-agentbox --print-build-logs --no-update-lock-file
+          ls -lL result-agentbox
+
+      - name: Test network policies
+        run: |
+          nix build .#packages.x86_64-linux.network-policy-test --no-link --no-update-lock-file
+          nixpkgs_path="$(nix eval --impure --raw --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath')"
+          nix-instantiate --eval --strict --json tests/network-modules.nix --arg nixpkgs "$nixpkgs_path"
+          nix build .#packages.x86_64-linux.agentboxNetworkImage --out-link result-network --no-update-lock-file
+          docker load < result-network
+          python3 tests/network-integration.py
 
       - name: Load into Docker
         run: |
-          docker load < result
+          docker load < result-agentbox
           docker image ls agentbox
 
       # Publish only on default-branch pushes and tags — never on PRs.
@@ -117,7 +128,7 @@ jobs:
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker tag agentbox:latest "$IMAGE:${{ github.sha }}"
           docker push "$IMAGE:${{ github.sha }}"
-          # Tag pushes also get a clean semver tag; main pushes get :latest.
+          # Tag pushes also get a clean semver tag; branch pushes get :latest.
           if [ "${{ github.ref_type }}" = "tag" ]; then
             docker tag agentbox:latest "$IMAGE:${{ github.ref_name }}"
             docker push "$IMAGE:${{ github.ref_name }}"

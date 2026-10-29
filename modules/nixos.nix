@@ -60,6 +60,8 @@ let
       (isHttps && (!isBlockedLiteral || (transport.allowInsecureLoopback && isLoopback)))
       || (transport.allowInsecureLoopback && isLoopbackHttp)
     );
+  net = cfg.settings.network;
+  networkRuntime = import ./network-runtime.nix { inherit cfg pkgs lib; };
 
   # Effective permission sets: curated defaults + per-host extras. Kept here so
   # settings.json and managed-settings.json stay in lock-step.
@@ -271,7 +273,7 @@ let
     ENABLE_OPENCODE = lib.boolToString cfg.settings.enableOpencode;
     ENABLE_PI = lib.boolToString cfg.settings.enablePi;
     ENABLE_PI_WEB = lib.boolToString cfg.settings.enablePiWeb;
-    PI_WEB_BIND_ADDRESS = "127.0.0.1";
+    PI_WEB_BIND_ADDRESS = if net.enable then "0.0.0.0" else "127.0.0.1";
     PI_WEB_PORT = "4097";
     ENABLE_PI_RPC_API = lib.boolToString cfg.settings.piRpcApi.enable;
     PI_RPC_API_AUTO_START = lib.boolToString cfg.settings.piRpcApi.autoStart;
@@ -321,7 +323,10 @@ let
     DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/agentbox-desktop-1000/bus";
   }
   # Env contributed via the generic extension surface.
-  // cfg.extraEnvironment;
+  // cfg.extraEnvironment
+  // lib.optionalAttrs net.enable {
+    OPENCODE_BIND_ADDRESS = "0.0.0.0";
+  };
 
 in
 {
@@ -415,6 +420,10 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion = !net.enable || cfg.backend == "docker";
+        message = "Agentbox network policies currently require the Docker backend.";
+      }
       {
         assertion = !cfg.settings.historyArchive.enable || cfg.settings.historyArchive.hostId != "";
         message = "services.agentbox.settings.historyArchive.hostId must be set when archive requests are enabled";
@@ -572,7 +581,7 @@ in
           image = cfg.settings.dockerProxy.image;
           autoStart = cfg.autoStart;
           extraOptions = [
-            "--network=host"
+            (if net.enable then "--network=container:agentbox-network" else "--network=host")
             "--read-only"
             "--security-opt=no-new-privileges"
             "--user=${cfg.settings.dockerProxy.user}"
@@ -598,10 +607,9 @@ in
       image = "agentbox:latest";
       autoStart = cfg.autoStart;
 
-      # Network mode: host for simplicity (exposes ports directly)
+      # Restricted mode shares only the firewall companion's network namespace.
       extraOptions = [
-        "--network=host"
-        "--hostname=agentbox"
+        (if net.enable then "--network=container:agentbox-network" else "--network=host")
         # Resource limits
         "--cpus=${toString cfg.settings.cpuLimits}"
         "--memory=${cfg.settings.memoryLimits}"
@@ -609,6 +617,16 @@ in
       ]
       ++ lib.optional cfg.settings.desktop.enable "--shm-size=${cfg.settings.desktop.shmSize}"
       # Container hardening (shared options). "default" keeps Docker's profile.
+      ++ lib.optionals (!net.enable) [ "--hostname=agentbox" ]
+      # Even sudo inside the agent cannot edit the companion's firewall, send
+      # raw packets, or enter another network namespace.
+      ++ lib.optionals net.enable [
+        "--cap-drop=NET_ADMIN"
+        "--cap-drop=NET_RAW"
+        "--cap-drop=SYS_ADMIN"
+      ]
+      # Container hardening (shared options). "default" => omit the flag so
+      # Docker applies its built-in default seccomp profile.
       ++ lib.optional (
         cfg.settings.hardening.seccompProfile != "default"
       ) "--security-opt=seccomp=${cfg.settings.hardening.seccompProfile}"
@@ -621,7 +639,9 @@ in
       environment = containerEnv;
 
       # Secret environment file
-      environmentFiles = lib.optional (cfg.environmentFile != null) cfg.environmentFile;
+      environmentFiles =
+        lib.optional (cfg.environmentFile != null) cfg.environmentFile
+        ++ lib.optional net.enable "${cfg.dataDir}/network.env";
 
       # Volume mounts. Cloud credentials are mounted as individual read-only
       # files (only the secret file, never the whole config dir) so the CLIs'
@@ -671,6 +691,7 @@ in
         cfg.settings.kubeConfigPath != null
       ) "${cfg.dataDir}/home/.kube/config:/home/agent/.kube/config:ro"
       # Volumes contributed by optional integration add-ons.
+      ++ lib.optional net.enable "${cfg.dataDir}/network.env.resolv:/etc/resolv.conf:ro"
       ++ cfg.extraVolumes;
     };
 
@@ -1240,12 +1261,15 @@ in
 
     # Ensure the container service depends on configuration being ready
     systemd.services."${cfg.backend}-agentbox" = {
+      requires = lib.optional net.enable "agentbox-network.service";
+      bindsTo = lib.optional net.enable "agentbox-network.service";
       # Start after the socket proxy (when enabled) so DOCKER_HOST is reachable.
       after = [
         "network-online.target"
         "agentbox-image-load.service"
       ]
-      ++ lib.optional cfg.settings.dockerProxy.enable "${cfg.backend}-agentbox-docker-proxy.service";
+      ++ lib.optional cfg.settings.dockerProxy.enable "${cfg.backend}-agentbox-docker-proxy.service"
+      ++ lib.optional net.enable "agentbox-network.service";
       wants = [
         "network-online.target"
         "agentbox-image-load.service"
@@ -1266,6 +1290,25 @@ in
     # crash-loop auto-restart of agentbox won't needlessly bounce the proxy.
     systemd.services."${cfg.backend}-agentbox-docker-proxy" = lib.mkIf cfg.settings.dockerProxy.enable {
       partOf = [ "${cfg.backend}-agentbox.service" ];
+      requires = lib.optional net.enable "agentbox-network.service";
+      after = lib.optional net.enable "agentbox-network.service";
+    };
+
+    systemd.services.agentbox-network = lib.mkIf net.enable {
+      description = "Agentbox outbound firewall and optional domain proxy";
+      requires = [ "docker.service" ];
+      after = [
+        "docker.service"
+        "network-online.target"
+      ];
+      partOf = [ "docker-agentbox.service" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${networkRuntime} start";
+        ExecStop = "${networkRuntime} stop";
+        TimeoutStartSec = 180;
+      };
     };
   };
 }
