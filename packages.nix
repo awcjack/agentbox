@@ -20,6 +20,7 @@ let
   # Pre-configured neovim baked into the image; also exposed on its own.
   agentbox-neovim = pkgs.callPackage ./neovim.nix { };
   pi-post = pkgs.callPackage ./pi-post.nix { };
+  pi-cursor = pkgs.callPackage ./pi-cursor.nix { };
   pi-agentbox-mcp-runtime = pkgs.callPackage ./runtime { };
   agentbox-pi-goal-runtime = pkgs.callPackage ./goal-runtime { };
   agentbox-pi-rpc-runtime = pkgs.callPackage ./rpc-runtime { inherit pi-coding-agent; };
@@ -49,6 +50,7 @@ in
     pi-agentbox-mcp-runtime
     pi-coding-agent
     pi-post
+    pi-cursor
     ;
 
   pi-codex-wrapper-test = import ./tests/pi-codex-wrapper.nix { inherit pkgs; };
@@ -109,6 +111,7 @@ in
           pi-agentbox-mcp-runtime
           pi-coding-agent
           pi-post
+          pi-cursor
           ;
         # The extra-agent args default to null inside image.nix; override here
         # to bake one in.
