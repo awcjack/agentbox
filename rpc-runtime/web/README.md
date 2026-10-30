@@ -95,8 +95,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   links, pipe tables (including column alignment), and fenced code with copy/select fallback. `md`/`markdown` fences offer a
   Preview/Source toggle using the same safe renderer (nested fences stay source).
   `mermaid` fences offer Preview/Source that lazy-loads vendored Mermaid tiny
-  (`securityLevel: strict`, native SVG labels) and shows the chart as a
-  `data:image/svg+xml` image—no HTML interpretation and no diagram script execution.
+  (`securityLevel: strict`, HTML label layout converted to centered SVG text) and
+  shows the chart as a `data:image/svg+xml` image—no HTML interpretation and no
+  diagram script execution.
   Raw HTML is never interpreted.
   Remote Markdown images are not fetched; only validated inline raster data is
   displayed. Tool input/output/details and nonempty thinking are collapsible.
