@@ -6,7 +6,7 @@ import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
-import { readAttachments, attachmentMessage, uploadAttachments } from "./attachments.mjs";
+import { readAttachments, attachmentMessage, uploadAttachments, initComposerFileDrop } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
 import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
 
@@ -1590,6 +1590,17 @@ $("prompt").addEventListener("paste", (event) => {
   // Leave ordinary text paste alone, including text accompanying an image.
   if (!event.clipboardData.getData("text/plain")) event.preventDefault();
   attachImages(files);
+});
+function canAttachFiles() {
+  const ctx = current;
+  return Boolean(ctx && !readOnly && !ctx.record.ending && !ctx.record.sending && !ctx.record.readingImages && !$("composer").hidden);
+}
+initComposerFileDrop([conversation, composeArea], {
+  canAccept: canAttachFiles,
+  onDrop: (files) => {
+    setComposerCompact(false);
+    attachImages(files);
+  },
 });
 async function attachImages(files) {
   const ctx = current, ownEpoch = epoch;

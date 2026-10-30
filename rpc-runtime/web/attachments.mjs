@@ -41,3 +41,54 @@ export async function uploadAttachments(attachments, nativeId, upload, isCurrent
   }
   if (!isCurrent()) throw new Error("Conversation changed; draft kept.");
 }
+
+export function hasFileDrag(event) {
+  return [...(event.dataTransfer?.types || [])].includes("Files");
+}
+
+// Accept OS file/image drops on the conversation transcript and composer.
+// Ignore in-page session drags; they use custom transfer markers without Files.
+export function initComposerFileDrop(targets, { canAccept, onDrop }) {
+  const zones = [...targets].filter(Boolean);
+  let active = false;
+  function setActive(next) {
+    if (active === next) return;
+    active = next;
+    for (const zone of zones) zone.classList.toggle("file-drop", next);
+  }
+  function clear() { setActive(false); }
+  function fromZone(node) {
+    return zones.find((zone) => zone === node || zone.contains(node));
+  }
+  function accept(event) {
+    return hasFileDrag(event) && canAccept?.() !== false && fromZone(event.target);
+  }
+  for (const zone of zones) {
+    zone.addEventListener("dragenter", (event) => {
+      if (!accept(event)) return;
+      event.preventDefault();
+      setActive(true);
+    });
+    zone.addEventListener("dragover", (event) => {
+      if (!accept(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      setActive(true);
+    });
+    zone.addEventListener("dragleave", (event) => {
+      if (!active) return;
+      const next = event.relatedTarget;
+      if (next && fromZone(next)) return;
+      clear();
+    });
+    zone.addEventListener("drop", (event) => {
+      if (!hasFileDrag(event) || !fromZone(event.target)) return;
+      event.preventDefault();
+      clear();
+      if (canAccept?.() === false) return;
+      const files = [...(event.dataTransfer?.files || [])];
+      if (files.length) onDrop?.(files);
+    });
+  }
+  return { isActive: () => active, clear };
+}

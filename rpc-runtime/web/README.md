@@ -85,8 +85,11 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   session; it neither prompts the model nor changes the conversation. Runtime
   record-size limits still apply; failures are shown without downloading partial
   history. Referenced external files are not bundled. Exports can contain secrets.
-- Raster image attachments from file selection or clipboard paste, up to 5 MiB combined before base64 encoding, with
-  previews, removal, and a 7.5 MiB serialized-command guard for an 8 MiB backend.
+- Raster image and file attachments from file selection, clipboard paste, or
+  drag-and-drop onto the conversation transcript or composer, up to 5 MiB
+  combined before base64 encoding, with previews, removal, and a 7.5 MiB
+  serialized-command guard for an 8 MiB backend. Drop targets highlight while
+  files are dragged; session row drags are ignored.
 - Single-line prompt box with an accessible expand/collapse button. Scrolling
   into older messages reduces the composer to a compact row; clicking or typing
   in the prompt, or returning to the latest messages, restores its previous size.
