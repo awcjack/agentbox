@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMermaidPreview, mermaidSvgImage, renderMermaidDiagram, resetMermaidLoader } from "./mermaid-preview.mjs";
+import { createMermaidPreview, mermaidSvgImage, renderMermaidDiagram, resetMermaidLoader, sanitizeMermaidSvg } from "./mermaid-preview.mjs";
 
 function installDocument() {
   class Node {
@@ -55,6 +55,17 @@ test("mermaid SVG becomes a data-image without scripts or handlers", () => {
     assert.doesNotMatch(decoded, /onclick/i);
     assert.match(decoded, />ok</);
   } finally { restore(); }
+});
+
+test("foreignObject HTML labels are converted to SVG text instead of dropped", () => {
+  const svg = sanitizeMermaidSvg(
+    '<svg xmlns="http://www.w3.org/2000/svg"><g><foreignObject width="80" height="40"><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>Start</p></span></div></foreignObject></g><script>evil()</script></svg>',
+  );
+  assert.doesNotMatch(svg, /foreignObject/i);
+  assert.doesNotMatch(svg, /<script/i);
+  assert.match(svg, /<text[^>]*>Start<\/text>/);
+  assert.match(svg, /x="40"/);
+  assert.match(svg, /y="20"/);
 });
 
 test("mermaidSvgImage rejects non-SVG payloads", () => {
