@@ -22,7 +22,7 @@
         <label class="section-label" for="profile-filter">PROFILE</label>
         <select id="profile-filter" disabled aria-label="Filter sessions by profile"><option value="">All profiles</option></select>
       </div>
-      <div class="section-heading"><span class="section-label">SESSIONS</span><button id="refresh-sessions" class="text-button" disabled>Refresh</button></div>
+      <div class="section-heading"><span class="section-label">SESSIONS</span><div class="section-actions"><button id="new-folder-button" class="text-button" type="button" disabled title="Create an empty session folder">New folder</button><button id="refresh-sessions" class="text-button" disabled>Refresh</button></div></div>
       <div id="sessions" class="session-list"><p class="sidebar-empty">Connect to find your sessions.</p></div>
       <div class="sidebar-footer"><span class="connection-dot" id="connection-dot"></span><span id="connection-label">Not connected</span><button class="text-button" id="logout" disabled>Log out</button></div>
       <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="Session navigation width" aria-controls="sidebar" aria-orientation="vertical" tabindex="0" title="Resize sessions: drag, Left/Right arrows, Home or End" hidden></div>
@@ -116,6 +116,19 @@
       <button id="show-all-models" class="text-button" type="button">Show all models</button>
       <p id="model-visibility-status" class="field-note" role="status"></p>
     </div>
+  </dialog>
+
+  <dialog id="folder-dialog" aria-labelledby="folder-title">
+    <form id="folder-form" class="dialog-body">
+      <div class="dialog-heading"><span class="dialog-eyebrow">SESSION FOLDER</span><button type="button" id="cancel-folder" class="icon-button" aria-label="Close new folder">&times;</button></div>
+      <h2 id="folder-title">Create a folder.</h2>
+      <p>Add an empty group in the sessions list. Drag sessions into it or use its + action to start a conversation there.</p>
+      <label for="folder-name">Folder name</label>
+      <input id="folder-name" list="session-folder-options" autocomplete="off" required placeholder="Work/Project" aria-describedby="folder-name-help">
+      <p id="folder-name-help" class="field-note">Use nested names such as Work/Project. Saved in this browser until a session is assigned.</p>
+      <p id="folder-error" class="form-error" role="alert" hidden></p>
+      <button id="create-folder" class="primary-button" type="submit">Create folder <span aria-hidden="true">&rarr;</span></button>
+    </form>
   </dialog>
   <dialog id="new-dialog" aria-labelledby="new-title">
     <form id="new-form" class="dialog-body">

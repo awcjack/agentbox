@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, initSessionDragDrop } from "./sidebar.mjs";
+import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
@@ -15,6 +15,7 @@ try { preferenceStorage = window.localStorage; } catch { /* Browser storage may 
 const hiddenModels = readHiddenModels(preferenceStorage);
 const sessionFolders = new Map();
 const legacyFolders = readSessionFolders(preferenceStorage);
+const pinnedFolders = readPinnedFolders(preferenceStorage);
 const folderProfiles = new Set(), movingFolders = new Set();
 let folderPoll = null, folderVersion = 0, foldersLoading = false;
 const folderOpen = new Map();
@@ -144,6 +145,7 @@ function updateControls() {
   document.querySelector(".composer-foot").hidden = answering;
   $("new-session").disabled = !token || !profiles.length || createDenied || createBusy;
   $("refresh-sessions").disabled = !token;
+  $("new-folder-button").disabled = !token || readOnly;
   $("profile-filter").disabled = !token || !profiles.length;
   $("logout").disabled = !token;
   $("end-session").disabled = !ctx || !token || deleteDenied || ctx.record.ending;
@@ -487,7 +489,8 @@ function renderSessions() {
     if (hoveredKey === button.dataset.sessionKey) previewSession(button);
   }
   function grouped(items, historical, container, sectionKey) {
-    if (!items.length) return;
+    const pinned = sectionKey === "live" ? pinnedFolders : new Set();
+    if (!items.length && !pinned.size) return;
     const folders = new Map();
     function group(name, path, parent) {
       const details = element("details", "session-folder");
@@ -530,17 +533,21 @@ function renderSessions() {
       if (focusedFolder === `${key}:new`) add.focus({ preventScroll: true });
       return children;
     }
-    const ungrouped = [];
-    for (const session of items) {
-      const path = sessionFolders.get(sessionFolderKey(session, historical)) || "";
-      if (!path) { ungrouped.push(session); continue; }
+    function ensurePath(path) {
       let target = container, prefix = "";
       for (const name of path.split("/")) {
         prefix = prefix ? `${prefix}/${name}` : name;
         if (!folders.has(prefix)) folders.set(prefix, group(name, prefix, target));
         target = folders.get(prefix);
       }
-      row(session, historical, target);
+      return target;
+    }
+    for (const path of [...pinned].sort((a, b) => a.localeCompare(b))) ensurePath(path);
+    const ungrouped = [];
+    for (const session of items) {
+      const path = sessionFolders.get(sessionFolderKey(session, historical)) || "";
+      if (!path) { ungrouped.push(session); continue; }
+      row(session, historical, ensurePath(path));
     }
     // Keep an empty drop target available even when every session has a folder.
     const target = group("Ungrouped", "", container);
@@ -550,15 +557,21 @@ function renderSessions() {
     }
     for (const session of ungrouped) row(session, historical, target);
     if (!ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
+    for (const path of pinned) {
+      const children = folders.get(path);
+      if (children && !children.querySelector(".session-row, .session-folder")) {
+        children.append(element("p", "folder-empty", "Drop sessions here or create one with +"));
+      }
+    }
   }
-  if (live.length) root.append(element("div", "list-heading sr-only", "IN THIS RUNTIME"));
+  if (live.length || pinnedFolders.size) root.append(element("div", "list-heading sr-only", "IN THIS RUNTIME"));
   grouped(live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))), false, root, "live");
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
   const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
   const past = available.filter((session) => !isArchived(session));
   if (past.length) root.append(element("div", "list-heading sr-only", "PICK UP WHERE YOU LEFT OFF"));
   grouped(past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))), true, root, "past");
-  if (!live.length && !past.length) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
+  if (!live.length && !past.length && !pinnedFolders.size) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   if (token) {
     const archived = available.filter(isArchived).sort(compareArchivedSessions);
     const section = element("details", "archived-sessions");
@@ -1337,7 +1350,7 @@ async function resume(session) {
   else await createSession({ profile: session.profile, resume: session.id });
 }
 function renderNewFolderOptions() {
-  const choices = new Set();
+  const choices = new Set(pinnedFolders);
   for (const [key, value] of sessionFolders) {
     if (JSON.parse(key)[0] !== newTargetProfile) continue;
     const parts = value.split("/");
@@ -1346,6 +1359,28 @@ function renderNewFolderOptions() {
   $("session-folder-options").replaceChildren(...[...choices].filter(Boolean).sort().map((folder) => {
     const option = element("option", "", folder); option.value = folder; return option;
   }));
+}
+function openFolderDialog() {
+  if (!token || readOnly) return;
+  drawer(false);
+  $("folder-error").hidden = true;
+  $("folder-name").value = "";
+  newTargetProfile = $("profile-filter").value || current?.meta.profile || (profiles.includes("default") ? "default" : profiles[0]);
+  renderNewFolderOptions();
+  $("folder-dialog").showModal();
+  $("folder-name").focus();
+}
+function createPinnedFolder(value) {
+  const folder = normalizeFolder(value);
+  if (!folder) throw new Error("Enter a folder name.");
+  pinnedFolders.add(folder);
+  for (let size = 1; size <= folder.split("/").length; size++) {
+    folderOpen.set(`live:/${folder.split("/").slice(0, size).join("/")}`, true);
+  }
+  savePinnedFolders(preferenceStorage, pinnedFolders);
+  renderSessions();
+  showNotice(`Folder ${folder} is ready. Drag sessions into it or create one with +.`);
+  return folder;
 }
 function openNew({ folder, profile } = {}) {
   if (!token || !profiles.length || createDenied || createBusy) return;
@@ -1634,7 +1669,7 @@ function logout(message = "") {
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
-  $("new-folder").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); drawer(false); showNotice("");
+  $("new-folder").value = ""; $("folder-name").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); $("folder-dialog").close(); drawer(false); showNotice("");
   sessionDrag.cancel();
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
@@ -1668,8 +1703,21 @@ $("new-form").addEventListener("submit", (event) => {
   event.preventDefault();
   try {
     const folder = normalizeFolder($("new-folder").value), name = $("new-name").value.trim();
+    if (folder) {
+      pinnedFolders.add(folder);
+      savePinnedFolders(preferenceStorage, pinnedFolders);
+    }
     createSession({ profile: newTargetProfile, ...(folder ? { folder } : {}), ...(name ? { name } : {}) });
   } catch (error) { $("new-error").textContent = error.message; $("new-error").hidden = false; }
+});
+$("new-folder-button").addEventListener("click", () => openFolderDialog());
+$("cancel-folder").addEventListener("click", () => $("folder-dialog").close());
+$("folder-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  try {
+    createPinnedFolder($("folder-name").value);
+    $("folder-dialog").close();
+  } catch (error) { $("folder-error").textContent = error.message; $("folder-error").hidden = false; }
 });
 $("refresh-sessions").addEventListener("click", () => {
   if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; current.modelsRequested = true; current.forceModelsRequested = true; cancelModels(current); }

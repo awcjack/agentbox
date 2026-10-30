@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   compareArchivedSessions, initSidebarResize, initSessionDragDrop, sessionActivitySymbol,
   sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders,
+  readPinnedFolders, savePinnedFolders,
 } from "./sidebar.mjs";
 
 test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
@@ -105,6 +106,7 @@ function folderStorage(initial = null) {
     values,
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
+    removeItem: (key) => { values.delete(key); },
   };
 }
 
@@ -442,4 +444,27 @@ test("cancel, dragend, and document Escape clean up once and allow later drags",
     assert.deepEqual(s.moves, [[s.source, "Work"]]);
     assert.equal(s.ends(), 2);
   }
+});
+
+const pinnedStorageKey = "agentbox.pi.pinned-folders.v1";
+
+test("pinned folder storage normalizes, sorts, and clears empty sets", () => {
+  const storage = folderStorage();
+  assert.deepEqual([...readPinnedFolders(storage)], []);
+  assert.equal(savePinnedFolders(storage, new Set([" / Work // Nested / ", "Alpha", ""])), true);
+  assert.equal(storage.values.get(pinnedStorageKey), JSON.stringify(["Alpha", "Work/Nested"]));
+  assert.deepEqual([...readPinnedFolders(storage)], ["Alpha", "Work/Nested"]);
+  assert.equal(savePinnedFolders(storage, new Set()), true);
+  assert.equal(storage.values.has(pinnedStorageKey), false);
+  assert.deepEqual([...readPinnedFolders(storage)], []);
+});
+
+test("pinned folder storage rejects invalid names and survives corrupt JSON", () => {
+  const storage = folderStorage();
+  assert.equal(savePinnedFolders(storage, new Set(["Work/../Nope"])), false);
+  assert.equal(storage.values.has(pinnedStorageKey), false);
+  storage.setItem(pinnedStorageKey, "{not-json");
+  assert.deepEqual([...readPinnedFolders(storage)], []);
+  storage.setItem(pinnedStorageKey, JSON.stringify(["Good", 12, null, " / Trimmed / "]));
+  assert.deepEqual([...readPinnedFolders(storage)], ["Good", "Trimmed"]);
 });

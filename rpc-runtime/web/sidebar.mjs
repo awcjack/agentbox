@@ -44,6 +44,29 @@ export function saveSessionFolders(storage, folders) {
   } catch { return false; }
 }
 
+// Explicit empty folders are a browser preference until a session is assigned.
+const pinnedFoldersKey = "agentbox.pi.pinned-folders.v1";
+export function readPinnedFolders(storage) {
+  try {
+    const entries = JSON.parse(storage?.getItem(pinnedFoldersKey) || "[]");
+    return new Set(entries.filter((entry) => typeof entry === "string").map((entry) => normalizeFolder(entry)).filter(Boolean));
+  } catch { return new Set(); }
+}
+export function savePinnedFolders(storage, folders) {
+  try {
+    if (!storage) return false;
+    const values = [...folders].map((entry) => normalizeFolder(entry)).filter(Boolean).sort((a, b) => a.localeCompare(b));
+    if (!values.length) {
+      try { storage.removeItem(pinnedFoldersKey); }
+      catch { storage.setItem(pinnedFoldersKey, "[]"); }
+    } else {
+      storage.setItem(pinnedFoldersKey, JSON.stringify(values));
+    }
+    return true;
+  } catch { return false; }
+}
+
+
 // Transfer data is only a compatibility marker, never a session identity.
 export function initSessionDragDrop(root, { getSource, canMove, move, onEnd }) {
   let source;

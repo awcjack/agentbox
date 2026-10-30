@@ -380,6 +380,12 @@ try {
       if (process.env.FOLDERS_TABS_ONLY === "1") {
         await page.locator("#prompt").fill("First session draft");
         await openSidebar();
+        assert.equal(await page.locator(".section-actions").evaluate((root) => [...root.querySelectorAll("button")].map((button) => button.id)), ["new-folder-button", "refresh-sessions"], "New folder sits before Refresh");
+        await page.locator("#new-folder-button").click();
+        await page.locator("#folder-name").fill("Inbox/Empty");
+        await page.locator("#create-folder").click();
+        await until(() => page.locator('.session-folder[data-folder-path="Inbox/Empty"] .folder-empty').count().then((count) => count === 1), "empty pinned folder appears");
+        assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.pinned-folders.v1")), JSON.stringify(["Inbox/Empty"]));
         const parentFolder = page.locator('summary[data-folder-key="live:/Work"]').locator("..");
         await parentFolder.locator(":scope > summary").click();
         assert.equal(await parentFolder.getAttribute("open"), null);
@@ -1275,7 +1281,7 @@ try {
       if (label === "mobile") await page.locator("#close-drawer").click();
       await drawerClosed();
       await until(() => group.locator(".tool-detail[open]").count().then((count) => count === 1), "expanded action survives refresh");
-      assert.deepEqual(await page.evaluate(() => ({ local: Object.keys(localStorage).filter((key) => key !== "agentbox.pi.session-folders.v1").sort(), session: sessionStorage.length, cookies: document.cookie })), { local: ["agentbox.pi.hidden-models.v1", "agentbox.pi.hide-profile.v1"], session: 0, cookies: "" }, "only display preferences persist, not auth or drafts");
+      assert.deepEqual(await page.evaluate(() => ({ local: Object.keys(localStorage).filter((key) => !["agentbox.pi.session-folders.v1", "agentbox.pi.pinned-folders.v1"].includes(key)).sort(), session: sessionStorage.length, cookies: document.cookie })), { local: ["agentbox.pi.hidden-models.v1", "agentbox.pi.hide-profile.v1"], session: 0, cookies: "" }, "only display preferences persist, not auth or drafts");
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
       assert.equal(await page.locator("#token").inputValue(), "");
       assert.equal(await page.title(), "Pi Agent | Agentbox", "logout clears tab counters");

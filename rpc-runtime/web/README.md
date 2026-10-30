@@ -36,18 +36,22 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   expand. Bubbles have status-colored auras and title/status previews on hover
   or keyboard focus, displayed outside the scrolling rail.
 - Create sessions in nested sidebar folders such as `Work/Agentbox` using New
-  session or a folder heading's **+** action. Folder membership is saved on
-  the server, keyed by profile and native conversation ID, so it follows
-  resume/archive and runtime restarts across browsers and devices. Other devices
-  refresh assignments every 15 seconds, or immediately with Refresh. Changes
-  require `sessions:write` and persistent profile session storage. New sessions
-  receive their assignment before the first prompt is written to Pi history.
-  Existing browser-saved folders are imported at login when no server assignment
-  exists; failed imports are retained locally for retry. Server assignments win.
-  Folders group each lifecycle section; sessions without an assignment appear
-  under **Ungrouped**. Click a folder heading (or press Enter/Space when focused)
-  to collapse or expand it; this state survives sidebar refreshes. Closed folders
-  still expose session bubbles when the sidebar itself is collapsed.
+  session or a folder heading's **+** action. Use **New folder** next to Refresh
+  to add an empty group in this browser before any session exists; drag sessions
+  into it or use its **+** action afterward. Empty folder labels are a local
+  display preference (`agentbox.pi.pinned-folders.v1`), not server state. Folder
+  membership is saved on the server, keyed by profile and native conversation ID,
+  so it follows resume/archive and runtime restarts across browsers and devices.
+  Other devices refresh assignments every 15 seconds, or immediately with Refresh.
+  Changes require `sessions:write` and persistent profile session storage. New
+  sessions receive their assignment before the first prompt is written to Pi
+  history. Existing browser-saved folders are imported at login when no server
+  assignment exists; failed imports are retained locally for retry. Server
+  assignments win. Folders group each lifecycle section; sessions without an
+  assignment appear under **Ungrouped**. Click a folder heading (or press
+  Enter/Space when focused) to collapse or expand it; this state survives sidebar
+  refreshes. Closed folders still expose session bubbles when the sidebar itself
+  is collapsed.
 - On desktop, drag a session onto a folder heading or its contents to move it.
   Drop onto **Ungrouped** to remove its folder assignment; this target remains
   available even when empty. Closed folder headings accept drops, and the target
