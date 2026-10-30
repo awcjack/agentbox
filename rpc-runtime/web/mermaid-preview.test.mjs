@@ -42,6 +42,22 @@ function installDocument() {
   return () => { globalThis.document = previous; };
 }
 
+function labelCenters(svg) {
+  const centers = [];
+  const nodePattern = /<g class="node[^"]*"[^>]*id="([^"]+)"[^>]*transform="translate\(([^,]+),\s*([^)]+)\)"[\s\S]*?<g class="label"[^>]*transform="translate\(([^,]+),\s*([^)]+)\)"[\s\S]*?<text([^>]*)>/g;
+  for (const match of svg.matchAll(nodePattern)) {
+    const textAttrs = match[6];
+    const x = Number((/\bx="([^"]+)"/.exec(textAttrs) || [])[1] || 0);
+    const y = Number((/\by="([^"]+)"/.exec(textAttrs) || [])[1] || 0);
+    centers.push({
+      id: match[1],
+      x: Number(match[4]) + x,
+      y: Number(match[5]) + y,
+    });
+  }
+  return centers;
+}
+
 test("mermaid SVG becomes a data-image without scripts or handlers", () => {
   const restore = installDocument();
   try {
@@ -66,6 +82,47 @@ test("foreignObject HTML labels are converted to SVG text instead of dropped", (
   assert.match(svg, /<text[^>]*>Start<\/text>/);
   assert.match(svg, /x="40"/);
   assert.match(svg, /y="20"/);
+});
+
+test("foreignObject conversion honors x/y and keeps labels centered in Mermaid label transforms", () => {
+  const source = `<svg xmlns="http://www.w3.org/2000/svg" id="t">
+  <g class="nodes">
+    <g class="node default" id="n-rect" transform="translate(100, 100)">
+      <g class="label" transform="translate(-60, -9)">
+        <foreignObject width="120" height="18"><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>Caller</p></span></div></foreignObject>
+      </g>
+    </g>
+    <g class="node default" id="n-cyl" transform="translate(300, 100)">
+      <g class="label" transform="translate(-60, 1)">
+        <foreignObject width="120" height="18"><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>sessions/*.json</p></span></div></foreignObject>
+      </g>
+    </g>
+    <g class="node default" id="n-xy" transform="translate(700, 100)">
+      <g class="label" transform="translate(0, 0)">
+        <foreignObject x="-40" y="-10" width="80" height="20"><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>XY</p></span></div></foreignObject>
+      </g>
+    </g>
+  </g>
+</svg>`;
+  const cleaned = sanitizeMermaidSvg(source);
+  assert.doesNotMatch(cleaned, /foreignObject/i);
+  const centers = Object.fromEntries(labelCenters(cleaned).map((row) => [row.id, row]));
+  assert.ok(centers["n-rect"]);
+  assert.ok(Math.abs(centers["n-rect"].x) < 0.01, `rect x ${centers["n-rect"].x}`);
+  assert.ok(Math.abs(centers["n-rect"].y) < 0.01, `rect y ${centers["n-rect"].y}`);
+  assert.ok(Math.abs(centers["n-cyl"].x) < 0.01, `cylinder x ${centers["n-cyl"].x}`);
+  assert.ok(Math.abs(centers["n-cyl"].y - 10) < 0.01, `cylinder y ${centers["n-cyl"].y}`);
+  assert.ok(Math.abs(centers["n-xy"].x) < 0.01, `xy x ${centers["n-xy"].x}`);
+  assert.ok(Math.abs(centers["n-xy"].y) < 0.01, `xy y ${centers["n-xy"].y}`);
+});
+
+test("foreignObject multi-line labels become tspans", () => {
+  const svg = sanitizeMermaidSvg(
+    '<svg xmlns="http://www.w3.org/2000/svg"><g class="node" id="n-multi" transform="translate(0,0)"><g class="label" transform="translate(-80, -9)"><foreignObject width="160" height="36"><div xmlns="http://www.w3.org/1999/xhtml"><span class="nodeLabel"><p>Brain MCP<br/>searchBrain</p></span></div></foreignObject></g></g></svg>',
+  );
+  assert.match(svg, /Brain MCP<\/tspan>/);
+  assert.match(svg, /searchBrain<\/tspan>/);
+  assert.doesNotMatch(svg, /Brain MCP searchBrain/);
 });
 
 test("mermaidSvgImage rejects non-SVG payloads", () => {

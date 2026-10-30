@@ -26,23 +26,49 @@ function attrNumber(attrs, name) {
   return Number.isFinite(value) ? value : 0;
 }
 
-// Mermaid defaults to HTML labels inside <foreignObject>. Those do not paint
-// inside data:image/svg+xml <img>, and deleting them removes every label.
-// Prefer native SVG text via htmlLabels:false, and convert any leftover
-// foreignObject content to a plain SVG <text> node.
+function foreignObjectLines(inner) {
+  return String(inner ?? "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[^\S\n]+/g, " ")
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function svgTextAt(x, y, lines) {
+  if (!lines.length) return "";
+  if (lines.length === 1) {
+    return `<text text-anchor="middle" dominant-baseline="middle" x="${x}" y="${y}">${escapeXml(lines[0])}</text>`;
+  }
+  const startDy = -((lines.length - 1) * 1.2) / 2;
+  const spans = lines.map((line, index) => {
+    const dy = index === 0 ? `${startDy}em` : "1.2em";
+    return `<tspan x="${x}" dy="${dy}">${escapeXml(line)}</tspan>`;
+  }).join("");
+  return `<text text-anchor="middle" dominant-baseline="middle" x="${x}" y="${y}">${spans}</text>`;
+}
+
+// Mermaid HTML labels live in <foreignObject> under a label transform of
+// roughly translate(-width/2, -height/2). Those HTML nodes do not paint inside
+// data:image/svg+xml <img>, so replace each foreignObject with SVG <text> at the
+// box center (x+width/2, y+height/2). Native htmlLabels:false cylinder labels
+// are left-shifted by Mermaid while CSS forces text-anchor:middle — keep
+// htmlLabels enabled so layout stays correct.
 export function sanitizeMermaidSvg(svg) {
   const text = String(svg ?? "").trim();
   return text
     .replace(/<script\b[\s\S]*?<\/script>/gi, "")
     .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "")
     .replace(/<foreignObject\b([^>]*)>([\s\S]*?)<\/foreignObject>/gi, (_match, attrs, inner) => {
-      const plain = String(inner).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-      if (!plain) return "";
+      const lines = foreignObjectLines(inner);
+      if (!lines.length) return "";
       const width = attrNumber(attrs, "width");
       const height = attrNumber(attrs, "height");
-      const x = width / 2;
-      const y = height / 2;
-      return `<text text-anchor="middle" dominant-baseline="middle" x="${x}" y="${y}">${escapeXml(plain)}</text>`;
+      const x = attrNumber(attrs, "x") + width / 2;
+      const y = attrNumber(attrs, "y") + height / 2;
+      return svgTextAt(x, y, lines);
     });
 }
 
@@ -52,14 +78,15 @@ export function resetMermaidLoader() {
 }
 
 function configureMermaid(mermaid) {
-  // Native SVG <text> labels survive data: image preview; HTML labels do not.
+  // Keep HTML label layout (correct for cylinders/databases). Preview converts
+  // foreignObject boxes to SVG text so labels remain visible as a data image.
   mermaid.initialize({
     startOnLoad: false,
     securityLevel: "strict",
     theme: "dark",
     fontFamily: "ui-sans-serif, system-ui, sans-serif",
-    htmlLabels: false,
-    flowchart: { htmlLabels: false },
+    htmlLabels: true,
+    flowchart: { htmlLabels: true },
   });
   return mermaid;
 }
