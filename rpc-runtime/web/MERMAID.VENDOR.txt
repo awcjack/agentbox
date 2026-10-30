@@ -1,0 +1,4 @@
+Vendored from @mermaid-js/tiny 12.2.0 (MIT).
+Source: https://www.npmjs.com/package/@mermaid-js/tiny
+File: dist/mermaid.tiny.js
+Do not edit this bundle; replace it when upgrading.

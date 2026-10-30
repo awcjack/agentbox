@@ -144,3 +144,67 @@ test("unclosed emphasis and CRLF snapshots render without dropping text", () => 
   assert.deepEqual(markdownBlocks("hello\r\nworld\r\n\r\n**still streaming"), [{ type: "p", text: "hello\nworld" }, { type: "p", text: "**still streaming" }]);
   assert.deepEqual(inlineTokens("**still streaming"), [{ type: "text", text: "**still streaming" }]);
 });
+
+test("fenced Mermaid preview is opt-in, reversible, and uses a data SVG image", async () => {
+  class Node {
+    constructor(tag) {
+      this.tag = tag;
+      this.children = [];
+      this.textContent = "";
+      this.hidden = false;
+      this.disabled = false;
+      this.handlers = {};
+      this.attributes = {};
+      this.classList = { add(name) { this.names = [...(this.names || []), name]; } };
+      this.parent = null;
+    }
+    append(...nodes) {
+      for (const node of nodes) { node.parent = this; this.children.push(node); }
+    }
+    replaceWith(node) {
+      const parent = this.parent;
+      const index = parent.children.indexOf(this);
+      node.parent = parent;
+      parent.children.splice(index, 1, node);
+      this.parent = null;
+    }
+    addEventListener(name, handler) { this.handlers[name] = handler; }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    set innerHTML(_value) { throw new Error("Unsafe HTML assignment"); }
+  }
+  const previous = globalThis.document;
+  globalThis.document = {
+    createElement: tag => new Node(tag),
+    createTextNode: text => Object.assign(new Node("#text"), { textContent: text }),
+  };
+  const all = node => [node, ...node.children.flatMap(all)];
+  try {
+    const source = "```mermaid\ngraph TD; A-->B\n```";
+    const root = renderMarkdown(source, {
+      renderMermaidPreview: async () => {
+        const preview = new Node("div");
+        preview.className = "mermaid-preview markdown-preview";
+        const img = new Node("img");
+        img.src = "data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E";
+        img.alt = "Mermaid diagram";
+        preview.append(img);
+        return preview;
+      },
+    });
+    const toggle = all(root).find(node => node.textContent === "Preview" && node.tag === "button");
+    assert.ok(toggle);
+    assert.equal(all(root).some(node => node.tag === "img"), false);
+    await toggle.handlers.click();
+    assert.equal(toggle.attributes["aria-pressed"], "true");
+    assert.equal(root.children[0].children[1].hidden, true);
+    const img = all(root).find(node => node.tag === "img");
+    assert.ok(img);
+    assert.match(img.src, /^data:image\/svg\+xml/);
+    assert.ok(!all(root).some(node => ["script", "iframe"].includes(node.tag)));
+    await toggle.handlers.click();
+    assert.equal(toggle.attributes["aria-pressed"], "false");
+    assert.equal(root.children[0].children[1].hidden, false);
+    assert.equal(root.children[0].children[2].hidden, true);
+    assert.ok(!all(renderMarkdown("```js\ngraph TD; A-->B\n```")).some(node => node.textContent === "Preview"));
+  } finally { globalThis.document = previous; }
+});

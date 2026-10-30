@@ -1,3 +1,5 @@
+import { createMermaidPreview } from "./mermaid-preview.mjs";
+
 export function safeHref(value) {
   if (typeof value !== "string" || /[\u0000-\u0020\u007f]/.test(value)) return null;
   try {
@@ -134,7 +136,8 @@ export async function copyText(text) {
 
 // Preview fenced Markdown through the same text-node-only renderer, never HTML.
 // Nested fences stay source-only to keep preview rendering bounded.
-export function renderMarkdown(source, { previewFences = true } = {}) {
+// ```mermaid fences get an opt-in chart preview that renders to a data: SVG image.
+export function renderMarkdown(source, { previewFences = true, renderMermaidPreview = createMermaidPreview } = {}) {
   const root = element("div", "markdown");
   function inline(parent, text) {
     for (const token of inlineTokens(text)) {
@@ -171,9 +174,41 @@ export function renderMarkdown(source, { previewFences = true } = {}) {
         let preview;
         toggle.addEventListener("click", () => {
           if (!preview) {
-            preview = renderMarkdown(block.text, { previewFences: false });
+            preview = renderMarkdown(block.text, { previewFences: false, renderMermaidPreview });
             preview.classList.add("markdown-preview");
             wrapper.append(preview);
+          }
+          const showing = !pre.hidden;
+          pre.hidden = showing;
+          preview.hidden = !showing;
+          toggle.textContent = showing ? "Source" : "Preview";
+          toggle.setAttribute("aria-pressed", String(showing));
+        });
+        heading.append(toggle);
+      } else if (previewFences && /^mermaid$/i.test(block.language)) {
+        const toggle = element("button", "text-button", "Preview");
+        toggle.type = "button";
+        toggle.setAttribute("aria-pressed", "false");
+        let preview;
+        let rendering = false;
+        toggle.addEventListener("click", async () => {
+          if (rendering) return;
+          if (!preview) {
+            rendering = true;
+            toggle.disabled = true;
+            const status = element("div", "mermaid-preview markdown-preview", "Rendering…");
+            wrapper.append(status);
+            try {
+              preview = await renderMermaidPreview(block.text);
+              status.replaceWith(preview);
+            } catch (error) {
+              preview = element("div", "mermaid-preview markdown-preview mermaid-error");
+              preview.append(element("p", "", `Mermaid preview failed: ${error?.message || error}`));
+              status.replaceWith(preview);
+            } finally {
+              rendering = false;
+              toggle.disabled = false;
+            }
           }
           const showing = !pre.hidden;
           pre.hidden = showing;
