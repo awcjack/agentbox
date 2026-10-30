@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   compareArchivedSessions, initSidebarResize, initSessionDragDrop, sessionActivitySymbol,
   sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders,
-  readPinnedFolders, savePinnedFolders,
+  readPinnedFolders, savePinnedFolders, folderOpenKey, isFolderOpen, partitionFolderEntries,
 } from "./sidebar.mjs";
 
 test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
@@ -346,6 +346,45 @@ test("session drag moves to the closest nested folder, clears before move, and e
   s.fire("dragend");
   assert.deepEqual(s.moves, [[s.source, "Work/Notes"]]);
   assert.equal(s.ends(), 1);
+});
+
+
+test("folder open keys share one main tree and fall back to legacy live/past", () => {
+  assert.equal(folderOpenKey("main", "Work/Agentbox"), "main:/Work/Agentbox");
+  assert.equal(folderOpenKey("main", ""), "main:");
+  const map = new Map([["live:/Work", false]]);
+  assert.equal(isFolderOpen(map, "main", "Work"), false);
+  map.set("main:/Work", true);
+  assert.equal(isFolderOpen(map, "main", "Work"), true);
+  assert.equal(isFolderOpen(new Map(), "main", "Inbox"), true);
+  assert.equal(isFolderOpen(new Map([["past:", false]]), "main", ""), false);
+});
+
+test("partitionFolderEntries merges live and history into one Ungrouped/folder set", () => {
+  const live = { id: "runtime-1", profile: "default", nativeSessionId: "native-live", name: "Live" };
+  const past = { id: "native-past", profile: "default", name: "Past" };
+  const other = { id: "native-other", profile: "default", name: "Other" };
+  const folders = new Map([
+    [sessionFolderKey(live), "Work/Agentbox"],
+    [sessionFolderKey(past, true), "Work/Agentbox"],
+  ]);
+  const entries = [
+    { session: live, historical: false },
+    { session: past, historical: true },
+    { session: other, historical: true },
+  ];
+  const partitioned = partitionFolderEntries(
+    entries,
+    ({ session, historical }) => folders.get(sessionFolderKey(session, historical)) || "",
+    ["Inbox/Empty"],
+  );
+  assert.deepEqual([...partitioned.folders.keys()], ["Inbox/Empty", "Work/Agentbox"]);
+  assert.equal(partitioned.folders.get("Work/Agentbox").length, 2);
+  assert.deepEqual(partitioned.folders.get("Inbox/Empty"), []);
+  assert.equal(partitioned.ungrouped.length, 1);
+  assert.equal(partitioned.ungrouped[0].session, other);
+  // One merged tree means a single Ungrouped bucket, not one per lifecycle section.
+  assert.equal(partitioned.ungrouped.filter((entry) => !entry.historical).length + partitioned.ungrouped.filter((entry) => entry.historical).length, 1);
 });
 
 test("session drag supports empty Ungrouped folder paths", () => {

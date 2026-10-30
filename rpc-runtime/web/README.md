@@ -47,8 +47,8 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   sessions receive their assignment before the first prompt is written to Pi
   history. Existing browser-saved folders are imported at login when no server
   assignment exists; failed imports are retained locally for retry. Server
-  assignments win. Folders group each lifecycle section; sessions without an
-  assignment appear under **Ungrouped**. Click a folder heading (or press
+  assignments win. Live and resumeable history share one folder tree; sessions
+  without an assignment appear under **Ungrouped**. Click a folder heading (or press
   Enter/Space when focused) to collapse or expand it; this state survives sidebar
   refreshes. Closed folders still expose session bubbles when the sidebar itself
   is collapsed.

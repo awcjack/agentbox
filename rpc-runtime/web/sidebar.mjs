@@ -30,6 +30,44 @@ export function normalizeFolder(value) {
   }
   return parts.join("/");
 }
+
+// Collapse/open state is shared across live + history in one sidebar tree.
+export function folderOpenKey(sectionKey, path = "") {
+  return `${sectionKey}:${path ? `/${path}` : ""}`;
+}
+
+export function isFolderOpen(map, sectionKey, path = "") {
+  const key = folderOpenKey(sectionKey, path);
+  if (map.has(key)) return map.get(key) !== false;
+  // Prefer the merged main tree; fall back to pre-merge live/past keys.
+  if (sectionKey === "main") {
+    for (const legacy of ["live", "past"]) {
+      const legacyKey = folderOpenKey(legacy, path);
+      if (map.has(legacyKey)) return map.get(legacyKey) !== false;
+    }
+  }
+  return true;
+}
+
+// One folder tree for live + resumeable history. Returns leaf assignments only;
+// the renderer still creates nested parents via ensurePath.
+export function partitionFolderEntries(entries, getFolder, pinned = []) {
+  const folders = new Map();
+  const ungrouped = [];
+  for (const path of [...pinned].filter(Boolean).sort((a, b) => a.localeCompare(b))) {
+    if (!folders.has(path)) folders.set(path, []);
+  }
+  for (const entry of entries) {
+    const path = getFolder(entry) || "";
+    if (!path) {
+      ungrouped.push(entry);
+      continue;
+    }
+    if (!folders.has(path)) folders.set(path, []);
+    folders.get(path).push(entry);
+  }
+  return { folders, ungrouped };
+}
 export function readSessionFolders(storage) {
   try {
     const entries = JSON.parse(storage?.getItem("agentbox.pi.session-folders.v1") || "[]");

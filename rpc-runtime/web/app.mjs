@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop } from "./sidebar.mjs";
+import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
@@ -488,15 +488,14 @@ function renderSessions() {
     }
     if (hoveredKey === button.dataset.sessionKey) previewSession(button);
   }
-  function grouped(items, historical, container, sectionKey) {
-    const pinned = sectionKey === "live" ? pinnedFolders : new Set();
-    if (!items.length && !pinned.size) return;
+  function grouped(entries, container, sectionKey, { pinned = new Set() } = {}) {
+    if (!entries.length && !pinned.size) return;
     const folders = new Map();
     function group(name, path, parent) {
       const details = element("details", "session-folder");
       details.dataset.folderPath = path;
-      const key = `${sectionKey}:${path ? `/${path}` : ""}`;
-      details.open = folderOpen.get(key) !== false;
+      const key = folderOpenKey(sectionKey, path);
+      details.open = isFolderOpen(folderOpen, sectionKey, path);
       const summary = element("summary", "folder-heading");
       summary.append(element("span", "folder-label", name));
       const add = element("button", "folder-new-session", "+"); add.type = "button";
@@ -507,10 +506,10 @@ function renderSessions() {
       add.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
       add.addEventListener("click", (event) => {
         event.preventDefault(); event.stopPropagation();
-        const candidates = [...new Set(items.filter((session) => {
+        const candidates = [...new Set(entries.filter(({ session, historical }) => {
           const assigned = sessionFolders.get(sessionFolderKey(session, historical)) || "";
           return assigned === path || assigned.startsWith(`${path}/`);
-        }).map((session) => session.profile))];
+        }).map(({ session }) => session.profile))];
         const preferred = $("profile-filter").value || current?.meta.profile;
         const profile = candidates.includes(preferred) ? preferred : candidates.includes("default") ? "default" : candidates[0];
         openNew({ folder: path, profile });
@@ -542,21 +541,20 @@ function renderSessions() {
       }
       return target;
     }
-    for (const path of [...pinned].sort((a, b) => a.localeCompare(b))) ensurePath(path);
-    const ungrouped = [];
-    for (const session of items) {
-      const path = sessionFolders.get(sessionFolderKey(session, historical)) || "";
-      if (!path) { ungrouped.push(session); continue; }
-      row(session, historical, ensurePath(path));
+    const partitioned = partitionFolderEntries(entries, ({ session, historical }) => sessionFolders.get(sessionFolderKey(session, historical)) || "", pinned);
+    for (const path of partitioned.folders.keys()) ensurePath(path);
+    for (const [path, members] of partitioned.folders) {
+      const target = ensurePath(path);
+      for (const { session, historical } of members) row(session, historical, target);
     }
     // Keep an empty drop target available even when every session has a folder.
     const target = group("Ungrouped", "", container);
-    if (!folders.size) {
+    if (!partitioned.folders.size) {
       target.parentElement.classList.add("ungrouped-only");
       target.parentElement.open = true;
     }
-    for (const session of ungrouped) row(session, historical, target);
-    if (!ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
+    for (const { session, historical } of partitioned.ungrouped) row(session, historical, target);
+    if (!partitioned.ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
     for (const path of pinned) {
       const children = folders.get(path);
       if (children && !children.querySelector(".session-row, .session-folder")) {
@@ -564,13 +562,16 @@ function renderSessions() {
       }
     }
   }
-  if (live.length || pinnedFolders.size) root.append(element("div", "list-heading sr-only", "IN THIS RUNTIME"));
-  grouped(live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))), false, root, "live");
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
   const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
   const past = available.filter((session) => !isArchived(session));
-  if (past.length) root.append(element("div", "list-heading sr-only", "PICK UP WHERE YOU LEFT OFF"));
-  grouped(past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))), true, root, "past");
+  // Live + resumeable history share one folder tree so headings/Ungrouped are not duplicated.
+  const mainEntries = [
+    ...live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))).map((session) => ({ session, historical: false })),
+    ...past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))).map((session) => ({ session, historical: true })),
+  ];
+  if (mainEntries.length || pinnedFolders.size) root.append(element("div", "list-heading sr-only", "Sessions"));
+  grouped(mainEntries, root, "main", { pinned: pinnedFolders });
   if (!live.length && !past.length && !pinnedFolders.size) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   if (token) {
     const archived = available.filter(isArchived).sort(compareArchivedSessions);
@@ -580,7 +581,7 @@ function renderSessions() {
     section.append(summary);
     root.append(section);
     section.append(element("p", "sidebar-empty", archived.length ? "Reopen to read or continue. Use End & archive when done. Reopening starts a Pi process." : "No archived conversations in this profile selection."));
-    grouped(archived, true, section, "archive");
+    grouped(archived.map((session) => ({ session, historical: true })), section, "archive");
     if (archiveFocused) summary.focus({ preventScroll: true });
   }
 }
@@ -1326,7 +1327,7 @@ async function createSession(body) {
       const key = sessionFolderKey(session);
       if (session.folder) sessionFolders.set(key, session.folder); else sessionFolders.delete(key);
       const parts = session.folder.split("/");
-      for (let size = 1; size <= parts.length; size++) folderOpen.set(`live:/${parts.slice(0, size).join("/")}`, true);
+      for (let size = 1; size <= parts.length; size++) folderOpen.set(folderOpenKey("main", parts.slice(0, size).join("/")), true);
     }
     sessions = [...sessions.filter((item) => item.id !== session.id), session]; $("new-dialog").close();
     if (ownSelection === selection) activate(session);
@@ -1375,7 +1376,7 @@ function createPinnedFolder(value) {
   if (!folder) throw new Error("Enter a folder name.");
   pinnedFolders.add(folder);
   for (let size = 1; size <= folder.split("/").length; size++) {
-    folderOpen.set(`live:/${folder.split("/").slice(0, size).join("/")}`, true);
+    folderOpen.set(folderOpenKey("main", folder.split("/").slice(0, size).join("/")), true);
   }
   savePinnedFolders(preferenceStorage, pinnedFolders);
   renderSessions();
