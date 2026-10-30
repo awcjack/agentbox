@@ -1,10 +1,11 @@
 # Agentbox Web Workspace
 
-Dependency-free frontend for the Pi RPC runtime. Serve this directory at `/`
+Self-contained frontend for the Pi RPC runtime (no npm install; Mermaid is vendored). Serve this directory at `/`
 or a subdirectory such as `/web/`, with `/v1/*` routed to the runtime on the
-**same origin**. `index.html`, `styles.css`, `icon.svg`, and the five application
-ES modules are the only deployed assets required. Serve `.mjs` as JavaScript.
-There is no package installation, build step, SSH client, or external resource.
+**same origin**. `index.html`, `styles.css`, `icon.svg`, the application ES modules, and the
+vendored Mermaid tiny bundle (`mermaid.tiny.js` with `mermaid-preview.mjs`) are
+the deployed assets required. Serve `.mjs`/`.js` as JavaScript.
+There is no package installation, build step, SSH client, or CDN dependency.
 
 The static server must permit this page's scripts and styles. Do not apply the
 API's `default-src 'none'` CSP to the HTML page. The HTML includes its own
@@ -93,6 +94,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
   links, pipe tables (including column alignment), and fenced code with copy/select fallback. `md`/`markdown` fences offer a
   Preview/Source toggle using the same safe renderer (nested fences stay source).
+  `mermaid` fences offer Preview/Source that lazy-loads vendored Mermaid tiny
+  (`securityLevel: strict`) and shows the chart as a `data:image/svg+xml` image—no
+  HTML interpretation and no diagram script execution.
   Raw HTML is never interpreted.
   Remote Markdown images are not fetched; only validated inline raster data is
   displayed. Tool input/output/details and nonempty thinking are collapsible.
@@ -224,6 +228,7 @@ node --test web/*.test.mjs
 node --check web/app.mjs
 node --check web/transport.mjs
 node --check web/markdown.mjs
+node --check web/mermaid-preview.mjs
 ```
 
 ### Optional Real-Browser Smoke
@@ -271,7 +276,8 @@ on JS/CSP errors and saves `pi-workspace-desktop.png` and
   the session can still be ended. Transcript pagination is not provided by Pi's
   `get_messages` command. Read snapshots are not duplicated in SSE replay.
 - Markdown is deliberately a small safe subset, not full CommonMark: no
-  nested-list parsing, syntax highlighting, or raw HTML. No external fonts/CDNs.
+  nested-list parsing, syntax highlighting, or raw HTML. Mermaid preview uses a
+  vendored tiny build (see `MERMAID.VENDOR.txt`); no external fonts/CDNs.
 - The runtime does not expose token capabilities up front. Read-only and command
   restrictions are learned from explicit scope/allowlist errors, then controls
   are disabled. Profiles/history can be unavailable to a restricted token.
