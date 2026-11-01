@@ -26,6 +26,7 @@ const WEB_ASSETS = new Map([
   ["/commands.mjs", ["commands.mjs", "text/javascript; charset=utf-8"]],
   ["/thinking.mjs", ["thinking.mjs", "text/javascript; charset=utf-8"]],
   ["/model-visibility.mjs", ["model-visibility.mjs", "text/javascript; charset=utf-8"]],
+  ["/auth-storage.mjs", ["auth-storage.mjs", "text/javascript; charset=utf-8"]],
   ["/session-title.mjs", ["session-title.mjs", "text/javascript; charset=utf-8"]],
   ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
   ["/icon.svg", ["icon.svg", "image/svg+xml"]],
