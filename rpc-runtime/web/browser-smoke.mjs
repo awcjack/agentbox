@@ -2,7 +2,7 @@
 // Real browser + fake same-origin HTTP/SSE. No backend process, credentials, or LLM.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -58,7 +58,10 @@ function disconnect(session, reset = false) {
     response.end();
   }
 }
-const staticFiles = new Map([["/", ["index.html", "text/html"]], ...["styles.css", "icon.svg", "app.mjs", "transport.mjs", "markdown.mjs", "mermaid-preview.mjs", "mermaid.tiny.js", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "session-title.mjs", "attachments.mjs", "model-visibility.mjs", "auth-storage.mjs"].map((file) => [`/${file}`, [file, file.endsWith(".mjs") ? "text/javascript" : file.endsWith(".css") ? "text/css" : "image/svg+xml"]])]);
+const smokeAssetType = (file) => file.endsWith(".mjs") || file.endsWith(".js") ? "text/javascript" : file.endsWith(".css") ? "text/css" : file.endsWith(".svg") ? "image/svg+xml" : file.endsWith(".html") ? "text/html" : null;
+const smokeDeny = new Set(["README.md", "browser-smoke.mjs", "MERMAID.LICENSE.txt", "MERMAID.VENDOR.txt"]);
+const smokeFiles = (await readdir(new URL(".", import.meta.url))).filter((file) => smokeAssetType(file) && !smokeDeny.has(file) && !file.endsWith(".test.mjs") && !file.endsWith(".md"));
+const staticFiles = new Map([["/", ["index.html", "text/html"]], ...smokeFiles.filter((file) => file !== "index.html").map((file) => [`/${file}`, [file, smokeAssetType(file)]])]);
 const server = createServer(async (request, response) => {
   try {
     const url = new URL(request.url, "http://fixture.invalid");

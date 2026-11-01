@@ -27,6 +27,13 @@ const renaming = new Set();
 initSidebarResize();
 
 const $ = (id) => document.getElementById(id);
+// Upgrade the HTML `open` fallback to a modal as early as possible so a later
+// boot failure cannot leave the workspace stuck with no login UI.
+try {
+  const loginDialog = $("login-dialog");
+  if (loginDialog?.open) loginDialog.close();
+  loginDialog?.showModal();
+} catch { /* Dialog may be unavailable during tests or unsupported hosts. */ }
 const hideProfileKey = "agentbox.pi.hide-profile.v1";
 let hideProfile = false;
 try { hideProfile = preferenceStorage?.getItem(hideProfileKey) === "true"; } catch { /* Use the default. */ }
@@ -1711,7 +1718,8 @@ function logout(message = "", { clearRemembered = true } = {}) {
   sessionDrag.cancel();
   if (clearRemembered) {
     clearRememberedToken(preferenceStorage);
-    $("remember-token").checked = false;
+    const remember = $("remember-token");
+    if (remember) remember.checked = false;
   }
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
@@ -1720,7 +1728,8 @@ function logout(message = "", { clearRemembered = true } = {}) {
 async function connectWithToken(nextToken, { remember = false } = {}) {
   const value = String(nextToken || "").trim();
   $("token").value = "";
-  $("remember-token").checked = remember;
+  const rememberBox = $("remember-token");
+  if (rememberBox) rememberBox.checked = remember;
   if (!value || /\s/.test(value)) { logout("Enter a bearer token without whitespace."); return; }
   token = value;
   const ownEpoch = ++epoch; $("login-submit").disabled = true; $("login-error").hidden = true;
@@ -1743,7 +1752,7 @@ async function connectWithToken(nextToken, { remember = false } = {}) {
 }
 $("login-form").addEventListener("submit", (event) => {
   event.preventDefault(); if ($("login-submit").disabled) return;
-  void connectWithToken($("token").value, { remember: $("remember-token").checked });
+  void connectWithToken($("token").value, { remember: Boolean($("remember-token")?.checked) });
 });
 $("login-dialog").addEventListener("cancel", (event) => event.preventDefault());
 $("logout").addEventListener("click", () => logout());

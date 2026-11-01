@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFileSync, realpathSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,26 +11,31 @@ import { isDeepStrictEqual } from "node:util";
 import { browseFolders, selectFolder } from "./folders.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
-const WEB_ASSETS = new Map([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/attachments.mjs", ["attachments.mjs", "text/javascript; charset=utf-8"]],
-  ["/app.mjs", ["app.mjs", "text/javascript; charset=utf-8"]],
-  ["/transport.mjs", ["transport.mjs", "text/javascript; charset=utf-8"]],
-  ["/markdown.mjs", ["markdown.mjs", "text/javascript; charset=utf-8"]],
-  ["/mermaid-preview.mjs", ["mermaid-preview.mjs", "text/javascript; charset=utf-8"]],
-  ["/mermaid.tiny.js", ["mermaid.tiny.js", "text/javascript; charset=utf-8"]],
-  ["/subagents.mjs", ["subagents.mjs", "text/javascript; charset=utf-8"]],
-  ["/sidebar.mjs", ["sidebar.mjs", "text/javascript; charset=utf-8"]],
-  ["/attention.mjs", ["attention.mjs", "text/javascript; charset=utf-8"]],
-  ["/tool-display.mjs", ["tool-display.mjs", "text/javascript; charset=utf-8"]],
-  ["/commands.mjs", ["commands.mjs", "text/javascript; charset=utf-8"]],
-  ["/thinking.mjs", ["thinking.mjs", "text/javascript; charset=utf-8"]],
-  ["/model-visibility.mjs", ["model-visibility.mjs", "text/javascript; charset=utf-8"]],
-  ["/auth-storage.mjs", ["auth-storage.mjs", "text/javascript; charset=utf-8"]],
-  ["/session-title.mjs", ["session-title.mjs", "text/javascript; charset=utf-8"]],
-  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
-  ["/icon.svg", ["icon.svg", "image/svg+xml"]],
-].map(([path, [file, type]]) => [path, { type, data: readFileSync(new URL(`./web/${file}`, import.meta.url)) }]));
+const WEB_DIR = new URL("./web/", import.meta.url);
+const WEB_ASSET_DENY = new Set([
+  "README.md",
+  "browser-smoke.mjs",
+  "MERMAID.LICENSE.txt",
+  "MERMAID.VENDOR.txt",
+]);
+function webAssetType(name) {
+  if (name.endsWith(".html")) return "text/html; charset=utf-8";
+  if (name.endsWith(".mjs") || name.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (name.endsWith(".css")) return "text/css; charset=utf-8";
+  if (name.endsWith(".svg")) return "image/svg+xml";
+  return null;
+}
+function isDeniedWebAsset(name) {
+  return WEB_ASSET_DENY.has(name) || name.endsWith(".test.mjs") || name.endsWith(".md");
+}
+const WEB_ASSETS = new Map();
+for (const name of readdirSync(WEB_DIR)) {
+  if (isDeniedWebAsset(name)) continue;
+  const type = webAssetType(name);
+  if (!type) continue;
+  const data = readFileSync(new URL(name, WEB_DIR));
+  WEB_ASSETS.set(name === "index.html" ? "/" : `/${name}`, { type, data });
+}
 
 const DEFAULT_ALLOWED_COMMANDS = [
   "abort",

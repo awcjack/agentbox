@@ -774,6 +774,8 @@ test("login page module graph and remember-me markup stay deployable", async (t)
   assert.equal(page.status, 200);
   const html = await page.text();
   assert.match(html, /id="remember-token"/);
+  assert.match(html, /<dialog id="login-dialog" open/);
+
   assert.match(html, /Remember on this device/);
   assert.match(html, /src="\.\/app\.mjs"/);
   const app = await fetch(`${baseUrl}/app.mjs`);
@@ -791,13 +793,15 @@ test("login page module graph and remember-me markup stay deployable", async (t)
   assert.ok(Array.isArray(ok.body.sessions));
 });
 
-test("frontend module graph stays on the public web asset allowlist", () => {
+test("frontend module graph stays on the public web asset allowlist", async (t) => {
+  const { baseUrl } = await fixture(t);
   const app = readFileSync(new URL("../web/app.mjs", import.meta.url), "utf8");
-  const runtime = readFileSync(new URL("../runtime.mjs", import.meta.url), "utf8");
   const imports = [...app.matchAll(/from "\.\/([^"]+)"/g)].map((match) => match[1]);
   assert.ok(imports.includes("auth-storage.mjs"), "app.mjs imports auth-storage");
   for (const file of imports) {
-    assert.ok(runtime.includes(`["/${file}"`), `WEB_ASSETS must serve /${file}`);
+    const response = await fetch(`${baseUrl}/${file}`);
+    assert.equal(response.status, 200, `WEB_ASSETS must serve /${file}`);
+    await response.arrayBuffer();
   }
 });
 
@@ -818,7 +822,7 @@ test("web assets are public and allowlisted without weakening API authentication
   const head = await fetch(baseUrl, { method: "HEAD" });
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
-  for (const path of ["/runtime.mjs", "/history.mjs", "/web/README.md", "/browser-smoke.mjs", "/%2e%2e%2fruntime.mjs"]) {
+  for (const path of ["/runtime.mjs", "/history.mjs", "/web/README.md", "/README.md", "/browser-smoke.mjs", "/auth-storage.test.mjs", "/%2e%2e%2fruntime.mjs"]) {
     assert.equal((await request(baseUrl, path, { auth: false })).response.status, 404);
   }
   const api = await request(baseUrl, "/v1/sessions", { auth: false });
