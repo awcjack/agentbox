@@ -128,6 +128,8 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .sidebar .session-folder.ungrouped-only > .folder-heading { display: none; }
 .sidebar .session-folder.ungrouped-only > .folder-children { padding-left: 0; }
 .sidebar .folder-heading { color: #989898; font-size: 12px; }
+#new-folder-create-wrap { display: grid; gap: 8px; margin-top: 8px; }
+#new-folder-create-wrap[hidden] { display: none; }
 .sidebar .archived-sessions { margin-top: 12px; }
 .sidebar .archived-sessions > summary { font-family: var(--sans); letter-spacing: 0; font-size: 12px; }
 @keyframes session-progress { to { transform: rotate(360deg); } }

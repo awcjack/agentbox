@@ -19,6 +19,7 @@ const pinnedFolders = readPinnedFolders(preferenceStorage);
 const folderProfiles = new Set(), movingFolders = new Set();
 let folderPoll = null, folderVersion = 0, foldersLoading = false;
 const folderOpen = new Map();
+const CREATE_FOLDER_OPTION = "__create__";
 const rowSources = new Map();
 const renaming = new Set();
 
@@ -1350,16 +1351,50 @@ async function resume(session) {
   if (existing) activate(existing);
   else await createSession({ profile: session.profile, resume: session.id });
 }
-function renderNewFolderOptions() {
+function folderChoicesForProfile(profile) {
   const choices = new Set(pinnedFolders);
   for (const [key, value] of sessionFolders) {
-    if (JSON.parse(key)[0] !== newTargetProfile) continue;
+    if (JSON.parse(key)[0] !== profile) continue;
     const parts = value.split("/");
     for (let size = 1; size <= parts.length; size++) choices.add(parts.slice(0, size).join("/"));
   }
-  $("session-folder-options").replaceChildren(...[...choices].filter(Boolean).sort().map((folder) => {
+  return [...choices].filter(Boolean).sort((a, b) => a.localeCompare(b));
+}
+function syncNewFolderCreateVisibility({ focus = false } = {}) {
+  const creating = $("new-folder").value === CREATE_FOLDER_OPTION;
+  $("new-folder-create-wrap").hidden = !creating;
+  if (!creating) $("new-folder-create").value = "";
+  else if (focus) $("new-folder-create").focus();
+}
+function renderNewFolderOptions(selected = $("new-folder").value) {
+  const choices = folderChoicesForProfile(newTargetProfile);
+  const select = $("new-folder");
+  const previous = selected ?? select.value;
+  const options = [element("option", "", "Ungrouped")];
+  options[0].value = "";
+  for (const folder of choices) {
+    const option = element("option", "", folder);
+    option.value = folder;
+    options.push(option);
+  }
+  // Preserve a preselected path that is not yet in the shared choice list.
+  if (previous && previous !== CREATE_FOLDER_OPTION && !choices.includes(previous)) {
+    const option = element("option", "", previous);
+    option.value = previous;
+    options.push(option);
+  }
+  const create = element("option", "", "Create new folder…");
+  create.value = CREATE_FOLDER_OPTION;
+  options.push(create);
+  select.replaceChildren(...options);
+  select.value = previous === CREATE_FOLDER_OPTION || choices.includes(previous) || (previous && [...select.options].some((option) => option.value === previous))
+    ? previous
+    : "";
+  if (![...select.options].some((option) => option.value === select.value)) select.value = "";
+  $("session-folder-options").replaceChildren(...choices.map((folder) => {
     const option = element("option", "", folder); option.value = folder; return option;
   }));
+  syncNewFolderCreateVisibility();
 }
 function openFolderDialog() {
   if (!token || readOnly) return;
@@ -1388,8 +1423,9 @@ function openNew({ folder, profile } = {}) {
   drawer(false);
   newTargetProfile = profile || $("profile-filter").value || current?.meta.profile || (profiles.includes("default") ? "default" : profiles[0]);
   const existing = current ? sessionFolders.get(sessionFolderKey(current.meta)) || "" : "";
-  $("new-folder").value = folder ?? (readOnly ? "" : existing);
-  renderNewFolderOptions();
+  const selected = folder ?? (readOnly ? "" : existing);
+  $("new-folder-create").value = "";
+  renderNewFolderOptions(selected);
   $("new-error").hidden = true;
   $("new-name").value = "";
   $("new-dialog").showModal();
@@ -1670,7 +1706,7 @@ function logout(message = "") {
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
-  $("new-folder").value = ""; $("folder-name").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); $("folder-dialog").close(); drawer(false); showNotice("");
+  $("new-folder").value = ""; $("new-folder-create").value = ""; $("new-folder-create-wrap").hidden = true; $("folder-name").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); $("folder-dialog").close(); drawer(false); showNotice("");
   sessionDrag.cancel();
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
@@ -1700,10 +1736,14 @@ $("login-dialog").addEventListener("cancel", (event) => event.preventDefault());
 $("logout").addEventListener("click", () => logout());
 $("new-session").addEventListener("click", () => openNew());
 $("cancel-new").addEventListener("click", () => $("new-dialog").close());
+$("new-folder").addEventListener("change", () => syncNewFolderCreateVisibility({ focus: true }));
 $("new-form").addEventListener("submit", (event) => {
   event.preventDefault();
   try {
-    const folder = normalizeFolder($("new-folder").value), name = $("new-name").value.trim();
+    const selected = $("new-folder").value;
+    const raw = selected === CREATE_FOLDER_OPTION ? $("new-folder-create").value : selected;
+    if (selected === CREATE_FOLDER_OPTION && !String(raw || "").trim()) throw new Error("Enter a folder name, or choose Ungrouped.");
+    const folder = normalizeFolder(raw), name = $("new-name").value.trim();
     if (folder) {
       pinnedFolders.add(folder);
       savePinnedFolders(preferenceStorage, pinnedFolders);

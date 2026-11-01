@@ -134,9 +134,16 @@
     <form id="new-form" class="dialog-body">
       <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a session folder and give this conversation a name.</p>
       <label for="new-folder">Session folder <span class="muted">(optional)</span></label>
-      <input id="new-folder" list="session-folder-options" autocomplete="off" placeholder="Ungrouped" aria-describedby="folder-help">
+      <select id="new-folder" aria-describedby="folder-help">
+        <option value="">Ungrouped</option>
+        <option value="__create__">Create new folder…</option>
+      </select>
+      <div id="new-folder-create-wrap" hidden>
+        <label for="new-folder-create">New folder name</label>
+        <input id="new-folder-create" autocomplete="off" placeholder="Work/Project" aria-describedby="folder-help">
+      </div>
       <datalist id="session-folder-options"></datalist>
-      <p id="folder-help" class="field-note">Choose an existing session folder or type a new name, such as Work/Project. Leave empty for Ungrouped.</p>
+      <p id="folder-help" class="field-note">Pick an existing session folder, or choose Create new folder and enter a name such as Work/Project. Ungrouped leaves the session unassigned.</p>
       <label for="new-name">Session name <span class="muted">(optional)</span></label><input id="new-name" maxlength="200" placeholder="What are we working on?" autocomplete="off">
       <p id="new-error" class="form-error" role="alert" hidden></p><button id="create-session" class="primary-button" type="submit">Create session <span aria-hidden="true">&rarr;</span></button>
     </form>

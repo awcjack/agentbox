@@ -347,7 +347,8 @@ try {
       const sessionName = `${label} coding session [slow snapshot]`;
       assert.equal(await page.locator("#new-profile").count(), 0, "new session has no profile picker");
       assert.equal(await page.getByRole("button", { name: "Browse", exact: true }).count(), 0);
-      await page.locator("#new-folder").fill("Work/Agentbox");
+      await page.locator("#new-folder").selectOption("__create__");
+      await page.locator("#new-folder-create").fill("Work/Agentbox");
       await page.locator("#new-name").fill(sessionName);
       await page.locator("#create-session").click();
       await until(() => [...sessions.values()].some((session) => session.name === sessionName && session.releaseSnapshot), "initial get_messages reached fixture gate");
@@ -386,13 +387,15 @@ try {
         await page.locator("#create-folder").click();
         await until(() => page.locator('.session-folder[data-folder-path="Inbox/Empty"] .folder-empty').count().then((count) => count === 1), "empty pinned folder appears");
         assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.pinned-folders.v1")), JSON.stringify(["Inbox/Empty"]));
-        const parentFolder = page.locator('summary[data-folder-key="live:/Work"]').locator("..");
+        const parentFolder = page.locator('summary[data-folder-key="main:/Work"]').locator("..");
         await parentFolder.locator(":scope > summary").click();
         assert.equal(await parentFolder.getAttribute("open"), null);
         await page.getByRole("button", { name: "New session in Work", exact: true }).click();
         assert.equal(await parentFolder.getAttribute("open"), null, "folder + does not toggle collapse");
         assert.equal(await page.locator("#new-folder").inputValue(), "Work");
-        assert.ok((await page.locator("#session-folder-options option").evaluateAll((options) => options.map((option) => option.value))).includes("Work/Agentbox"));
+        assert.equal(await page.locator("#new-folder-create-wrap").isHidden(), true);
+        assert.ok((await page.locator("#new-folder option").evaluateAll((options) => options.map((option) => option.value))).includes("Work/Agentbox"));
+        assert.ok((await page.locator("#new-folder option").evaluateAll((options) => options.map((option) => option.value))).includes("__create__"));
         await page.locator("#new-name").fill(`${label} second tab`);
         await page.screenshot({ path: join(output, `pi-folder-picker-${label}.png`) });
         await page.locator("#create-session").click();
@@ -400,7 +403,7 @@ try {
         await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "second tab ready");
         const second = [...sessions.values()].find((item) => item.name === `${label} second tab`);
         assert.equal(serverFolders.get(second.nativeSessionId), "Work");
-        assert.equal(await page.locator('summary[data-folder-key="live:/Work"]').locator("..").getAttribute("open"), "");
+        assert.equal(await page.locator('summary[data-folder-key="main:/Work"]').locator("..").getAttribute("open"), "");
         await page.locator("#prompt").fill("Second session draft");
         assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 2);
         await page.locator("#session-tabs .session-tab-select").first().click();
