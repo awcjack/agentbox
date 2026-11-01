@@ -768,6 +768,39 @@ test("raw token environment references are hashed and cannot leak to Pi children
   assert.throws(() => normalizeConfig(cfg, { WEB_PASSWORD: TOKEN }), /must not expose an RPC authentication variable/);
 });
 
+test("login page module graph and remember-me markup stay deployable", async (t) => {
+  const { baseUrl } = await fixture(t);
+  const page = await fetch(baseUrl);
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /id="remember-token"/);
+  assert.match(html, /Remember on this device/);
+  assert.match(html, /src="\.\/app\.mjs"/);
+  const app = await fetch(`${baseUrl}/app.mjs`);
+  assert.equal(app.status, 200);
+  const appText = await app.text();
+  assert.match(appText, /auth-storage\.mjs/);
+  const auth = await fetch(`${baseUrl}/auth-storage.mjs`);
+  assert.equal(auth.status, 200);
+  assert.match(auth.headers.get("content-type") || "", /javascript/);
+  assert.match(await auth.text(), /STORAGE_KEY/);
+  const wrong = await request(baseUrl, "/v1/sessions", { auth: false, headers: { Authorization: "Bearer wrong-token" } });
+  assert.equal(wrong.response.status, 401);
+  const ok = await request(baseUrl, "/v1/sessions");
+  assert.equal(ok.response.status, 200);
+  assert.ok(Array.isArray(ok.body.sessions));
+});
+
+test("frontend module graph stays on the public web asset allowlist", () => {
+  const app = readFileSync(new URL("../web/app.mjs", import.meta.url), "utf8");
+  const runtime = readFileSync(new URL("../runtime.mjs", import.meta.url), "utf8");
+  const imports = [...app.matchAll(/from "\.\/([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(imports.includes("auth-storage.mjs"), "app.mjs imports auth-storage");
+  for (const file of imports) {
+    assert.ok(runtime.includes(`["/${file}"`), `WEB_ASSETS must serve /${file}`);
+  }
+});
+
 test("web assets are public and allowlisted without weakening API authentication or CSP", async (t) => {
   const { baseUrl } = await fixture(t);
   const page = await fetch(baseUrl);
@@ -776,7 +809,7 @@ test("web assets are public and allowlisted without weakening API authentication
   assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   assert.match(await page.text(), /Pi agent/);
-  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "styles.css", "icon.svg"]) {
+  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "attachments.mjs", "session-title.mjs", "model-visibility.mjs", "auth-storage.mjs", "styles.css", "icon.svg"]) {
     const response = await fetch(`${baseUrl}/${asset}`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
