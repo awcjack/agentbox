@@ -9,6 +9,7 @@ import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments, initComposerFileDrop } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
 import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
+import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
 
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
@@ -1688,7 +1689,7 @@ async function attachImages(files) {
   finally { ctx.record.readingImages = false; if (current?.record === ctx.record) updateControls(); }
 }
 
-function logout(message = "") {
+function logout(message = "", { clearRemembered = true } = {}) {
   epoch++; selection++; listVersion++;
   token = ""; auth.abort(); auth = new AbortController();
   clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
@@ -1708,14 +1709,20 @@ function logout(message = "") {
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
   $("new-folder").value = ""; $("new-folder-create").value = ""; $("new-folder-create-wrap").hidden = true; $("folder-name").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); $("folder-dialog").close(); drawer(false); showNotice("");
   sessionDrag.cancel();
+  if (clearRemembered) {
+    clearRememberedToken(preferenceStorage);
+    $("remember-token").checked = false;
+  }
   renderMessages(); renderSessions(); updateControls(); setNetwork("", "Not connected");
   $("login-error").textContent = message; $("login-error").hidden = !message; $("login-submit").disabled = false;
   if (!$("login-dialog").open) $("login-dialog").showModal();
 }
-$("login-form").addEventListener("submit", async (event) => {
-  event.preventDefault(); if ($("login-submit").disabled) return;
-  token = $("token").value.trim(); $("token").value = "";
-  if (!token || /\s/.test(token)) { logout("Enter a bearer token without whitespace."); return; }
+async function connectWithToken(nextToken, { remember = false } = {}) {
+  const value = String(nextToken || "").trim();
+  $("token").value = "";
+  $("remember-token").checked = remember;
+  if (!value || /\s/.test(value)) { logout("Enter a bearer token without whitespace."); return; }
+  token = value;
   const ownEpoch = ++epoch; $("login-submit").disabled = true; $("login-error").hidden = true;
   try {
     const result = await api.request("/v1/sessions", { signal: auth.signal });
@@ -1728,9 +1735,15 @@ $("login-form").addEventListener("submit", async (event) => {
       const option = element("option", "", profile); option.value = profile;
       $("profile-filter").append(option);
     }
+    if (remember) saveRememberedToken(preferenceStorage, token);
+    else clearRememberedToken(preferenceStorage);
     $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshFolders(true); refreshSessions(); scheduleSessionPoll();
   } catch (error) { if (ownEpoch === epoch) logout(error.message); }
   finally { if (ownEpoch === epoch) $("login-submit").disabled = false; }
+}
+$("login-form").addEventListener("submit", (event) => {
+  event.preventDefault(); if ($("login-submit").disabled) return;
+  void connectWithToken($("token").value, { remember: $("remember-token").checked });
 });
 $("login-dialog").addEventListener("cancel", (event) => event.preventDefault());
 $("logout").addEventListener("click", () => logout());
@@ -1803,5 +1816,7 @@ window.addEventListener("focus", () => renderSessions());
 document.addEventListener("visibilitychange", () => renderSessions());
 window.addEventListener("offline", () => { if (current) { current.online = false; current.streamController?.abort(); updateControls(); } setNetwork("reconnecting", "Offline"); });
 window.addEventListener("online", () => { if (token) { if (current) activate(current.meta, { reconnect: true }); else setNetwork("online", "Connected"); refreshSessions(); } });
-window.addEventListener("pagehide", () => logout());
-logout();
+window.addEventListener("pagehide", () => logout("", { clearRemembered: false }));
+const rememberedToken = readRememberedToken(preferenceStorage);
+logout("", { clearRemembered: false });
+if (rememberedToken) void connectWithToken(rememberedToken, { remember: true });

@@ -77,10 +77,11 @@
     <form id="login-form" class="dialog-body" autocomplete="off">
       <span class="dialog-eyebrow">PI AGENT / AGENTBOX</span><h2 id="login-title">Connect to Pi<span class="accent">.</span></h2><p>Open your coding sessions, review agent activity, and continue work on your codebase.</p>
       <label for="token">Bearer token / access password</label><input id="token" type="password" required autocomplete="off" spellcheck="false" autocapitalize="none" autofocus>
-      <p class="field-note">Used as a bearer token. Held only in this tab's memory, never saved. Use a trusted HTTPS or private VPN connection.</p>
+      <label class="model-visibility-row"><input id="remember-token" type="checkbox">Remember on this device</label>
+      <p class="field-note">Used as a bearer token. By default it stays in this tab's memory only. Remember stores it in this browser's local storage until you log out. Use a trusted HTTPS or private VPN connection.</p>
       <p id="login-error" class="form-error" role="alert" hidden></p>
       <button id="login-submit" class="primary-button" type="submit">Open workspace <span aria-hidden="true">&rarr;</span></button>
-      <span class="dialog-bottom">Same-origin connection. No SSH. No stored credentials.</span>
+      <span class="dialog-bottom">Same-origin connection. No SSH. Optional local remember.</span>
     </form>
   </dialog>
   <dialog id="settings-dialog" aria-labelledby="settings-title">
