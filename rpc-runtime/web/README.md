@@ -21,10 +21,11 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   Status, profile, cwd and date stay in tooltips and accessible labels. Rename and
   archive controls appear on hover/focus and stay visible on touch devices.
 - New session selects a session folder, without a profile or directory picker.
-  Choose an existing label or type a new one, such as `Work/Project`; empty means
-  Ungrouped. Pi starts in the configured profile cwd. A folder heading's **+**
-  action opens the same dialog with that group preselected, even while collapsed.
-  It does not toggle the heading. Creation expands the chosen group.
+  Pick an existing label from the list, choose **Create new folder…** to enter a
+  name such as `Work/Project`, or leave **Ungrouped**. Pi starts in the configured
+  profile cwd. A folder heading's **+** action opens the same dialog with that
+  group preselected, even while collapsed. It does not toggle the heading.
+  Creation expands the chosen group.
 - Each opened session has a tab. Switch tabs with the mouse or Left/Right,
   Home/End keys; drafts and approvals remain independent. Closing a tab leaves
   Pi running and its draft available when reopened from the sidebar. End & archive
