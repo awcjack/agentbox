@@ -64,10 +64,13 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Unread completed runs show **Finished (unread)** in blue, distinct from neutral
   **Idle** after viewing the conversation in a focused tab or restarting Agentbox.
   Running is green, reply-needed yellow, and action-needed peach.
-- Bearer token/password input, held only in memory and cleared on logout or
-  page exit. Credentials never enter cookies, local/session storage, IndexedDB,
-  or a service worker. Display preferences use local storage; session folder
-  assignments are server-side (legacy local assignments are removed after import).
+- Bearer token/password input. By default it stays in tab memory and clears on
+  logout or page exit. Optional **Remember on this device** stores the raw bearer
+  token in this browser's local storage (`agentbox.pi.auth-token.v1`) until logout
+  or a rejected token; reload restores the session. Credentials never enter
+  cookies, sessionStorage, IndexedDB, or a service worker. Display preferences
+  also use local storage; session folder assignments are server-side (legacy local
+  assignments are removed after import).
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,
   streaming steering/follow-up selection, queue counts, and stop-current-run.
 - A row's Archive button opens confirmation for that row without selecting it.
@@ -271,7 +274,8 @@ Shift+Enter, streaming deltas, follow-up queue, tools/thinking, all approval
 methods, cancellation/expiry, cross-browser resolution, SSE reset and EOF
 reconnect, ambiguous post-header network failure without application retries,
 stop, session-end cancellation/DELETE, history resume, a late write during a
-session switch, no horizontal overflow, memory-only auth, and logout. It fails
+session switch, no horizontal overflow, memory-only auth by default, optional
+remember-me restore across reload, and logout clearing stored credentials. It fails
 on JS/CSP errors and saves `pi-workspace-desktop.png` and
 `pi-workspace-mobile.png`, plus a failure screenshot when applicable.
 

@@ -710,9 +710,10 @@ services.agentbox.settings.piRpcApi = {
 ```
 
 Open the UI directly in a browser, enter the raw bearer token/password (not its
-digest), and choose a session folder, or leave it Ungrouped. The browser keeps the
-password in page memory, not localStorage or a URL; reload or log out to
-clear it. Allow the exact browser origin, including its scheme and port, even
+digest), and choose a session folder, or leave it Ungrouped. By default the browser
+keeps the password in page memory only; optional Remember on this device stores it
+in localStorage until logout. It is never put in a URL. Allow the exact browser
+origin, including its scheme and port, even
 when the UI and API share an origin. Use TLS or a trusted VPN for remote access.
 
 Profiles define workspace roots and persistent Pi session directories on the

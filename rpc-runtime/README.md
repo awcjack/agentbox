@@ -31,8 +31,9 @@ This is separate from `services.agentbox.autoStart`, which controls container
 startup at host boot, and from `agentbox pi`, the on-demand interactive CLI.
 
 Open the root URL without SSH, enter the raw bearer token/password, and select
-a session folder (or Ungrouped). The password stays in page memory, not localStorage,
-sessionStorage, or URLs; reload or log out to clear it. Browser API requests
+a session folder (or Ungrouped). By default the password stays in page memory only;
+optional Remember on this device stores it in localStorage until logout. It never
+enters sessionStorage or URLs. Browser API requests
 use the Authorization header, including the fetch-based SSE connection. Configure
 the exact browser origin (scheme, host, and port) in `allowedOrigins`, including
 same-origin use. Protect remote HTTP access with a trusted VPN or terminate TLS
