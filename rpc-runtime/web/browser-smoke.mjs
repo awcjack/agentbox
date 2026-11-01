@@ -1285,13 +1285,23 @@ try {
       await drawerClosed();
       await until(() => group.locator(".tool-detail[open]").count().then((count) => count === 1), "expanded action survives refresh");
       assert.deepEqual(await page.evaluate(() => ({ local: Object.keys(localStorage).filter((key) => !["agentbox.pi.session-folders.v1", "agentbox.pi.pinned-folders.v1"].includes(key)).sort(), session: sessionStorage.length, cookies: document.cookie })), { local: ["agentbox.pi.hidden-models.v1", "agentbox.pi.hide-profile.v1"], session: 0, cookies: "" }, "only display preferences persist, not auth or drafts");
+      assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.auth-token.v1")), null, "default login does not store auth");
       await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
       assert.equal(await page.locator("#token").inputValue(), "");
       assert.equal(await page.title(), "Pi Agent | Agentbox", "logout clears tab counters");
       assert.equal(await page.locator("#prompt").inputValue(), "");
       assert.equal(await page.locator("#messages").textContent(), "");
+      await page.locator("#remember-token").check();
+      await login(page);
+      assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.auth-token.v1")), "smoke-token", "remember stores bearer token");
+      await page.reload();
+      await page.locator("#login-dialog").waitFor({ state: "hidden" });
+      assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.auth-token.v1")), "smoke-token", "remembered token survives reload");
+      await openSidebar(); await page.locator("#logout").click(); await page.locator("#login-dialog").waitFor();
+      assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.auth-token.v1")), null, "logout clears remembered token");
+      assert.equal(await page.locator("#remember-token").isChecked(), false);
       assert.deepEqual(errors, [], "No browser JS or CSP errors");
-      console.log(`${label}: PASS login, session, initial snapshot click race, same-session no-op/model/draft/drawer, healthy Refresh, model, image paste, deltas, queue, tool, all approvals, reset/EOF, no retry, stop, DELETE/cancel, history, overflow, session-switch write race, switch/return stream cleanup/no creation, logout`);
+      console.log(`${label}: PASS login, session, initial snapshot click race, same-session no-op/model/draft/drawer, healthy Refresh, model, image paste, deltas, queue, tool, all approvals, reset/EOF, no retry, stop, DELETE/cancel, history, overflow, session-switch write race, switch/return stream cleanup/no creation, logout, remember-me`);
     } catch (error) {
       await page.screenshot({ path: join(output, `pi-workspace-${label}-failure.png`), fullPage: true }).catch(() => {});
       console.error("Browser errors:", errors); throw error;
