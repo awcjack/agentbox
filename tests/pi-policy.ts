@@ -860,6 +860,26 @@ assert.equal(longPast.evidence.latestUserRequestIndex, 0)
 assert.equal(longPast.evidence.omittedUserRequestCount, 1)
 assert.ok(longPast.payload.length <= 32_000)
 
+// Auto must not silently approve messaging unrelated main sessions.
+{
+  const autoCross = harness(autoPolicy({ auto: { enable: true } }), {
+    realpath: async (path: string) => path,
+  }, false)
+  let prompts = 0
+  const ctx = context({
+    hasUI: true,
+    ui: { ...context().ui, select: async () => { prompts++; return "Deny" } },
+    modelRegistry: { find: () => { throw new Error("must not classify") } },
+  })
+  await autoCross.command("on", ctx)
+  autoCross.setSameMain(true)
+  assert.equal(await call(autoCross.toolCall, "send_message", { to: "sibling", body: "Status?" }, ctx), undefined)
+  assert.equal(prompts, 0)
+  autoCross.setSameMain(false)
+  assert.match((await call(autoCross.toolCall, "send_message", { to: "unrelated", body: "Status?" }, ctx)).reason, /approval.*denied/i)
+  assert.equal(prompts, 1)
+}
+
 // True auto mode is deterministic and independent of classifier auth/context.
 for (const explicit of [false, true]) {
   const instance = harness(autoPolicy({ auto: { enable: true }, rules: explicit

@@ -1002,6 +1002,9 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         const decision = managedDecision(config, event.toolName, targetGroups)
         if (decision === "allow") return
         if (decision === "deny") return { block: true, reason: "Denied by managed Pi policy" }
+        // Cross-main send_message always asks a human: Auto/classifier must not
+        // silently wake unrelated sessions (ack ping-pong under Auto-on).
+        let crossMainSend = false
         if (decision === "defaultAsk") {
           if (event.toolName === "list_sessions") return
           if (event.toolName === "send_message") {
@@ -1011,23 +1014,32 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
               reply: (allowed: boolean) => { sameMain = allowed === true },
             })
             if (sameMain) return
+            crossMainSend = true
           }
+        } else if (decision === "ask" && event.toolName === "send_message") {
+          let sameMain = false
+          pi.events.emit("agentbox:session-message-scope", {
+            to: input.to,
+            reply: (allowed: boolean) => { sameMain = allowed === true },
+          })
+          crossMainSend = !sameMain
         }
         // Like OpenCode auto mode: both explicit and default asks are approved.
         // No model request, context dependency, or fallback approval prompt.
-        if (autoEnabled && config.auto?.enable) return
-        if (decision === "defaultAsk" && await isInstalledSkillMarkdownRead(event.toolName, input, ctx.cwd, home, realpath)) {
+        // Cross-main messaging is excluded from that broad authorization.
+        if (!crossMainSend && autoEnabled && config.auto?.enable) return
+        if (!crossMainSend && decision === "defaultAsk" && await isInstalledSkillMarkdownRead(event.toolName, input, ctx.cwd, home, realpath)) {
           return ctx.signal.aborted ? cancelled : undefined
         }
         let autoFallback = false
-        if (reviewEnabled && config.auto?.enable && decision === "defaultAsk") {
+        if (!crossMainSend && reviewEnabled && config.auto?.enable && decision === "defaultAsk") {
           const attempt = autoAttempt
           const approved = await autoApprove({ ...ctx, signal: AbortSignal.any([ctx.signal, attempt.signal]) }, config.auto, event.toolName, input, targets, event.toolCallId)
           if (ctx.signal.aborted) return cancelled
           if (approved && reviewEnabled && attempt === autoAttempt && !attempt.signal.aborted) return
           autoFallback = true
         }
-        if (autoEnabled && config.auto?.enable) return
+        if (!crossMainSend && autoEnabled && config.auto?.enable) return
         // A classifier rejection/error is not a policy deny. Insufficient
         // context, missing credentials, timeouts, etc. ask on the FIRST call.
         const summary = boundedDisplay(autoFallback ? `Auto could not approve; ${event.toolName}` : event.toolName, targets)
