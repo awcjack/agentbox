@@ -259,6 +259,7 @@ present, it must exactly match `allowedOrigins`.
 | `GET /v1/folders` | `profiles:read` | Approved workspace roots as `{roots:[{profile,path}]}` |
 | `GET /v1/folders?path=...` | `profiles:read` | Folder path, root, parent, child directories and truncation flag |
 | `DELETE /v1/history/:nativeId?profile=default` | `sessions:delete` | Archive saved history without starting Pi; rejects an active session |
+| `POST /v1/history/:nativeId/move` | `sessions:write` | Move saved history to another profile with `{profile,targetProfile,folder?}`; rewrites session `cwd`, relocates the JSONL, and assigns the destination folder |
 | `GET /v1/history?profile=default` | `sessions:read` | Native Pi history from the approved profile's session directory |
 | `GET /v1/session-folders?profile=default` | `sessions:read` | Shared folder assignments as `{folders:[{id,folder}]}` |
 | `PUT /v1/session-folders?profile=default` | `sessions:write` | Assign a native session with `{id,folder}`; empty folder ungroups |
@@ -376,6 +377,15 @@ To restore normal history visibility, an administrator can remove that UUID's
 marker from the configured session directory. Listings remain bounded to 1,000
 sessions and the UI warns when the server reports truncation.
 Previously ended conversations are not retroactively archived.
+
+`POST /v1/history/:nativeId/move` relocates a saved conversation between Projects
+(profiles). Body is `{profile,targetProfile,folder?}` with `sessions:write`.
+The runtime rewrites the session header `cwd` to the destination profile cwd,
+publishes the JSONL into that profile's `sessionDir` (keeping the original
+filename), moves any archive marker, assigns the destination folder label, and
+clears the source folder assignment. Active/resuming sessions are rejected with
+`session_active`; end them first. Same-profile moves and missing/ambiguous
+sources are rejected. Retries are idempotent once the destination owns the file.
 
 The web **Export JSON** button downloads `GET /v1/sessions/:id/export` as
 `conversation-<native-uuid>.json`. The version-1 `agentbox-conversation` document

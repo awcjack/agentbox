@@ -69,12 +69,16 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   those sessions to **Ungrouped**. Conversations are kept; only the folder label is
   removed. Browser-only empty pins under that path for the project are cleared from
   this device. Project roots and Ungrouped itself cannot be deleted.
-- On desktop, drag a session onto a folder heading or its contents to move it
-  within the same project. Cross-project drops are rejected. Drop onto **Ungrouped**
-  to remove its folder assignment; this target remains available even when empty.
-  Closed folder headings accept drops, and the target highlights while dragging.
-  Moves use the shared server-side assignments. Session rows show Archive instead of
-  a Move to folder button.
+- On desktop, drag a session onto a folder heading or its contents to move it.
+  Same-project drops update the shared folder assignment. Dropping a **resumeable**
+  (historical) row onto another project rewrites its persisted session `cwd`, moves
+  the JSONL into that project's `sessionDir`, and applies the destination folder
+  (`POST /v1/history/:id/move`). Live runtime rows cannot leave their project while
+  Pi is running—end them first. Drop onto **Ungrouped** (or the project heading) to
+  place a session in that project without a folder label; this target remains
+  available even when empty. Closed folder headings accept drops, and the target
+  highlights while dragging. Session rows show Archive instead of a Move to folder
+  button.
 - Use **✎ Rename session** on a running runtime row to persist its name through
   Pi's `set_session_name` RPC (write access required). Reopen historical or
   archived conversations first to rename them. Cancel leaves the name unchanged.
