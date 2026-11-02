@@ -19,8 +19,9 @@ const hiddenModels = readHiddenModels(preferenceStorage);
 const sessionFolders = new Map();
 const legacyFolders = readSessionFolders(preferenceStorage);
 const pinnedFolders = readPinnedFolders(preferenceStorage);
-const folderProfiles = new Set(), movingFolders = new Set();
+const folderProfiles = new Set(), movingFolders = new Set(), deletingFolders = new Set();
 let folderPoll = null, folderVersion = 0, foldersLoading = false;
+let folderDeleteTarget = null;
 const folderOpen = new Map();
 const CREATE_FOLDER_OPTION = "__create__";
 const rowSources = new Map();
@@ -534,6 +535,19 @@ function renderSessions() {
         openNew({ folder: path, profile });
       });
       summary.append(add);
+      if (path) {
+        const remove = element("button", "folder-delete", "×"); remove.type = "button";
+        remove.setAttribute("aria-label", `Delete folder ${path}`);
+        remove.title = `Delete folder ${path}`;
+        remove.dataset.folderKey = `${key}:delete`;
+        remove.disabled = !token || readOnly || foldersLoading || deletingFolders.has(path) || Boolean(folderDeleteTarget);
+        remove.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
+        remove.addEventListener("click", (event) => {
+          event.preventDefault(); event.stopPropagation();
+          requestDeleteFolder(path);
+        });
+        summary.append(remove);
+      }
       summary.dataset.folderKey = key;
       summary.title = path ? `Toggle ${path}; drop a session here to move it` : "Toggle Ungrouped; drop a session here to remove it from its folder";
       const children = element("div", "folder-children");
@@ -549,6 +563,7 @@ function renderSessions() {
       parent.append(details);
       if (focusedFolder === key) summary.focus({ preventScroll: true });
       if (focusedFolder === `${key}:new`) add.focus({ preventScroll: true });
+      if (focusedFolder === `${key}:delete`) summary.querySelector(".folder-delete")?.focus({ preventScroll: true });
       return children;
     }
     function ensurePath(path) {
@@ -1777,6 +1792,64 @@ function requestArchive(session, historical = false) {
   $("cancel-end").textContent = historical ? "Cancel" : "Keep session open";
   $("end-dialog").showModal(); $("cancel-end").focus();
 }
+function requestDeleteFolder(folder) {
+  const path = normalizeFolder(folder);
+  if (!token || readOnly || !path || deletingFolders.has(path) || folderDeleteTarget) return;
+  folderDeleteTarget = path;
+  drawer(false);
+  $("delete-folder-description").textContent = path;
+  $("delete-folder-dialog").showModal(); $("cancel-delete-folder").focus();
+  renderSessions();
+}
+function unpinFolderTree(folder) {
+  let changed = false;
+  for (const pinned of [...pinnedFolders]) {
+    if (pinned === folder || pinned.startsWith(`${folder}/`)) {
+      pinnedFolders.delete(pinned);
+      changed = true;
+    }
+  }
+  if (changed) savePinnedFolders(preferenceStorage, pinnedFolders);
+  return changed;
+}
+$("cancel-delete-folder").addEventListener("click", () => {
+  $("delete-folder-dialog").close(); folderDeleteTarget = null; renderSessions();
+});
+$("delete-folder-dialog").addEventListener("cancel", () => { folderDeleteTarget = null; renderSessions(); });
+$("delete-folder-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const folder = folderDeleteTarget, ownEpoch = epoch;
+  if (!folder || !token || readOnly || deletingFolders.has(folder)) return;
+  folderDeleteTarget = null; $("delete-folder-dialog").close();
+  deletingFolders.add(folder); folderVersion++; renderSessions();
+  try {
+    const profilesToUpdate = folderProfiles.size ? [...folderProfiles] : profiles.slice();
+    let ungrouped = 0;
+    for (const profile of profilesToUpdate) {
+      const result = await api.request(folderPath(profile), { method: "DELETE", body: { folder }, signal: auth.signal });
+      if (ownEpoch !== epoch) return;
+      ungrouped += (result.ungrouped || []).length;
+      for (const item of result.ungrouped || []) {
+        const key = sessionFolderKey({ profile, id: item.id }, true);
+        sessionFolders.set(key, "");
+        legacyFolders.delete(key);
+      }
+    }
+    if (ownEpoch !== epoch) return;
+    saveSessionFolders(preferenceStorage, legacyFolders);
+    unpinFolderTree(folder);
+    showNotice(ungrouped
+      ? `Deleted folder ${folder}. ${ungrouped} session${ungrouped === 1 ? "" : "s"} moved to Ungrouped.`
+      : `Deleted folder ${folder}.`);
+  } catch (error) {
+    if (ownEpoch === epoch) report(error, null, { write: true });
+  } finally {
+    if (ownEpoch === epoch) {
+      deletingFolders.delete(folder); folderVersion++; renderSessions();
+      clearTimeout(folderPoll); folderPoll = setTimeout(() => refreshFolders(), 15000);
+    }
+  }
+});
 $("end-session").addEventListener("click", () => { if (current) requestArchive(current.meta); });
 $("cancel-end").addEventListener("click", () => { $("end-dialog").close(); endTarget = null; });
 $("end-dialog").addEventListener("cancel", () => { endTarget = null; });
@@ -1852,12 +1925,14 @@ function logout(message = "", { clearRemembered = true } = {}) {
   token = ""; auth.abort(); auth = new AbortController();
   clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
   clearTimeout(folderPoll); folderPoll = null; folderVersion++;
-  foldersLoading = false; sessionFolders.clear(); folderProfiles.clear(); movingFolders.clear(); folderOpen.clear();
+  foldersLoading = false; sessionFolders.clear(); folderProfiles.clear(); movingFolders.clear(); deletingFolders.clear(); folderOpen.clear();
+  folderDeleteTarget = null;
   attention.clear(); document.title = baseTitle;
   dismissedCommands = null; commandKey = ""; hideCommandSuggestions();
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
   current = null; openTabs = []; newTargetProfile = null; records.clear(); sessions = []; profiles = []; history = []; readOnly = false; createDenied = false; createBusy = false;
   deleteDenied = false; endTarget = null; $("end-dialog").close();
+  $("delete-folder-dialog").close(); $("delete-folder-description").textContent = "";
   conversationTarget = null; $("conversation-action-dialog").close(); $("copy-dialog").close();
   settingsTarget = null; $("settings-dialog").close(); $("settings-model").textContent = ""; $("settings-help").textContent = "";
   $("copy-text").value = ""; $("conversation-action-preview").textContent = "";

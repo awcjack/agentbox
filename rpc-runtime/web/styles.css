@@ -167,8 +167,10 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .sidebar .folder-heading { display: flex; align-items: center; gap: 4px; }
 .sidebar .folder-heading::before { flex-shrink: 0; }
 .sidebar .folder-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sidebar .folder-new-session { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 4px; font-size: 18px; color: var(--muted); }
+.sidebar .folder-new-session,
+.sidebar .folder-delete { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; flex-shrink: 0; border-radius: 4px; font-size: 18px; color: var(--muted); }
 .sidebar .folder-new-session:hover:not(:disabled) { background: var(--raised); color: var(--text); }
+.sidebar .folder-delete:hover:not(:disabled) { background: var(--accent-soft); color: var(--red); }
 @media (min-width: 721px) { .sidebar-collapsed .sidebar .folder-heading { display: none; } }
 
 /* Codex-inspired cooler palette and denser chrome (keeps warm accent). */

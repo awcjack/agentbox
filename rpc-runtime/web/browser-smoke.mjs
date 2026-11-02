@@ -85,6 +85,18 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/v1/session-folders") {
       if (request.method === "GET") return json(response, 200, { folders: [...serverFolders].map(([id, folder]) => ({ id, folder })) });
+      if (request.method === "DELETE") {
+        const folder = normalizeFolder(body?.folder);
+        assert.ok(folder, "delete folder requires a non-empty label");
+        const ungrouped = [];
+        for (const [id, assigned] of [...serverFolders]) {
+          if (assigned === folder || assigned.startsWith(`${folder}/`)) {
+            serverFolders.set(id, "");
+            ungrouped.push({ id, folder: "" });
+          }
+        }
+        return json(response, 200, { folder, ungrouped });
+      }
       assert.equal(request.method, "PUT");
       if (!saved.has(body.id)) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
       if (!body.importOnly || !serverFolders.has(body.id)) serverFolders.set(body.id, body.folder);
@@ -511,6 +523,23 @@ try {
       await page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).focus();
       await page.getByRole("button", { name: `Rename session: ${session.name}`, exact: true }).click();
       await until(() => session.name === originalName, "original name restored");
+      await openSidebar();
+      assert.equal(await page.locator('.session-folder[data-folder-path=""] > summary .folder-delete').count(), 0, "Ungrouped has no delete control");
+      assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox");
+      await page.getByRole("button", { name: "Delete folder Work", exact: true }).click();
+      assert.equal(await page.locator("#delete-folder-dialog").isVisible(), true);
+      assert.equal(await page.locator("#delete-folder-description").textContent(), "Work");
+      await page.locator("#cancel-delete-folder").click();
+      assert.equal(await page.locator("#delete-folder-dialog").isVisible(), false);
+      assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox", "cancel keeps nested assignment");
+      await page.getByRole("button", { name: "Delete folder Work", exact: true }).click();
+      await page.locator("#confirm-delete-folder").click();
+      await until(() => serverFolders.get(session.nativeSessionId) === "", "delete folder ungroups nested assignment");
+      await until(() => page.locator('.session-folder[data-folder-path]:not([data-folder-path=""])').count().then((count) => count === 0), "deleted folder leaves the tree");
+      assert.equal(await page.locator('.session-folder[data-folder-path=""] .session-item').filter({ hasText: session.name }).count(), 1);
+      assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.pinned-folders.v1")), JSON.stringify([]), "delete clears matching pinned labels");
+      assert.match(await page.locator("#notice-text").textContent(), /Deleted folder Work/);
+      assert.equal(await page.locator("#notice").isVisible(), true);
       serverFolders.set(session.nativeSessionId, "");
       await page.locator("#refresh-sessions").click();
       await until(() => page.locator('.session-folder[data-folder-path]:not([data-folder-path=""])').count().then((count) => count === 0), "server folder removed");

@@ -163,6 +163,14 @@
       <button id="confirm-end" type="submit" class="primary-button">End &amp; archive</button><button type="button" id="cancel-end" class="text-button">Keep session open</button>
     </form>
   </dialog>
+  <dialog id="delete-folder-dialog" aria-labelledby="delete-folder-title">
+    <form id="delete-folder-form" class="dialog-body">
+      <span class="dialog-eyebrow">SESSION FOLDER</span><h2 id="delete-folder-title">Delete this folder?</h2>
+      <p id="delete-folder-description"></p>
+      <p id="delete-folder-help">Sessions in this folder and any nested folders move to Ungrouped. Conversations are kept; only the folder label is removed. Empty browser-only folders are cleared from this device.</p>
+      <button id="confirm-delete-folder" type="submit" class="primary-button">Delete folder</button><button type="button" id="cancel-delete-folder" class="text-button">Keep folder</button>
+    </form>
+  </dialog>
   <noscript>This workspace requires JavaScript. No build or browser extensions are needed.</noscript>
   <dialog id="conversation-action-dialog" aria-labelledby="conversation-action-title">
     <form id="conversation-action-form" class="dialog-body">
