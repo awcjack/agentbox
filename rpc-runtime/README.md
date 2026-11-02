@@ -348,7 +348,8 @@ deleting a label with no matches still succeeds with an empty `ungrouped` list.
 with an `archived` boolean on each history entry. History includes `createdAt`
 from the native session header timestamp (falling back to `modifiedAt` for missing
 or invalid timestamps). The web sidebar groups archives under **Archived
-conversations**, newest creation date first, respecting the profile filter. Click an entry
+conversations**, newest creation date first, respecting the profile filter. Archived
+entries are excluded from browser Recents. Click an entry
 to reopen it for reading or continuing (starting a new process), then use
 **End & archive** again when done. Its archive marker remains while reopened;
 running conversations appear in the runtime list instead of the archive list.

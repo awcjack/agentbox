@@ -18,7 +18,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Responsive chat workspace with a mobile session drawer, profile filtering,
   named sessions, and persisted-history resume. The denser charcoal sidebar lists
   browser **Recents** first, then the **Projects** folder tree, then a quieter
-  **Archived** disclosure. Title-only rows use a soft active accent bar, right-side
+  **Archived** disclosure. Archiving removes a conversation from Recents (and from
+  this browser's saved Recents preference) so it only appears under Archived.
+  Title-only rows use a soft active accent bar, right-side
   progress spinners and blue unread dots. Status, profile, cwd and date stay in
   tooltips and accessible labels. Rename and archive controls appear on hover/focus
   and stay visible on touch devices.
