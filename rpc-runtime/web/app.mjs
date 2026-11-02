@@ -4,6 +4,8 @@ import { renderSubagents } from "./subagents.mjs";
 import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
+import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
+import { findFilePreview, isMarkdownPath, pathBreadcrumb } from "./context-pane.mjs";
 import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments, initComposerFileDrop } from "./attachments.mjs";
@@ -35,8 +37,15 @@ try {
   loginDialog?.showModal();
 } catch { /* Dialog may be unavailable during tests or unsupported hosts. */ }
 const hideProfileKey = "agentbox.pi.hide-profile.v1";
+const recentsKey = "agentbox.pi.recents.v1";
 let hideProfile = false;
+let recentSessions = [];
 try { hideProfile = preferenceStorage?.getItem(hideProfileKey) === "true"; } catch { /* Use the default. */ }
+try {
+  const raw = preferenceStorage?.getItem(recentsKey);
+  const parsed = raw ? JSON.parse(raw) : [];
+  if (Array.isArray(parsed)) recentSessions = parsed.filter((entry) => entry && typeof entry.id === "string").slice(0, 12);
+} catch { recentSessions = []; }
 $("profile-section").hidden = hideProfile;
 $("hide-profile-section").checked = hideProfile;
 const api = createTransport(() => token);
@@ -580,9 +589,26 @@ function renderSessions() {
     ...live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))).map((session) => ({ session, historical: false })),
     ...past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))).map((session) => ({ session, historical: true })),
   ];
-  if (mainEntries.length || pinnedFolders.size) root.append(element("div", "list-heading sr-only", "Sessions"));
+  if (mainEntries.length || pinnedFolders.size) root.append(element("div", "list-heading sr-only", "Projects"));
   grouped(mainEntries, root, "main", { pinned: pinnedFolders });
   if (!live.length && !past.length && !pinnedFolders.size) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
+  const recentEntries = recentSessions
+    .map((entry) => {
+      const liveMatch = sessions.find((session) => session.id === entry.id);
+      if (liveMatch) return { session: liveMatch, historical: false };
+      const historyMatch = history.find((session) => session.id === entry.id && (!filter || session.profile === filter));
+      if (historyMatch && !activeNative.has(`${historyMatch.profile}:${historyMatch.id}`)) return { session: historyMatch, historical: true };
+      return null;
+    })
+    .filter(Boolean)
+    .filter((entry, index, list) => list.findIndex((item) => item.session.id === entry.session.id) === index)
+    .slice(0, 8);
+  if (token && recentEntries.length) {
+    root.append(element("div", "list-heading recents-heading", "Recents"));
+    const recents = element("div", "recents-list");
+    for (const { session, historical } of recentEntries) row(session, historical, recents);
+    root.append(recents);
+  }
   if (token) {
     const archived = available.filter(isArchived).sort(compareArchivedSessions);
     const section = element("details", "archived-sessions");
@@ -747,6 +773,104 @@ function renderContent(parent, content) {
     }
   }
 }
+function rememberRecent(session) {
+  if (!session?.id) return;
+  const entry = {
+    id: session.id,
+    title: displayTitle(session),
+    profile: session.profile || "",
+    historical: Boolean(session.archived),
+    at: Date.now(),
+  };
+  recentSessions = [entry, ...recentSessions.filter((item) => item.id !== entry.id)].slice(0, 12);
+  try { preferenceStorage?.setItem(recentsKey, JSON.stringify(recentSessions)); } catch { /* Browser storage may be blocked. */ }
+}
+
+function closeContextPane() {
+  const pane = $("context-pane");
+  if (!pane || pane.hidden) return;
+  pane.hidden = true;
+  $("workspace").classList.remove("context-open");
+  $("context-pane-body").replaceChildren();
+  $("context-pane-path").textContent = "";
+}
+
+function openContextPane(path) {
+  if (!path || !current) return;
+  const messages = visibleMessages(current.record.messages, current.partial);
+  const results = new Map(current.tools);
+  for (const message of messages) if (message.role === "toolResult") results.set(message.toolCallId, message);
+  const preview = findFilePreview(messages, results, path);
+  const pane = $("context-pane");
+  const body = $("context-pane-body");
+  $("context-pane-path").textContent = pathBreadcrumb(preview?.path || path);
+  $("context-pane-path").title = preview?.path || path;
+  body.replaceChildren();
+  if (!preview?.text) {
+    body.append(element("p", "context-pane-empty", "No transcript content is available for this path yet. Open a matching read/write/edit tool result, or wait for the agent to finish writing it."));
+  } else if (isMarkdownPath(preview.path)) {
+    body.append(renderMarkdown(preview.text));
+  } else {
+    body.append(element("pre", "context-pane-code", preview.text));
+  }
+  pane.hidden = false;
+  $("workspace").classList.add("context-open");
+}
+
+function fileChangeRow(file) {
+  const row = element("li", "file-changes-row");
+  const open = element("button", "file-changes-path", file.path);
+  open.type = "button";
+  open.title = `Preview ${file.path}`;
+  open.addEventListener("click", () => openContextPane(file.path));
+  row.append(open);
+  const stats = element("span", "file-changes-counts");
+  stats.append(
+    element("span", "file-changes-stat add", `+${formatDiffCount(file.added)}`),
+    document.createTextNode(" "),
+    element("span", "file-changes-stat del", `-${formatDiffCount(file.removed)}`),
+  );
+  row.append(stats);
+  return row;
+}
+
+function renderFileChangesCard(summary, key) {
+  const article = element("article", "message changes-card");
+  article.dataset.messageKey = key;
+  const card = element("div", "file-changes");
+  const header = element("div", "file-changes-header");
+  const title = element("div", "file-changes-title");
+  const count = summary.files.length;
+  title.append(
+    element("strong", "", `Edited ${count} file${count === 1 ? "" : "s"}`),
+    element("span", "file-changes-stat add", `+${formatDiffCount(summary.added)}`),
+    element("span", "file-changes-stat del", `-${formatDiffCount(summary.removed)}`),
+  );
+  header.append(title);
+  card.append(header);
+  const previewLimit = 3;
+  const list = element("ul", "file-changes-list");
+  for (const file of summary.files.slice(0, previewLimit)) list.append(fileChangeRow(file));
+  card.append(list);
+  if (summary.files.length > previewLimit) {
+    const more = element("details", "file-changes-more");
+    more.dataset.detailKey = `${key}:more`;
+    const rest = element("ul", "file-changes-list");
+    for (const file of summary.files.slice(previewLimit)) rest.append(fileChangeRow(file));
+    more.append(element("summary", "", `Show ${summary.files.length - previewLimit} more files`), rest);
+    card.append(more);
+  }
+  article.append(card);
+  return article;
+}
+
+function flushFileChanges(parent, store, turnKey) {
+  const summary = summarizeFileChanges(store);
+  store.clear();
+  if (!summary.files.length) return;
+  parent.append(renderFileChangesCard(summary, `changes:${turnKey}`));
+}
+
 function renderTool(call, result, key) {
   const subagents = renderSubagents(call, result, key);
   if (subagents) return subagents;
@@ -790,7 +914,7 @@ function patchTranscript(parent, next) {
     } else if (old.nodeType === 1) {
       // These controls have closures over the rendered message/code. Use fresh
       // handlers rather than retaining ones that would copy an earlier delta.
-      if (fresh.classList.contains("message-actions") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
+      if (fresh.classList.contains("message-actions") || fresh.classList.contains("changes-card") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
         parent.replaceChild(fresh, old);
         continue;
       }
@@ -814,9 +938,15 @@ function renderMessages() {
   for (const message of messages) if (message.role === "toolResult") results.set(message.toolCallId, message);
   const shown = new Set();
   let previousMessage = null, previousArticle = null;
+  const turnChanges = createChangeAccumulator();
+  let turnKey = "start";
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
     if (message.role === "toolResult") continue;
+    if (message.role === "user") {
+      flushFileChanges(next, turnChanges, turnKey);
+      turnKey = messageKey(message) || `user:${index}`;
+    }
     const article = element("article", `message ${message.role === "user" ? "user" : "assistant"}`);
     article.dataset.messageKey = `${message.role}:${index}`;
     const header = element("div", "message-header");
@@ -839,7 +969,11 @@ function renderMessages() {
         const detail = element("details", "thinking"); detail.dataset.detailKey = `thinking:${messageKey(message) || index}:${blockIndex}`;
         detail.append(element("summary", "", "Thinking"), renderMarkdown(block.thinking || "")); body.append(detail);
       } else if (block.type === "toolCall") {
-        shown.add(block.id); body.append(renderTool(block, results.get(block.id), block.id));
+        shown.add(block.id);
+        const result = results.get(block.id);
+        const change = changeFromTool(block, result);
+        if (change) accumulateChange(turnChanges, change);
+        body.append(renderTool(block, result, block.id));
       } else renderContent(body, [block]);
     }
     if (message.summary) body.append(renderMarkdown(message.summary));
@@ -880,7 +1014,13 @@ function renderMessages() {
     next.append(article);
     previousArticle = article; previousMessage = message;
   }
-  for (const [id, result] of results) if (!shown.has(id)) next.append(renderTool({ name: result.toolName, arguments: result.args }, result, id));
+  for (const [id, result] of results) if (!shown.has(id)) {
+    const call = { name: result.toolName, arguments: result.args };
+    const change = changeFromTool(call, result);
+    if (change) accumulateChange(turnChanges, change);
+    next.append(renderTool(call, result, id));
+  }
+  flushFileChanges(next, turnChanges, turnKey);
   if (ctx.meta?.status !== "running" && ctx.meta?.stderr) {
     const detail = element("details", "tool-detail"); detail.dataset.detailKey = "stderr";
     detail.append(element("summary", "", "Process diagnostics"), element("pre", "", ctx.meta.stderr)); next.append(detail);
@@ -1327,6 +1467,8 @@ function activate(meta, { reconnect = false } = {}) {
   const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, ready: false, online: false, cursor: 0 };
   ctx.record.models = [];
   current = ctx; followBottom = true; setComposerCompact(false);
+  rememberRecent(meta);
+  closeContextPane();
   $("approvals").replaceChildren(); restoreDraft(); renderMessages(); renderSessions(); renderModels(ctx); drawer(false);
   showNotice(ctx.record.notice?.message || "", ctx.record.notice?.error);
   runSession(ctx);
@@ -1722,7 +1864,7 @@ function logout(message = "", { clearRemembered = true } = {}) {
   $("token").value = ""; $("prompt").value = ""; $("image-files").value = ""; $("new-name").value = "";
   $("approvals").replaceChildren(); $("attachments").replaceChildren(); $("model").replaceChildren(element("option", "", "No model selected"));
   $("profile-filter").replaceChildren(element("option", "", "All profiles")); $("profile-filter").firstChild.value = "";
-  $("new-folder").value = ""; $("new-folder-create").value = ""; $("new-folder-create-wrap").hidden = true; $("folder-name").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); $("folder-dialog").close(); drawer(false); showNotice("");
+  $("new-folder").value = ""; $("new-folder-create").value = ""; $("new-folder-create-wrap").hidden = true; $("folder-name").value = ""; $("session-folder-options").replaceChildren(); $("new-dialog").close(); $("folder-dialog").close(); closeContextPane(); drawer(false); showNotice("");
   sessionDrag.cancel();
   if (clearRemembered) {
     clearRememberedToken(preferenceStorage);
@@ -1819,7 +1961,9 @@ for (const button of document.querySelectorAll(".starter")) button.addEventListe
   if (!current) { openNew(); return; }
   current.record.draft.text = button.dataset.prompt; current.record.draft.version++; restoreDraft(); $("prompt").focus();
 });
+$("close-context-pane").addEventListener("click", () => closeContextPane());
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !$("context-pane").hidden) { closeContextPane(); event.preventDefault(); return; }
   if (event.key === "Escape" && $("sidebar").classList.contains("open")) { drawer(false); $("open-drawer").focus(); }
   if (event.key === "Tab" && $("sidebar").classList.contains("open")) {
     const controls = [...$("sidebar").querySelectorAll("button:not(:disabled), select:not(:disabled)")];
