@@ -517,6 +517,22 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
   color: #e0e0e0;
   background: #242424;
 }
+.sidebar .session-project {
+  margin: 6px 0 8px;
+}
+.sidebar .session-project > .project-heading {
+  color: #cfcfcf;
+  font-size: 12px;
+  font-weight: 600;
+}
+.sidebar .session-project > .project-heading:hover {
+  color: #f2f2f2;
+}
+.sidebar .session-project > .folder-children {
+  padding-left: 6px;
+  border-left: 1px solid #2f2f2f;
+  margin-left: 6px;
+}
 .sidebar .folder-children { padding-left: 4px; }
 .sidebar .folder-empty {
   margin: 2px 6px 8px;

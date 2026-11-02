@@ -130,17 +130,19 @@
     <form id="folder-form" class="dialog-body">
       <div class="dialog-heading"><span class="dialog-eyebrow">SESSION FOLDER</span><button type="button" id="cancel-folder" class="icon-button" aria-label="Close new folder">&times;</button></div>
       <h2 id="folder-title">Create a folder.</h2>
-      <p>Add an empty group in the sessions list. Drag sessions into it or use its + action to start a conversation there.</p>
+      <p>Add an empty group under the selected project. Drag sessions into it or use its + action to start a conversation there.</p>
+      <p class="field-note">Project: <strong id="folder-project-label">Select a project from the sidebar</strong></p>
       <label for="folder-name">Folder name</label>
       <input id="folder-name" list="session-folder-options" autocomplete="off" required placeholder="Work/Project" aria-describedby="folder-name-help">
-      <p id="folder-name-help" class="field-note">Use nested names such as Work/Project. Saved in this browser until a session is assigned.</p>
+      <p id="folder-name-help" class="field-note">Use nested names such as Work/Project. Saved in this browser under the selected project until a session is assigned.</p>
       <p id="folder-error" class="form-error" role="alert" hidden></p>
       <button id="create-folder" class="primary-button" type="submit">Create folder <span aria-hidden="true">&rarr;</span></button>
     </form>
   </dialog>
   <dialog id="new-dialog" aria-labelledby="new-title">
     <form id="new-form" class="dialog-body">
-      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Choose a session folder and give this conversation a name.</p>
+      <div class="dialog-heading"><span class="dialog-eyebrow">PI AGENT SESSION</span><button type="button" id="cancel-new" class="icon-button" aria-label="Close new session">&times;</button></div><h2 id="new-title">Start a coding session.</h2><p>Sessions start in the selected project working directory. Optionally group them in a session folder.</p>
+      <p class="field-note">Project: <strong id="new-project-label">Select a project from the sidebar</strong></p>
       <label for="new-folder">Session folder <span class="muted">(optional)</span></label>
       <select id="new-folder" aria-describedby="folder-help">
         <option value="">Ungrouped</option>
@@ -151,7 +153,7 @@
         <input id="new-folder-create" autocomplete="off" placeholder="Work/Project" aria-describedby="folder-help">
       </div>
       <datalist id="session-folder-options"></datalist>
-      <p id="folder-help" class="field-note">Pick an existing session folder, or choose Create new folder and enter a name such as Work/Project. Ungrouped leaves the session unassigned.</p>
+      <p id="folder-help" class="field-note">Pick an existing session folder inside this project, or choose Create new folder and enter a name such as Work/Project. Ungrouped leaves the session unassigned. Use a project + in the sidebar to choose the working directory.</p>
       <label for="new-name">Session name <span class="muted">(optional)</span></label><input id="new-name" maxlength="200" placeholder="What are we working on?" autocomplete="off">
       <p id="new-error" class="form-error" role="alert" hidden></p><button id="create-session" class="primary-button" type="submit">Create session <span aria-hidden="true">&rarr;</span></button>
     </form>
@@ -167,7 +169,7 @@
     <form id="delete-folder-form" class="dialog-body">
       <span class="dialog-eyebrow">SESSION FOLDER</span><h2 id="delete-folder-title">Delete this folder?</h2>
       <p id="delete-folder-description"></p>
-      <p id="delete-folder-help">Sessions in this folder and any nested folders move to Ungrouped. Conversations are kept; only the folder label is removed. Empty browser-only folders are cleared from this device.</p>
+      <p id="delete-folder-help">Sessions in this folder and any nested folders move to Ungrouped within the same project. Conversations are kept; only the folder label is removed. Empty browser-only folders are cleared from this device.</p>
       <button id="confirm-delete-folder" type="submit" class="primary-button">Delete folder</button><button type="button" id="cancel-delete-folder" class="text-button">Keep folder</button>
     </form>
   </dialog>

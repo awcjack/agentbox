@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { compareArchivedSessions, resolveRecentEntries, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries } from "./sidebar.mjs";
+import { compareArchivedSessions, resolveRecentEntries, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, pinnedFoldersForProfile, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries, partitionProjectEntries } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
@@ -18,10 +18,11 @@ try { preferenceStorage = window.localStorage; } catch { /* Browser storage may 
 const hiddenModels = readHiddenModels(preferenceStorage);
 const sessionFolders = new Map();
 const legacyFolders = readSessionFolders(preferenceStorage);
-const pinnedFolders = readPinnedFolders(preferenceStorage);
+let pinnedFolders = readPinnedFolders(preferenceStorage);
 const folderProfiles = new Set(), movingFolders = new Set(), deletingFolders = new Set();
 let folderPoll = null, folderVersion = 0, foldersLoading = false;
 let folderDeleteTarget = null;
+const profileRoots = new Map();
 const folderOpen = new Map();
 const CREATE_FOLDER_OPTION = "__create__";
 const rowSources = new Map();
@@ -508,93 +509,134 @@ function renderSessions() {
     }
     if (hoveredKey === button.dataset.sessionKey) previewSession(button);
   }
-  function grouped(entries, container, sectionKey, { pinned = new Set() } = {}) {
-    if (!entries.length && !pinned.size) return;
-    const folders = new Map();
-    function group(name, path, parent) {
-      const details = element("details", "session-folder");
-      details.dataset.folderPath = path;
-      const key = folderOpenKey(sectionKey, path);
-      details.open = isFolderOpen(folderOpen, sectionKey, path);
-      const summary = element("summary", "folder-heading");
-      summary.append(element("span", "folder-label", name));
-      const add = element("button", "folder-new-session", "+"); add.type = "button";
-      add.setAttribute("aria-label", `New session in ${path || "Ungrouped"}`);
-      add.title = `New session in ${path || "Ungrouped"}`;
-      add.dataset.folderKey = `${key}:new`;
-      add.disabled = !token || createDenied || createBusy || (Boolean(path) && readOnly);
-      add.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
-      add.addEventListener("click", (event) => {
+  function grouped(entries, container, sectionKey, { projectNames = null, includeEmptyProjects = false } = {}) {
+    const names = projectNames || (filter ? (profiles.includes(filter) ? [filter] : []) : profiles.slice());
+    const byProfile = partitionProjectEntries(entries, names);
+    let rendered = 0;
+    for (const profileName of names) {
+      const profileEntries = byProfile.get(profileName) || [];
+      const pins = pinnedFoldersForProfile(pinnedFolders, profileName);
+      if (!includeEmptyProjects && !profileEntries.length && !pins.size) continue;
+      rendered += 1;
+      const projectOpenKey = `${sectionKey}:project:${profileName}`;
+      const project = element("details", "session-folder session-project");
+      project.dataset.projectProfile = profileName;
+      project.open = folderOpen.has(projectOpenKey) ? folderOpen.get(projectOpenKey) !== false : true;
+      const projectSummary = element("summary", "folder-heading project-heading");
+      projectSummary.append(element("span", "folder-label", profileName));
+      const cwd = profileRoots.get(profileName);
+      if (cwd) projectSummary.title = `${profileName}\n${cwd}`;
+      else projectSummary.title = profileName;
+      const projectAdd = element("button", "folder-new-session", "+"); projectAdd.type = "button";
+      projectAdd.setAttribute("aria-label", `New session in project ${profileName}`);
+      projectAdd.title = `New session in ${profileName}`;
+      projectAdd.dataset.folderKey = `${projectOpenKey}:new`;
+      projectAdd.disabled = !token || createDenied || createBusy;
+      projectAdd.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
+      projectAdd.addEventListener("click", (event) => {
         event.preventDefault(); event.stopPropagation();
-        const candidates = [...new Set(entries.filter(({ session, historical }) => {
-          const assigned = sessionFolders.get(sessionFolderKey(session, historical)) || "";
-          return assigned === path || assigned.startsWith(`${path}/`);
-        }).map(({ session }) => session.profile))];
-        const preferred = $("profile-filter").value || current?.meta.profile;
-        const profile = candidates.includes(preferred) ? preferred : candidates.includes("default") ? "default" : candidates[0];
-        openNew({ folder: path, profile });
+        openNew({ profile: profileName, folder: "" });
       });
-      summary.append(add);
-      if (path) {
-        const remove = element("button", "folder-delete", "×"); remove.type = "button";
-        remove.setAttribute("aria-label", `Delete folder ${path}`);
-        remove.title = `Delete folder ${path}`;
-        remove.dataset.folderKey = `${key}:delete`;
-        remove.disabled = !token || readOnly || foldersLoading || deletingFolders.has(path) || Boolean(folderDeleteTarget);
-        remove.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
-        remove.addEventListener("click", (event) => {
-          event.preventDefault(); event.stopPropagation();
-          requestDeleteFolder(path);
-        });
-        summary.append(remove);
-      }
-      summary.dataset.folderKey = key;
-      summary.title = path ? `Toggle ${path}; drop a session here to move it` : "Toggle Ungrouped; drop a session here to remove it from its folder";
-      const children = element("div", "folder-children");
-      details.append(summary, children);
-      // Save immediately rather than waiting for the queued native toggle event:
-      // a poll may rebuild this element before that event runs.
-      summary.addEventListener("click", (event) => {
+      projectSummary.append(projectAdd);
+      projectSummary.dataset.folderKey = projectOpenKey;
+      const projectChildren = element("div", "folder-children");
+      project.append(projectSummary, projectChildren);
+      projectSummary.addEventListener("click", (event) => {
         event.preventDefault();
-        details.open = !details.open;
-        folderOpen.set(key, details.open);
+        project.open = !project.open;
+        folderOpen.set(projectOpenKey, project.open);
       });
-      details.addEventListener("toggle", () => { if (details.isConnected) folderOpen.set(key, details.open); });
-      parent.append(details);
-      if (focusedFolder === key) summary.focus({ preventScroll: true });
-      if (focusedFolder === `${key}:new`) add.focus({ preventScroll: true });
-      if (focusedFolder === `${key}:delete`) summary.querySelector(".folder-delete")?.focus({ preventScroll: true });
-      return children;
-    }
-    function ensurePath(path) {
-      let target = container, prefix = "";
-      for (const name of path.split("/")) {
-        prefix = prefix ? `${prefix}/${name}` : name;
-        if (!folders.has(prefix)) folders.set(prefix, group(name, prefix, target));
-        target = folders.get(prefix);
+      project.addEventListener("toggle", () => { if (project.isConnected) folderOpen.set(projectOpenKey, project.open); });
+      container.append(project);
+      if (focusedFolder === projectOpenKey) projectSummary.focus({ preventScroll: true });
+      if (focusedFolder === `${projectOpenKey}:new`) projectAdd.focus({ preventScroll: true });
+
+      const folders = new Map();
+      function group(name, path, parent) {
+        const details = element("details", "session-folder");
+        details.dataset.folderPath = path;
+        details.dataset.projectProfile = profileName;
+        const key = folderOpenKey(sectionKey, path, profileName);
+        details.open = isFolderOpen(folderOpen, sectionKey, path, profileName);
+        const summary = element("summary", "folder-heading");
+        summary.append(element("span", "folder-label", name));
+        const add = element("button", "folder-new-session", "+"); add.type = "button";
+        add.setAttribute("aria-label", `New session in ${profileName}${path ? ` / ${path}` : " / Ungrouped"}`);
+        add.title = `New session in ${profileName}${path ? ` / ${path}` : ""}`;
+        add.dataset.folderKey = `${key}:new`;
+        add.disabled = !token || createDenied || createBusy || (Boolean(path) && readOnly);
+        add.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
+        add.addEventListener("click", (event) => {
+          event.preventDefault(); event.stopPropagation();
+          openNew({ folder: path, profile: profileName });
+        });
+        summary.append(add);
+        if (path) {
+          const remove = element("button", "folder-delete", "×"); remove.type = "button";
+          remove.setAttribute("aria-label", `Delete folder ${path}`);
+          remove.title = `Delete folder ${path}`;
+          remove.dataset.folderKey = `${key}:delete`;
+          const deleteId = `${profileName}:${path}`;
+          remove.disabled = !token || readOnly || foldersLoading || deletingFolders.has(deleteId) || Boolean(folderDeleteTarget);
+          remove.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) event.stopPropagation(); });
+          remove.addEventListener("click", (event) => {
+            event.preventDefault(); event.stopPropagation();
+            requestDeleteFolder(path, profileName);
+          });
+          summary.append(remove);
+        }
+        summary.dataset.folderKey = key;
+        summary.title = path
+          ? `Toggle ${path}; drop a ${profileName} session here to move it`
+          : `Toggle Ungrouped; drop a ${profileName} session here to remove it from its folder`;
+        const children = element("div", "folder-children");
+        details.append(summary, children);
+        summary.addEventListener("click", (event) => {
+          event.preventDefault();
+          details.open = !details.open;
+          folderOpen.set(key, details.open);
+        });
+        details.addEventListener("toggle", () => { if (details.isConnected) folderOpen.set(key, details.open); });
+        parent.append(details);
+        if (focusedFolder === key) summary.focus({ preventScroll: true });
+        if (focusedFolder === `${key}:new`) add.focus({ preventScroll: true });
+        if (focusedFolder === `${key}:delete`) summary.querySelector(".folder-delete")?.focus({ preventScroll: true });
+        return children;
       }
-      return target;
-    }
-    const partitioned = partitionFolderEntries(entries, ({ session, historical }) => sessionFolders.get(sessionFolderKey(session, historical)) || "", pinned);
-    for (const path of partitioned.folders.keys()) ensurePath(path);
-    for (const [path, members] of partitioned.folders) {
-      const target = ensurePath(path);
-      for (const { session, historical } of members) row(session, historical, target);
-    }
-    // Keep an empty drop target available even when every session has a folder.
-    const target = group("Ungrouped", "", container);
-    if (!partitioned.folders.size) {
-      target.parentElement.classList.add("ungrouped-only");
-      target.parentElement.open = true;
-    }
-    for (const { session, historical } of partitioned.ungrouped) row(session, historical, target);
-    if (!partitioned.ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
-    for (const path of pinned) {
-      const children = folders.get(path);
-      if (children && !children.querySelector(".session-row, .session-folder")) {
-        children.append(element("p", "folder-empty", "Drop sessions here or create one with +"));
+      function ensurePath(path) {
+        let target = projectChildren, prefix = "";
+        for (const part of path.split("/")) {
+          prefix = prefix ? `${prefix}/${part}` : part;
+          if (!folders.has(prefix)) folders.set(prefix, group(part, prefix, target));
+          target = folders.get(prefix);
+        }
+        return target;
+      }
+      const partitioned = partitionFolderEntries(
+        profileEntries,
+        ({ session, historical }) => sessionFolders.get(sessionFolderKey(session, historical)) || "",
+        pins,
+      );
+      for (const path of partitioned.folders.keys()) ensurePath(path);
+      for (const [path, members] of partitioned.folders) {
+        const target = ensurePath(path);
+        for (const { session, historical } of members) row(session, historical, target);
+      }
+      const target = group("Ungrouped", "", projectChildren);
+      if (!partitioned.folders.size) {
+        target.parentElement.classList.add("ungrouped-only");
+        target.parentElement.open = true;
+      }
+      for (const { session, historical } of partitioned.ungrouped) row(session, historical, target);
+      if (!partitioned.ungrouped.length) target.append(element("p", "folder-empty", "Drop sessions here to ungroup"));
+      for (const path of pins) {
+        const children = folders.get(path);
+        if (children && !children.querySelector(".session-row, .session-folder")) {
+          children.append(element("p", "folder-empty", "Drop sessions here or create one with +"));
+        }
       }
     }
+    return rendered;
   }
   const activeNative = new Set(sessions.filter((session) => ["running", "stopping"].includes(session.status)).map((session) => `${session.profile}:${session.nativeSessionId}`));
   const available = history.filter((session) => (!filter || session.profile === filter) && !activeNative.has(`${session.profile}:${session.id}`));
@@ -607,6 +649,8 @@ function renderSessions() {
   const recentEntries = resolveRecentEntries(recentSessions, {
     sessions, history, filter, activeNative, isArchived, limit: 8,
   });
+  const projectNames = filter ? (profiles.includes(filter) ? [filter] : []) : profiles.slice();
+  const hasPinnedProjects = projectNames.some((name) => pinnedFoldersForProfile(pinnedFolders, name).size);
   // Recents first so recently opened threads stay above the Projects tree.
   if (token && recentEntries.length) {
     root.append(element("div", "list-heading recents-heading", "Recents"));
@@ -614,9 +658,16 @@ function renderSessions() {
     for (const { session, historical } of recentEntries) row(session, historical, recents);
     root.append(recents);
   }
-  if (mainEntries.length || pinnedFolders.size) root.append(element("div", "list-heading projects-heading", "Projects"));
-  grouped(mainEntries, root, "main", { pinned: pinnedFolders });
-  if (!live.length && !past.length && !pinnedFolders.size) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
+  if (token && (mainEntries.length || hasPinnedProjects || projectNames.length)) {
+    root.append(element("div", "list-heading projects-heading", "Projects"));
+  }
+  const projectCount = grouped(mainEntries, root, "main", {
+    projectNames,
+    includeEmptyProjects: Boolean(token && projectNames.length),
+  });
+  if (!live.length && !past.length && !projectCount) {
+    root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
+  }
   if (token) {
     const archived = available.filter(isArchived).sort(compareArchivedSessions);
     const section = element("details", "archived-sessions");
@@ -625,7 +676,7 @@ function renderSessions() {
     section.append(summary);
     root.append(section);
     section.append(element("p", "sidebar-empty", archived.length ? "Reopen to read or continue. Use End & archive when done. Reopening starts a Pi process." : "No archived conversations in this profile selection."));
-    grouped(archived.map((session) => ({ session, historical: true })), section, "archive");
+    grouped(archived.map((session) => ({ session, historical: true })), section, "archive", { projectNames });
     if (archiveFocused) summary.focus({ preventScroll: true });
   }
 }
@@ -1501,8 +1552,11 @@ async function createSession(body) {
     if (typeof session.folder === "string") {
       const key = sessionFolderKey(session);
       if (session.folder) sessionFolders.set(key, session.folder); else sessionFolders.delete(key);
+      folderOpen.set(`main:project:${session.profile}`, true);
       const parts = session.folder.split("/");
-      for (let size = 1; size <= parts.length; size++) folderOpen.set(folderOpenKey("main", parts.slice(0, size).join("/")), true);
+      for (let size = 1; size <= parts.length; size++) {
+        folderOpen.set(folderOpenKey("main", parts.slice(0, size).join("/"), session.profile), true);
+      }
     }
     sessions = [...sessions.filter((item) => item.id !== session.id), session]; $("new-dialog").close();
     if (ownSelection === selection) activate(session);
@@ -1526,7 +1580,7 @@ async function resume(session) {
   else await createSession({ profile: session.profile, resume: session.id });
 }
 function folderChoicesForProfile(profile) {
-  const choices = new Set(pinnedFolders);
+  const choices = pinnedFoldersForProfile(pinnedFolders, profile);
   for (const [key, value] of sessionFolders) {
     if (JSON.parse(key)[0] !== profile) continue;
     const parts = value.split("/");
@@ -1577,20 +1631,36 @@ function openFolderDialog() {
   $("folder-name").value = "";
   newTargetProfile = $("profile-filter").value || current?.meta.profile || (profiles.includes("default") ? "default" : profiles[0]);
   renderNewFolderOptions();
+  syncNewProjectLabel();
   $("folder-dialog").showModal();
   $("folder-name").focus();
 }
-function createPinnedFolder(value) {
+function createPinnedFolder(value, profile = newTargetProfile) {
   const folder = normalizeFolder(value);
   if (!folder) throw new Error("Enter a folder name.");
-  pinnedFolders.add(folder);
+  const targetProfile = profile || $("profile-filter").value || (profiles.includes("default") ? "default" : profiles[0]);
+  if (!targetProfile) throw new Error("Choose a project before creating a folder.");
+  pinnedFolders = [...pinnedFolders, { profile: targetProfile, folder }];
   for (let size = 1; size <= folder.split("/").length; size++) {
-    folderOpen.set(folderOpenKey("main", folder.split("/").slice(0, size).join("/")), true);
+    folderOpen.set(folderOpenKey("main", folder.split("/").slice(0, size).join("/"), targetProfile), true);
   }
+  folderOpen.set(`main:project:${targetProfile}`, true);
   savePinnedFolders(preferenceStorage, pinnedFolders);
   renderSessions();
-  showNotice(`Folder ${folder} is ready. Drag sessions into it or create one with +.`);
+  showNotice(`Folder ${folder} is ready in ${targetProfile}. Drag sessions into it or create one with +.`);
   return folder;
+}
+function projectLabelText(profile) {
+  if (!profile) return "Select a project from the sidebar";
+  const cwd = profileRoots.get(profile);
+  return cwd ? `${profile} — ${cwd}` : profile;
+}
+function syncNewProjectLabel() {
+  const text = projectLabelText(newTargetProfile || "");
+  const newLabel = $("new-project-label");
+  if (newLabel) newLabel.textContent = text;
+  const folderLabel = $("folder-project-label");
+  if (folderLabel) folderLabel.textContent = text;
 }
 function openNew({ folder, profile } = {}) {
   if (!token || !profiles.length || createDenied || createBusy) return;
@@ -1600,6 +1670,7 @@ function openNew({ folder, profile } = {}) {
   const selected = folder ?? (readOnly ? "" : existing);
   $("new-folder-create").value = "";
   renderNewFolderOptions(selected);
+  syncNewProjectLabel();
   $("new-error").hidden = true;
   $("new-name").value = "";
   $("new-dialog").showModal();
@@ -1792,25 +1863,26 @@ function requestArchive(session, historical = false) {
   $("cancel-end").textContent = historical ? "Cancel" : "Keep session open";
   $("end-dialog").showModal(); $("cancel-end").focus();
 }
-function requestDeleteFolder(folder) {
+function requestDeleteFolder(folder, profile) {
   const path = normalizeFolder(folder);
-  if (!token || readOnly || !path || deletingFolders.has(path) || folderDeleteTarget) return;
-  folderDeleteTarget = path;
+  const targetProfile = profile || $("profile-filter").value || newTargetProfile || (profiles.includes("default") ? "default" : profiles[0]);
+  if (!token || readOnly || !path || !targetProfile || deletingFolders.has(`${targetProfile}:${path}`) || folderDeleteTarget) return;
+  folderDeleteTarget = { folder: path, profile: targetProfile };
   drawer(false);
-  $("delete-folder-description").textContent = path;
+  $("delete-folder-description").textContent = `${targetProfile} / ${path}`;
   $("delete-folder-dialog").showModal(); $("cancel-delete-folder").focus();
   renderSessions();
 }
-function unpinFolderTree(folder) {
-  let changed = false;
-  for (const pinned of [...pinnedFolders]) {
-    if (pinned === folder || pinned.startsWith(`${folder}/`)) {
-      pinnedFolders.delete(pinned);
-      changed = true;
-    }
-  }
-  if (changed) savePinnedFolders(preferenceStorage, pinnedFolders);
-  return changed;
+function unpinFolderTree(folder, profile) {
+  const next = pinnedFolders.filter((entry) => {
+    if (!entry?.folder) return false;
+    if (profile && entry.profile && entry.profile !== profile) return true;
+    return !(entry.folder === folder || entry.folder.startsWith(`${folder}/`));
+  });
+  if (next.length === pinnedFolders.length) return false;
+  pinnedFolders = next;
+  savePinnedFolders(preferenceStorage, pinnedFolders);
+  return true;
 }
 $("cancel-delete-folder").addEventListener("click", () => {
   $("delete-folder-dialog").close(); folderDeleteTarget = null; renderSessions();
@@ -1818,34 +1890,31 @@ $("cancel-delete-folder").addEventListener("click", () => {
 $("delete-folder-dialog").addEventListener("cancel", () => { folderDeleteTarget = null; renderSessions(); });
 $("delete-folder-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const folder = folderDeleteTarget, ownEpoch = epoch;
-  if (!folder || !token || readOnly || deletingFolders.has(folder)) return;
+  const target = folderDeleteTarget, ownEpoch = epoch;
+  if (!target?.folder || !target.profile || !token || readOnly || deletingFolders.has(`${target.profile}:${target.folder}`)) return;
+  const { folder, profile } = target;
   folderDeleteTarget = null; $("delete-folder-dialog").close();
-  deletingFolders.add(folder); folderVersion++; renderSessions();
+  const deleteId = `${profile}:${folder}`;
+  deletingFolders.add(deleteId); folderVersion++; renderSessions();
   try {
-    const profilesToUpdate = folderProfiles.size ? [...folderProfiles] : profiles.slice();
-    let ungrouped = 0;
-    for (const profile of profilesToUpdate) {
-      const result = await api.request(folderPath(profile), { method: "DELETE", body: { folder }, signal: auth.signal });
-      if (ownEpoch !== epoch) return;
-      ungrouped += (result.ungrouped || []).length;
-      for (const item of result.ungrouped || []) {
-        const key = sessionFolderKey({ profile, id: item.id }, true);
-        sessionFolders.set(key, "");
-        legacyFolders.delete(key);
-      }
-    }
+    const result = await api.request(folderPath(profile), { method: "DELETE", body: { folder }, signal: auth.signal });
     if (ownEpoch !== epoch) return;
+    const ungrouped = (result.ungrouped || []).length;
+    for (const item of result.ungrouped || []) {
+      const key = sessionFolderKey({ profile, id: item.id }, true);
+      sessionFolders.set(key, "");
+      legacyFolders.delete(key);
+    }
     saveSessionFolders(preferenceStorage, legacyFolders);
-    unpinFolderTree(folder);
+    unpinFolderTree(folder, profile);
     showNotice(ungrouped
-      ? `Deleted folder ${folder}. ${ungrouped} session${ungrouped === 1 ? "" : "s"} moved to Ungrouped.`
-      : `Deleted folder ${folder}.`);
+      ? `Deleted folder ${folder} in ${profile}. ${ungrouped} session${ungrouped === 1 ? "" : "s"} moved to Ungrouped.`
+      : `Deleted folder ${folder} in ${profile}.`);
   } catch (error) {
     if (ownEpoch === epoch) report(error, null, { write: true });
   } finally {
     if (ownEpoch === epoch) {
-      deletingFolders.delete(folder); folderVersion++; renderSessions();
+      deletingFolders.delete(deleteId); folderVersion++; renderSessions();
       clearTimeout(folderPoll); folderPoll = setTimeout(() => refreshFolders(), 15000);
     }
   }
@@ -1927,7 +1996,7 @@ function logout(message = "", { clearRemembered = true } = {}) {
   clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
   clearTimeout(folderPoll); folderPoll = null; folderVersion++;
   foldersLoading = false; sessionFolders.clear(); folderProfiles.clear(); movingFolders.clear(); deletingFolders.clear(); folderOpen.clear();
-  folderDeleteTarget = null;
+  profileRoots.clear(); folderDeleteTarget = null;
   attention.clear(); document.title = baseTitle;
   dismissedCommands = null; commandKey = ""; hideCommandSuggestions();
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
@@ -1967,6 +2036,21 @@ async function connectWithToken(nextToken, { remember = false } = {}) {
     try { const result = await api.request("/v1/profiles", { signal: auth.signal }); if (ownEpoch === epoch) profiles = result.profiles || []; }
     catch (error) { if (error.status === 401) throw error; if (ownEpoch === epoch) showNotice(`Profiles unavailable: ${error.message} Existing sessions can still be opened.`, true); }
     if (ownEpoch !== epoch) return;
+    profileRoots.clear();
+    try {
+      const roots = await api.request("/v1/folders", { signal: auth.signal });
+      if (ownEpoch === epoch) {
+        for (const root of roots.roots || []) {
+          if (typeof root?.profile === "string" && typeof root?.path === "string" && root.path.startsWith("/")) {
+            profileRoots.set(root.profile, root.path);
+          }
+        }
+      }
+    } catch (error) {
+      if (error.status === 401) throw error;
+      if (ownEpoch === epoch) showNotice(`Project directories unavailable: ${error.message} Projects still appear by name.`, true);
+    }
+    if (ownEpoch !== epoch) return;
     for (const profile of profiles) {
       const option = element("option", "", profile); option.value = profile;
       $("profile-filter").append(option);
@@ -1993,8 +2077,9 @@ $("new-form").addEventListener("submit", (event) => {
     const raw = selected === CREATE_FOLDER_OPTION ? $("new-folder-create").value : selected;
     if (selected === CREATE_FOLDER_OPTION && !String(raw || "").trim()) throw new Error("Enter a folder name, or choose Ungrouped.");
     const folder = normalizeFolder(raw), name = $("new-name").value.trim();
+    if (!newTargetProfile) throw new Error("Choose a project from the sidebar before creating a session.");
     if (folder) {
-      pinnedFolders.add(folder);
+      pinnedFolders = [...pinnedFolders, { profile: newTargetProfile, folder }];
       savePinnedFolders(preferenceStorage, pinnedFolders);
     }
     createSession({ profile: newTargetProfile, ...(folder ? { folder } : {}), ...(name ? { name } : {}) });

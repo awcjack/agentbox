@@ -61,21 +61,45 @@ export function normalizeFolder(value) {
 }
 
 // Collapse/open state is shared across live + history in one sidebar tree.
-export function folderOpenKey(sectionKey, path = "") {
-  return `${sectionKey}:${path ? `/${path}` : ""}`;
+// Profile scopes Projects roots and the folders nested under each project.
+export function folderOpenKey(sectionKey, path = "", profile = "") {
+  const scope = profile ? `${sectionKey}:${profile}` : sectionKey;
+  return `${scope}:${path ? `/${path}` : ""}`;
 }
 
-export function isFolderOpen(map, sectionKey, path = "") {
-  const key = folderOpenKey(sectionKey, path);
+export function isFolderOpen(map, sectionKey, path = "", profile = "") {
+  const key = folderOpenKey(sectionKey, path, profile);
   if (map.has(key)) return map.get(key) !== false;
-  // Prefer the merged main tree; fall back to pre-merge live/past keys.
+  // Prefer the merged main tree; fall back to pre-merge live/past keys and
+  // pre-project (profile-less) keys so existing open state survives upgrade.
+  if (profile) {
+    const legacyProfileKey = folderOpenKey(sectionKey, path);
+    if (map.has(legacyProfileKey)) return map.get(legacyProfileKey) !== false;
+  }
   if (sectionKey === "main") {
     for (const legacy of ["live", "past"]) {
-      const legacyKey = folderOpenKey(legacy, path);
+      const legacyKey = folderOpenKey(legacy, path, profile);
       if (map.has(legacyKey)) return map.get(legacyKey) !== false;
+      if (profile) {
+        const flat = folderOpenKey(legacy, path);
+        if (map.has(flat)) return map.get(flat) !== false;
+      }
     }
   }
   return true;
+}
+
+// Profiles become Projects. Keep configured order, then any unexpected names.
+export function partitionProjectEntries(entries, profileOrder = []) {
+  const byProfile = new Map();
+  for (const name of profileOrder) byProfile.set(name, []);
+  for (const entry of entries) {
+    const profile = entry?.session?.profile;
+    if (typeof profile !== "string" || !profile) continue;
+    if (!byProfile.has(profile)) byProfile.set(profile, []);
+    byProfile.get(profile).push(entry);
+  }
+  return byProfile;
 }
 
 // One folder tree for live + resumeable history. Returns leaf assignments only;
@@ -112,17 +136,69 @@ export function saveSessionFolders(storage, folders) {
 }
 
 // Explicit empty folders are a browser preference until a session is assigned.
+// Prefer [profile, folder] tuples so Projects keep pins under the right cwd.
+// Legacy string entries still load and appear under every visible project.
 const pinnedFoldersKey = "agentbox.pi.pinned-folders.v1";
+export function normalizePinnedEntry(entry) {
+  if (typeof entry === "string") {
+    const folder = normalizeFolder(entry);
+    return folder ? { profile: null, folder } : null;
+  }
+  if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+    if (entry.profile != null && typeof entry.profile !== "string") return null;
+    if (typeof entry.folder !== "string") return null;
+    const folder = normalizeFolder(entry.folder);
+    if (!folder) return null;
+    return { profile: entry.profile || null, folder };
+  }
+  if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || typeof entry[1] !== "string" || !entry[0]) {
+    return null;
+  }
+  const folder = normalizeFolder(entry[1]);
+  return folder ? { profile: entry[0], folder } : null;
+}
 export function readPinnedFolders(storage) {
   try {
     const entries = JSON.parse(storage?.getItem(pinnedFoldersKey) || "[]");
-    return new Set(entries.filter((entry) => typeof entry === "string").map((entry) => normalizeFolder(entry)).filter(Boolean));
-  } catch { return new Set(); }
+    if (!Array.isArray(entries)) return [];
+    return entries.map((entry) => {
+      try { return normalizePinnedEntry(entry); }
+      catch { return null; }
+    }).filter(Boolean);
+  } catch { return []; }
 }
-export function savePinnedFolders(storage, folders) {
+export function pinnedFoldersForProfile(pins, profile) {
+  const folders = new Set();
+  for (const entry of pins || []) {
+    if (!entry?.folder) continue;
+    if (entry.profile === null || entry.profile === profile) folders.add(entry.folder);
+  }
+  return folders;
+}
+export function savePinnedFolders(storage, pins) {
   try {
     if (!storage) return false;
-    const values = [...folders].map((entry) => normalizeFolder(entry)).filter(Boolean).sort((a, b) => a.localeCompare(b));
+    const values = [];
+    const seen = new Set();
+    for (const entry of pins || []) {
+      let item;
+      try { item = normalizePinnedEntry(entry); }
+      catch { continue; }
+      if (!item?.folder) continue;
+      const key = item.profile == null ? `\0${item.folder}` : `${item.profile}\0${item.folder}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      values.push(item.profile == null ? item.folder : [item.profile, item.folder]);
+    }
+    values.sort((a, b) => {
+      // Legacy bare strings sort as profile "" so they stay before scoped tuples.
+      const leftProfile = Array.isArray(a) ? a[0] : "";
+      const leftFolder = Array.isArray(a) ? a[1] : a;
+      const rightProfile = Array.isArray(b) ? b[0] : "";
+      const rightFolder = Array.isArray(b) ? b[1] : b;
+      const byProfile = leftProfile.localeCompare(rightProfile);
+      return byProfile || leftFolder.localeCompare(rightFolder);
+    });
     if (!values.length) {
       try { storage.removeItem(pinnedFoldersKey); }
       catch { storage.setItem(pinnedFoldersKey, "[]"); }
@@ -174,9 +250,16 @@ export function initSessionDragDrop(root, { getSource, canMove, move, onEnd }) {
       try { event.dataTransfer.setData("text/plain", "session"); } catch {}
     }
   });
+  function dropTargetAllows(sourceEntry, target) {
+    if (!sourceEntry || !target || !canMove(sourceEntry)) return false;
+    const project = target.dataset.projectProfile;
+    // Folder targets inside Projects must stay in the session's profile/cwd.
+    if (project && project !== sourceEntry.session.profile) return false;
+    return true;
+  }
   root.addEventListener("dragover", (event) => {
     const target = closest(event.target, "[data-folder-path]");
-    if (!source || !canMove(source) || !target) {
+    if (!dropTargetAllows(source, target)) {
       highlight(undefined);
       return;
     }
@@ -191,7 +274,7 @@ export function initSessionDragDrop(root, { getSource, canMove, move, onEnd }) {
   });
   root.addEventListener("drop", (event) => {
     const target = closest(event.target, "[data-folder-path]");
-    const allowed = source && target && canMove(source);
+    const allowed = dropTargetAllows(source, target);
     const folder = target?.dataset.folderPath;
     const previous = clear();
     if (!previous) return;
