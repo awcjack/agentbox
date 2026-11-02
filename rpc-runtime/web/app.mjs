@@ -589,9 +589,6 @@ function renderSessions() {
     ...live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))).map((session) => ({ session, historical: false })),
     ...past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))).map((session) => ({ session, historical: true })),
   ];
-  if (mainEntries.length || pinnedFolders.size) root.append(element("div", "list-heading sr-only", "Projects"));
-  grouped(mainEntries, root, "main", { pinned: pinnedFolders });
-  if (!live.length && !past.length && !pinnedFolders.size) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   const recentEntries = recentSessions
     .map((entry) => {
       const liveMatch = sessions.find((session) => session.id === entry.id);
@@ -603,17 +600,21 @@ function renderSessions() {
     .filter(Boolean)
     .filter((entry, index, list) => list.findIndex((item) => item.session.id === entry.session.id) === index)
     .slice(0, 8);
+  // Recents first so recently opened threads stay above the Projects tree.
   if (token && recentEntries.length) {
     root.append(element("div", "list-heading recents-heading", "Recents"));
     const recents = element("div", "recents-list");
     for (const { session, historical } of recentEntries) row(session, historical, recents);
     root.append(recents);
   }
+  if (mainEntries.length || pinnedFolders.size) root.append(element("div", "list-heading projects-heading", "Projects"));
+  grouped(mainEntries, root, "main", { pinned: pinnedFolders });
+  if (!live.length && !past.length && !pinnedFolders.size) root.append(element("p", "sidebar-empty", token ? "Create a session or reopen an archived conversation below." : "Connect to find your sessions."));
   if (token) {
     const archived = available.filter(isArchived).sort(compareArchivedSessions);
     const section = element("details", "archived-sessions");
     section.open = archiveOpen;
-    const summary = element("summary", "list-heading", `Archived conversations (${archived.length})`);
+    const summary = element("summary", "list-heading archived-heading", archived.length ? `Archived (${archived.length})` : "Archived");
     section.append(summary);
     root.append(section);
     section.append(element("p", "sidebar-empty", archived.length ? "Reopen to read or continue. Use End & archive when done. Reopening starts a Pi process." : "No archived conversations in this profile selection."));
