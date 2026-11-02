@@ -48,10 +48,12 @@ are not advertised. `/auto on`, `/auto off`, and `/auto status` are suggested on
 when the process actually registers `auto`.
 
 Prefix a message with `!` to run a shell command immediately through Pi's RPC
-`bash` command (OpenCode / Pi TUI parity). Output streams into the transcript and
-is included in the next model context. Use `!!` to run a command while excluding
-its output from context. Attachments are not allowed with shell prefixes. Stop
-sends `abort_bash` while a shell command is running.
+`bash` command (OpenCode / Pi TUI parity). The transcript shows a Shell tool card
+with a live `running · Ns` indicator and streamed output while the command is
+active; finished cards collapse like other tools. Output is included in the next
+model context. Use `!!` to run a command while excluding its output from context.
+Attachments are not allowed with shell prefixes. Stop sends `abort_bash` while a
+shell command is running.
 
 ### Persistent defaults
 
