@@ -16,12 +16,12 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 ## Features
 
 - Responsive chat workspace with a mobile session drawer, profile filtering,
-  named sessions, and persisted-history resume. The compact sidebar labels the
-  folder tree **Projects** and lists **Recents** from this browser after a session
-  is opened. Title-only rows use subtle selection, right-side progress spinners and
-  blue unread dots. Status, profile, cwd and date stay in tooltips and accessible
-  labels. Rename and archive controls appear on hover/focus and stay visible on
-  touch devices.
+  named sessions, and persisted-history resume. The denser charcoal sidebar lists
+  browser **Recents** first, then the **Projects** folder tree, then a quieter
+  **Archived** disclosure. Title-only rows use a soft active accent bar, right-side
+  progress spinners and blue unread dots. Status, profile, cwd and date stay in
+  tooltips and accessible labels. Rename and archive controls appear on hover/focus
+  and stay visible on touch devices.
 - New session selects a session folder, without a profile or directory picker.
   Pick an existing label from the list, choose **Create new folder…** to enter a
   name such as `Work/Project`, or leave **Ungrouped**. Pi starts in the configured
