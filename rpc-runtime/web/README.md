@@ -124,9 +124,11 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   in the prompt, or returning to the latest messages, restores its previous size.
   Drafts are preserved, Send/Stop remain available, and agent requests stay visible.
   Prefix with `!` (or `!!` to hide output from the model) to run a shell command
-  immediately, matching OpenCode and Pi TUI behavior. While it runs, the transcript
-  shows an expanded Shell card with a pulsing `running · Ns` state and streamed
-  output; Stop sends `abort_bash`. Finished commands collapse like other tools.
+  immediately, matching OpenCode and Pi TUI behavior. The composer switches into a
+  green shell theme with a `>` prompt, Shell badge, and Run button. While it runs,
+  the transcript shows an expanded Shell card with a pulsing `running · Ns` state
+  and streamed output; Stop sends `abort_bash`. Finished commands collapse like
+  other tools. Esc clears a bang draft.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
   links, pipe tables (including column alignment), and fenced code with copy/select fallback. `md`/`markdown` fences offer a
   Preview/Source toggle using the same safe renderer (nested fences stay source).
