@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, utimes,
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { listSessionFolders, writeSessionFolder, deleteSessionFolder, sessionFolderMatches, normalizeSessionFolder, sessionFolderDirectory, archiveHistory, createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
+import { listSessionFolders, writeSessionFolder, deleteSessionFolder, sessionFolderMatches, normalizeSessionFolder, sessionFolderDirectory, archiveHistory, createConversationHistory, listHistory, moveHistorySession, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
 
 const ID = "01991817-3dac-7000-8123-0123456789ab";
 const OLD_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
@@ -401,4 +401,56 @@ test("deleteSessionFolder ungroups exact and nested labels and rejects empty fol
     { id: THIRD, folder: "Personal" },
   ].sort((a, b) => a.id.localeCompare(b.id)));
   assert.equal(await writeSessionFolder(root, profile, "default", ID, "resurrect", { importOnly: true }), "");
+});
+
+test("moveHistorySession rewrites cwd into another profile sessionDir and folder", async (t) => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), "pi-move-src-"));
+  const targetRoot = await mkdtemp(join(tmpdir(), "pi-move-dst-"));
+  t.after(() => rm(sourceRoot, { recursive: true, force: true }));
+  t.after(() => rm(targetRoot, { recursive: true, force: true }));
+  const source = { cwd: "/workspace", sessionDir: sourceRoot };
+  const target = { cwd: "/workspace/agentbox", sessionDir: targetRoot };
+  const file = join(sourceRoot, `2026-01-02T03-04-05-000Z_${ID}.jsonl`);
+  const original = `${header(ID, "/workspace")}\n${JSON.stringify({ type: "session_info", name: "Moved chat" })}\n`;
+  await writeFile(file, original);
+  await writeSessionFolder(sourceRoot, source, "default", ID, "Legacy");
+  await archiveHistory(source, ID);
+
+  const result = await moveHistorySession(source, "default", target, "agentbox", ID, {
+    folder: "Work/Inbox", maxBytes: 4096,
+  });
+  assert.deepEqual(result, {
+    id: ID, profile: "agentbox", cwd: "/workspace/agentbox", folder: "Work/Inbox", archived: true,
+  });
+  assert.equal(await resolveHistorySession(source, ID), null);
+  const moved = await resolveHistorySession(target, ID, { details: true });
+  assert.equal(moved.path, join(targetRoot, `2026-01-02T03-04-05-000Z_${ID}.jsonl`));
+  assert.equal(moved.cwd, "/workspace/agentbox");
+  const lines = (await readFile(moved.path, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.equal(lines[0].cwd, "/workspace/agentbox");
+  assert.equal(lines[0].id, ID);
+  assert.equal(lines[1].name, "Moved chat");
+  assert.equal((await listHistory(target, "agentbox", { includeArchived: true })).sessions[0].archived, true);
+  assert.deepEqual(await listSessionFolders(targetRoot, target, "agentbox"), [{ id: ID, folder: "Work/Inbox" }]);
+  assert.equal((await readdir(sourceRoot)).some((name) => name.endsWith(".jsonl")), false);
+
+  // Idempotent retry keeps the destination and refreshes the folder label.
+  const again = await moveHistorySession(source, "default", target, "agentbox", ID, {
+    folder: "", maxBytes: 4096,
+  });
+  assert.equal(again.folder, "");
+  assert.deepEqual(await listSessionFolders(targetRoot, target, "agentbox"), [{ id: ID, folder: "" }]);
+});
+
+test("moveHistorySession rejects same profile, missing source, and oversized history", async (t) => {
+  const { root, profile } = await fixture(t);
+  const targetRoot = await mkdtemp(join(tmpdir(), "pi-move-bad-"));
+  t.after(() => rm(targetRoot, { recursive: true, force: true }));
+  const target = { cwd: "/workspace/agentbox", sessionDir: targetRoot };
+  await writeFile(join(root, `${ID}.jsonl`), `${header()}\n`);
+  await assert.rejects(moveHistorySession(profile, "default", profile, "default", ID, { maxBytes: 4096 }));
+  await assert.rejects(moveHistorySession(profile, "default", target, "agentbox", OLD_ID, { maxBytes: 4096 }));
+  await assert.rejects(moveHistorySession(profile, "default", target, "agentbox", ID, { maxBytes: 10 }));
+  assert.equal(await resolveHistorySession(profile, ID), join(root, `${ID}.jsonl`));
+  assert.equal(await resolveHistorySession(target, ID), null);
 });

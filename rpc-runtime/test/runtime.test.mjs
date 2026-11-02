@@ -1774,3 +1774,72 @@ test("saved history archive requires delete scope, retains history and never sta
   assert.equal((await request(second.baseUrl, `/v1/history/${RESUME_ID}?profile=other`, { method: "DELETE" })).response.status, 400);
 });
 
+test("history move relocates JSONL across profiles and rejects active sessions", { skip: process.platform !== "linux" }, async (t) => {
+  const sourceRoot = await mkdtemp(join(tmpdir(), "pi-history-move-src-"));
+  const targetRoot = await mkdtemp(join(tmpdir(), "pi-history-move-dst-"));
+  t.after(() => rm(sourceRoot, { recursive: true, force: true }));
+  t.after(() => rm(targetRoot, { recursive: true, force: true }));
+  const file = join(sourceRoot, `2026-01-02T03-04-05-000Z_${RESUME_ID}.jsonl`);
+  const original = [
+    JSON.stringify({ type: "session", version: 3, id: RESUME_ID, cwd: "/workspace" }),
+    JSON.stringify({ type: "session_info", name: "Moved" }),
+    "",
+  ].join("\n");
+  await writeFile(file, original);
+  const profiles = {
+    default: { cwd: "/workspace", sessionDir: sourceRoot },
+    agentbox: { cwd: "/workspace/agentbox", sessionDir: targetRoot },
+  };
+  const first = await fixture(t, config({ profiles }));
+  const path = `/v1/history/${RESUME_ID}/move`;
+  const move = (body, options = {}) => request(first.baseUrl, path, { method: "POST", body, ...options });
+  assert.equal((await move({ profile: "default", targetProfile: "agentbox" }, { auth: false })).response.status, 401);
+  const scoped = await fixture(t, config({
+    profiles,
+    auth: { tokens: [{ sha256: TOKEN_HASH, scopes: ["sessions:read"] }] },
+  }));
+  assert.equal((await request(scoped.baseUrl, path, {
+    method: "POST", body: { profile: "default", targetProfile: "agentbox" },
+  })).response.status, 403);
+  for (const body of [
+    null, {}, { profile: "default" }, { profile: "default", targetProfile: "default" },
+    { profile: "default", targetProfile: "missing" }, { profile: "default", targetProfile: "agentbox", folder: 5 },
+    { profile: "default", targetProfile: "agentbox", extra: true },
+  ]) {
+    assert.equal((await move(body)).response.status, 400);
+  }
+  await createSession(first.baseUrl, { profile: "default", resume: RESUME_ID });
+  assert.equal((await move({ profile: "default", targetProfile: "agentbox", folder: "Work" })).response.status, 409);
+  await first.runtime.close();
+
+  const second = await fixture(t, config({ profiles }));
+  const moved = await request(second.baseUrl, path, {
+    method: "POST", body: { profile: "default", targetProfile: "agentbox", folder: "Work/Inbox" },
+  });
+  assert.equal(moved.response.status, 200);
+  assert.deepEqual(moved.body, {
+    id: RESUME_ID, profile: "agentbox", cwd: "/workspace/agentbox", folder: "Work/Inbox", archived: false,
+  });
+  assert.equal(second.spawns.length, 0);
+  assert.equal((await request(second.baseUrl, "/v1/history?profile=default")).body.sessions.length, 0);
+  const targetHistory = await request(second.baseUrl, "/v1/history?profile=agentbox");
+  assert.equal(targetHistory.body.sessions[0].id, RESUME_ID);
+  assert.equal(targetHistory.body.sessions[0].cwd, "/workspace/agentbox");
+  assert.equal(targetHistory.body.sessions[0].name, "Moved");
+  assert.deepEqual((await request(second.baseUrl, "/v1/session-folders?profile=agentbox")).body.folders, [
+    { id: RESUME_ID, folder: "Work/Inbox" },
+  ]);
+  const destination = join(targetRoot, `2026-01-02T03-04-05-000Z_${RESUME_ID}.jsonl`);
+  const header = JSON.parse((await readFile(destination, "utf8")).split("\n")[0]);
+  assert.equal(header.cwd, "/workspace/agentbox");
+  assert.equal(header.id, RESUME_ID);
+  // Idempotent retry refreshes folder assignment without requiring the source file.
+  const again = await request(second.baseUrl, path, {
+    method: "POST", body: { profile: "default", targetProfile: "agentbox", folder: "" },
+  });
+  assert.equal(again.response.status, 200);
+  assert.equal(again.body.folder, "");
+  assert.deepEqual((await request(second.baseUrl, "/v1/session-folders?profile=agentbox")).body.folders, [
+    { id: RESUME_ID, folder: "" },
+  ]);
+});

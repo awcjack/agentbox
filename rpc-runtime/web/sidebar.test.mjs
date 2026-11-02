@@ -391,7 +391,7 @@ test("session drag moves to the closest nested folder, clears before move, and e
   assert.equal(s.fire("drop", s.label).defaultPrevented, true);
   s.fire("drop", s.label);
   s.fire("dragend");
-  assert.deepEqual(s.moves, [[s.source, "Work/Notes"]]);
+  assert.deepEqual(s.moves, [[s.source, { folder: "Work/Notes", profile: undefined }]]);
   assert.equal(s.ends(), 1);
 });
 
@@ -458,7 +458,7 @@ test("session drag supports empty Ungrouped folder paths", () => {
   s.fire("dragstart");
   s.fire("dragover", s.ungrouped);
   s.fire("drop", s.ungrouped);
-  assert.deepEqual(s.moves, [[s.source, ""]]);
+  assert.deepEqual(s.moves, [[s.source, { folder: "", profile: undefined }]]);
 });
 
 test("external transfer payloads and targets outside the root cannot authorize moves", () => {
@@ -546,7 +546,7 @@ test("cancel, dragend, and document Escape clean up once and allow later drags",
     assert.equal(s.ends(), 1);
     s.fire("dragstart");
     s.fire("drop", s.folder);
-    assert.deepEqual(s.moves, [[s.source, "Work"]]);
+    assert.deepEqual(s.moves, [[s.source, { folder: "Work", profile: undefined }]]);
     assert.equal(s.ends(), 2);
   }
 });
@@ -600,19 +600,32 @@ test("pinned folder storage skips invalid names and survives corrupt JSON", () =
   ]);
 });
 
-test("session drag rejects drop targets from a different project", () => {
+test("session drag allows historical cross-project drops and rejects live ones", () => {
   const s = dragSetup();
   s.source.session.profile = "default";
+  s.source.historical = true;
   s.folder.dataset.projectProfile = "agentbox";
   s.fire("dragstart");
-  assert.equal(s.fire("dragover", s.folder).defaultPrevented, false);
-  assert.equal(s.folder.classes.has("drag-over"), false);
-  assert.equal(s.fire("drop", s.folder).defaultPrevented, false);
-  assert.deepEqual(s.moves, []);
-  assert.equal(s.ends(), 1);
-  s.folder.dataset.projectProfile = "default";
-  s.fire("dragstart");
   assert.equal(s.fire("dragover", s.folder).defaultPrevented, true);
+  assert.equal(s.folder.classes.has("drag-over"), true);
   s.fire("drop", s.folder);
-  assert.deepEqual(s.moves, [[s.source, "Work"]]);
+  assert.deepEqual(s.moves, [[s.source, { folder: "Work", profile: "agentbox" }]]);
+  assert.equal(s.ends(), 1);
+
+  const live = dragSetup();
+  live.source.session.profile = "default";
+  live.source.historical = false;
+  live.folder.dataset.projectProfile = "agentbox";
+  live.fire("dragstart");
+  assert.equal(live.fire("dragover", live.folder).defaultPrevented, false);
+  assert.equal(live.folder.classes.has("drag-over"), false);
+  assert.equal(live.fire("drop", live.folder).defaultPrevented, false);
+  assert.deepEqual(live.moves, []);
+  assert.equal(live.ends(), 1);
+
+  live.folder.dataset.projectProfile = "default";
+  live.fire("dragstart");
+  assert.equal(live.fire("dragover", live.folder).defaultPrevented, true);
+  live.fire("drop", live.folder);
+  assert.deepEqual(live.moves, [[live.source, { folder: "Work", profile: "default" }]]);
 });
