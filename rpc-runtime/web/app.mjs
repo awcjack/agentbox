@@ -196,11 +196,32 @@ function updateControls() {
   $("auto-mode").textContent = ctx?.record.autoModeBusy || (ctx && !ctx.ready) ? "Auto: ..." : ctx && !autoMode ? "Auto: unknown" : autoMode?.enabled ? "Auto: on" : "Auto: off";
   $("auto-mode").title = ctx && !autoMode ? "This Pi session has not reported auto-mode support. Deploy the updated runtime and policy extension, then start a new Pi session; the current mode cannot be confirmed." : !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply. This session's choice is retained on restart/resume." : "Auto mode is off. Normal permission rules apply. Click to enable for this session and retain its choice on restart/resume.";
   $("prompt").disabled = !ctx || readOnly;
+  const shellDraft = bangCommand(draft?.text?.trim() || "");
+  const shellMode = Boolean(shellDraft);
+  $("composer").classList.toggle("shell-mode", shellMode);
+  $("shell-prompt").hidden = !shellMode;
+  $("shell-badge").hidden = !shellMode;
+  $("shell-badge").textContent = shellDraft?.excludeFromContext ? "Shell · hidden" : "Shell";
+  $("shell-badge").title = shellDraft?.excludeFromContext
+    ? "!! runs the command and excludes its output from the next model context."
+    : "! runs the command through Pi bash and includes output in the next model context.";
+  $("attach").hidden = shellMode;
+  $("model").hidden = shellMode;
+  $("thinking-level").hidden = shellMode;
+  $("prompt").placeholder = shellMode
+    ? (shellDraft.excludeFromContext ? "!!command — run shell, hide output from the model" : "!command — run shell immediately")
+    : "Ask anything, type / for commands, or ! for shell...";
+  $("composer-foot-left").innerHTML = shellMode
+    ? "<kbd>Enter</kbd> run <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>Esc</kbd> clear !"
+    : "<kbd>Enter</kbd> send <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>/</kbd> commands";
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
   const bashRunning = Boolean(ctx?.bash?.running);
   syncBashElapsedTimer(ctx);
   $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy || !(draft.text.trim() || draft.images.length);
-  $("send").firstChild.textContent = ctx?.record.sending ? (bashRunning ? "Running " : "Sending ") : streaming ? "Queue " : "Send ";
+  $("send").firstChild.textContent = ctx?.record.sending
+    ? (bashRunning ? "Running " : "Sending ")
+    : shellMode ? (streaming ? "Queue " : "Run ")
+    : streaming ? "Queue " : "Send ";
   $("send-mode").hidden = !streaming || bashRunning;
   $("send-mode").disabled = !canWrite(ctx);
   $("stop").hidden = !streaming && !bashRunning;
@@ -1966,6 +1987,12 @@ $("prompt").addEventListener("click", () => { setComposerCompact(false); renderC
 $("prompt").addEventListener("blur", () => hideCommandSuggestions());
 $("prompt").addEventListener("keydown", (event) => {
   if (commandKeydown(event)) return;
+  if (event.key === "Escape" && bangCommand(($("prompt").value || "").trim()) && !event.isComposing) {
+    event.preventDefault();
+    if (!current || current.record.sending) return;
+    current.record.draft.text = ""; current.record.draft.version++;
+    restoreDraft(); return;
+  }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault(); if (!$("send").disabled) $("composer").requestSubmit();
   }
