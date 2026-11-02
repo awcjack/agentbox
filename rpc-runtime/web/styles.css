@@ -84,7 +84,21 @@ dialog{border:1px solid #484038;background:#211f1c;color:var(--text);border-radi
 .session-tab { display: flex; flex: 0 0 auto; max-width: 240px; border: 1px solid #494641; border-radius: 8px 8px 0 0; }
 .session-tab.active { background: #393734; border-bottom-color: #e4bd87; }
 .session-tab button { color: inherit; background: transparent; border: 0; padding: 9px; cursor: pointer; }
-.session-tab-select { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab-select { display: inline-flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-tab-status { position: relative; flex: 0 0 12px; width: 12px; height: 12px; font-size: 0; color: #969696; }
+.session-tab-status::after { content: ""; position: absolute; inset: 2px; border-radius: 50%; background: currentColor; }
+.session-tab[data-activity="running"] .session-tab-status,
+.session-tab[data-activity="starting"] .session-tab-status,
+.session-tab[data-activity="stopping"] .session-tab-status { color: #9bb79c; }
+.session-tab:is([data-activity="running"], [data-activity="starting"], [data-activity="stopping"]) .session-tab-status::after {
+  inset: 0; background: transparent; border: 2px solid #737373; border-right-color: #dedede;
+  animation: session-progress 1s linear infinite;
+}
+.session-tab[data-activity="waiting_reply"] .session-tab-status { color: #e9b75f; }
+.session-tab[data-activity="waiting_action"] .session-tab-status { color: #ed987a; }
+.session-tab[data-activity="finished"] .session-tab-status { color: #91bdff; }
+.session-tab[data-activity="exited"] .session-tab-status { color: #c98e87; }
+.session-tab[data-activity="idle"] .session-tab-status { color: #969696; }
 .session-tab-close { flex-shrink: 0; }
 
 /* Compact conversation navigation: titles lead, activity stays at the right. */

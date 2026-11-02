@@ -426,9 +426,10 @@ async function assignSessionFolder(session, historical, value) {
   }
 }
 function renderSessions() {
+  // Refresh attention before tabs so finished/unread status colors stay current.
+  updateTabTitle();
   renderTabs();
   hideSessionPreview();
-  updateTabTitle();
   // Polls and streaming events must not detach the native drag source/targets.
   if (sessionDrag.isDragging()) return;
   rowSources.clear();
@@ -1253,7 +1254,7 @@ function renderTabs() {
   const root = $("session-tabs");
   const signature = JSON.stringify([current?.id, openTabs.map((id) => {
     const meta = sessions.find((session) => session.id === id);
-    return [id, displayTitle(meta), meta.cwd];
+    return [id, displayTitle(meta), meta?.cwd, meta ? attention.activity(meta) : null];
   })]);
   if (signature === tabsSignature) return;
   tabsSignature = signature;
@@ -1266,11 +1267,18 @@ function renderTabs() {
   root.replaceChildren(); root.hidden = !openTabs.length;
   for (const id of openTabs) {
     const meta = sessions.find((session) => session.id === id);
+    const activity = attention.activity(meta);
+    const status = activityLabel(meta);
     const group = element("div", "session-tab"); group.dataset.id = id;
+    group.dataset.activity = activity;
     group.classList.toggle("active", current?.id === id);
-    const button = element("button", "session-tab-select", displayTitle(meta));
+    const button = element("button", "session-tab-select");
     button.type = "button"; button.setAttribute("aria-current", current?.id === id ? "page" : "false");
-    button.title = `${displayTitle(meta)} — ${meta.cwd || ""}`;
+    button.title = `${displayTitle(meta)} — ${status}${meta.cwd ? `\n${meta.cwd}` : ""}`;
+    button.setAttribute("aria-label", button.title);
+    const symbol = element("span", "session-tab-status", sessionActivitySymbol(activity));
+    symbol.setAttribute("aria-hidden", "true");
+    button.append(symbol, document.createTextNode(displayTitle(meta)));
     button.addEventListener("click", () => activate(meta));
     button.addEventListener("keydown", (event) => {
       const index = openTabs.indexOf(id);
