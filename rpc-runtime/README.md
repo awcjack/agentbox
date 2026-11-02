@@ -132,7 +132,9 @@ its `--name--` history folder is attached to the **default** profile as an extra
 session directory. Those conversations stay listed under default (never hidden)
 until the project directory returns and discovery recreates the project profile.
 Resuming such a session falls back to the default workspace root when the saved
-cwd is temporarily unavailable.
+cwd is temporarily unavailable. If `sessionDirPrefix` itself does not exist yet
+(fresh install or empty volume), orphan scanning is a no-op rather than a
+startup failure.
 
 Image prompts include base64 overhead in the JSON body. For example, set
 `limits.maxBodyBytes` to `8388608` and `limits.maxRecordBytes` to `16777216` for
