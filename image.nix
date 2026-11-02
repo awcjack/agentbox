@@ -58,6 +58,32 @@
   pkg-config,
   gcc,
   zlib,
+  # Shared libraries for Playwright-downloaded Chromium / headless_shell (and
+  # similar FHS browser binaries). Must come from this image's nixpkgs so the
+  # glibc ABI matches; a newer nixpkgs (e.g. unstable) can require GLIBC_2.43+
+  # and break chrome inside the container.
+  glib,
+  nss,
+  nspr,
+  dbus,
+  at-spi2-atk,
+  atk,
+  cups,
+  expat,
+  libxkbcommon,
+  pango,
+  cairo,
+  alsa-lib,
+  libdrm,
+  libgbm,
+  libx11,
+  libxcomposite,
+  libxdamage,
+  libxext,
+  libxfixes,
+  libxrandr,
+  libxcb,
+  systemd,
   # Languages & runtimes
   go,
   nodejs_22,
@@ -1397,6 +1423,37 @@ let
     # Note: /etc excluded - we manage etc files manually in extraCommands
   };
 
+  # Runtime libs for Playwright's own Chromium builds (`playwright install`).
+  # Those ELFs are not autoPatchelf'd like nixpkgs' playwright-driver browsers;
+  # they resolve NEEDED libs via LD_LIBRARY_PATH / the dynamic linker search path.
+  # gcc.cc.lib + zlib stay here for Python C-extensions (numpy, etc.).
+  playwrightBrowserLibraryPath = lib.makeLibraryPath [
+    glib
+    nss
+    nspr
+    dbus
+    at-spi2-atk
+    atk
+    cups
+    expat
+    libxkbcommon
+    pango
+    cairo
+    alsa-lib
+    libdrm
+    libgbm
+    libx11
+    libxcomposite
+    libxdamage
+    libxext
+    libxfixes
+    libxrandr
+    libxcb
+    systemd
+    gcc.cc.lib
+    zlib
+  ];
+
   # User initialization script (called on container start)
   entrypointUserScript = writeShellScriptBin "entrypoint-user" ''
     #!/bin/bash
@@ -2005,9 +2062,10 @@ let
       export NIX_REMOTE="daemon"
       export PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH"
 
-      # Native library paths for Python C-extensions (numpy, manifold3d, etc.)
-      # gcc.cc.lib provides libstdc++.so.6; zlib provides libz.so.1
-      export LD_LIBRARY_PATH="${gcc.cc.lib}/lib:${zlib}/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+      # Native library paths for:
+      #   - Playwright/Chromium FHS deps (libglib-2.0, libnss3, libdrm, …)
+      #   - Python C-extensions (libstdc++.so.6, libz.so.1)
+      export LD_LIBRARY_PATH="${playwrightBrowserLibraryPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
       # Locale
       export LOCALE_ARCHIVE="${glibcLocales}/lib/locale/locale-archive"
@@ -2441,6 +2499,9 @@ in
       "SSL_CERT_FILE=${caCertPath}/etc/ssl/certs/ca-bundle.crt"
       "NIX_SSL_CERT_FILE=${caCertPath}/etc/ssl/certs/ca-bundle.crt"
       "LOCALE_ARCHIVE=${glibcLocales}/lib/locale/locale-archive"
+      # Same path as /etc/profile so non-login `agentbox exec` and Playwright
+      # child processes still resolve Chromium's shared libraries.
+      "LD_LIBRARY_PATH=${playwrightBrowserLibraryPath}"
     ]
     ++ lib.optionals withNix [
       # Route the agent's nix at the root daemon started by the entrypoint.

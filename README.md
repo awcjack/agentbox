@@ -1131,6 +1131,13 @@ Install Playwright separately and verify compatibility with packaged Chromium;
 this option does not supply Playwright, Firefox, or WebKit. In Playwright, set
 `chromiumSandbox: true` to retain sandboxing (its default is false).
 
+The base image also exports `LD_LIBRARY_PATH` with the shared libraries
+Playwright's own Chromium / `headless_shell` downloads need (`libglib-2.0`,
+`libnss3`, `libdrm`, …), taken from the same nixpkgs pin as the image so the
+glibc ABI matches. That covers `playwright install chromium` without requiring
+the on-demand desktop. Do not point `LD_LIBRARY_PATH` at a newer nixpkgs — a
+GLIBC symbol mismatch (for example `GLIBC_2.43`) will keep chrome from starting.
+
 **Chromium requires working unprivileged user namespaces.** The wrapper disables
 only the unavailable Nix-store setuid-helper fallback, not Chromium's namespace
 or seccomp-BPF sandbox. Check `unshare -Ur true` as the agent user in the actual
