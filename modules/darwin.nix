@@ -232,6 +232,21 @@ let
         allowedCommands = profile.allowedCommands;
       }
     ) cfg.settings.piRpcApi.profiles;
+    autoDiscoverProfiles = {
+      enable = cfg.settings.piRpcApi.autoDiscoverProfiles.enable;
+      inherit (cfg.settings.piRpcApi.autoDiscoverProfiles)
+        root
+        sessionDirPrefix
+        exclude
+        excludePrefixes
+        maxProfiles
+        args
+        ;
+      envReferences = cfg.settings.piRpcApi.autoDiscoverProfiles.env;
+    }
+    // lib.optionalAttrs (cfg.settings.piRpcApi.autoDiscoverProfiles.allowedCommands != null) {
+      allowedCommands = cfg.settings.piRpcApi.autoDiscoverProfiles.allowedCommands;
+    };
     limits = cfg.settings.piRpcApi.limits;
   };
   piRuntimeJson = pkgs.writeText "pi-runtime.json" (

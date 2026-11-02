@@ -1665,6 +1665,70 @@ in
             }
           );
           default.default = { };
+          description = ''
+            Explicit Pi RPC profiles. When autoDiscoverProfiles is enabled, each
+            immediate child directory under that root becomes an additional
+            profile unless its name is already declared here. Explicit entries
+            always win for name, cwd, sessionDir, args, and env.
+          '';
+        };
+        autoDiscoverProfiles = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = ''
+              At pi-rpc startup, scan autoDiscoverProfiles.root for immediate
+              child directories and synthesize one profile per directory. This is
+              soft workspace selection only: processes still share the container
+              UID, credentials, and filesystem.
+            '';
+          };
+          root = lib.mkOption {
+            type = lib.types.strMatching "/.*";
+            default = "/workspace";
+            description = "Absolute directory whose immediate children become profiles.";
+          };
+          sessionDirPrefix = lib.mkOption {
+            type = lib.types.strMatching "/.*";
+            default = "/home/agent/.pi/agent/sessions";
+            description = ''
+              Discovered profiles use sessionDir `$${sessionDirPrefix}/--<name>--`.
+              Keep explicit profile sessionDir values outside that prefix tree
+              (for example `/home/agent/.pi/agent/sessions/--workspace--`) so they
+              do not overlap.
+            '';
+          };
+          exclude = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            example = [ ".pnpm-store" "node_modules" ];
+            description = "Exact child directory names to ignore.";
+          };
+          excludePrefixes = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ "tmp-" ];
+            description = "Ignore child directories whose names start with any of these prefixes.";
+          };
+          maxProfiles = lib.mkOption {
+            type = lib.types.ints.between 1 1000;
+            default = 64;
+            description = "Fail startup if discovery would create more than this many profiles.";
+          };
+          args = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            description = "Extra Pi CLI args applied to every discovered profile.";
+          };
+          env = lib.mkOption {
+            type = lib.types.attrsOf (lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]*");
+            default = { };
+            description = "Destination environment names mapped to source environment variable names for discovered profiles.";
+          };
+          allowedCommands = lib.mkOption {
+            type = lib.types.nullOr (lib.types.listOf lib.types.str);
+            default = null;
+            description = "Optional command allowlist narrowing for discovered profiles.";
+          };
         };
         limits = {
           maxSessions = lib.mkOption {
