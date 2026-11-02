@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMermaidPreview, mermaidSvgImage, renderMermaidDiagram, resetMermaidLoader, sanitizeMermaidSvg } from "./mermaid-preview.mjs";
+import { createMermaidPreview, downloadMermaidSvg, mermaidSvgImage, renderMermaidDiagram, resetMermaidLoader, sanitizeMermaidSvg } from "./mermaid-preview.mjs";
 
 function installDocument() {
   class Node {
@@ -11,16 +11,33 @@ function installDocument() {
       this.attributes = {};
       this.className = "";
       this.handlers = {};
+      this.isConnected = false;
+      this.parent = null;
     }
-    append(...nodes) { this.children.push(...nodes); }
+    append(...nodes) {
+      for (const node of nodes) {
+        node.parent = this;
+        node.isConnected = true;
+        this.children.push(node);
+      }
+    }
+    remove() {
+      if (!this.parent) return;
+      this.parent.children = this.parent.children.filter((child) => child !== this);
+      this.parent = null;
+      this.isConnected = false;
+    }
+    click() { this.handlers.click?.(); }
     addEventListener(name, handler) { this.handlers[name] = handler; }
     setAttribute(name, value) { this.attributes[name] = value; }
     set innerHTML(_value) { throw new Error("Unsafe HTML assignment"); }
   }
   const previous = globalThis.document;
   const head = new Node("head");
+  const body = new Node("body");
   globalThis.document = {
     head,
+    body,
     createElement: (tag) => {
       const node = new Node(tag);
       Object.defineProperty(node, "className", {
@@ -155,13 +172,94 @@ test("createMermaidPreview renders images and surfaces failures as text", async 
     const ok = await createMermaidPreview("graph TD; A-->B", {
       render: async () => '<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>',
     });
-    assert.equal(ok.children[0].tag, "img");
-    assert.match(ok.children[0].src, /^data:image\/svg\+xml/);
+    assert.equal(ok.children[0].className, "mermaid-toolbar");
+    assert.equal(ok.children[0].children[0].textContent, "Download SVG");
+    assert.equal(ok.children[0].children[0].type, "button");
+    assert.equal(ok.children[1].tag, "img");
+    assert.match(ok.children[1].src, /^data:image\/svg\+xml/);
 
     const bad = await createMermaidPreview("nope", {
       render: async () => { throw new Error("Parse error"); },
     });
     assert.match(bad.className, /mermaid-error/);
     assert.equal(bad.children[0].textContent, "Mermaid preview failed: Parse error");
+    assert.equal(bad.children.some((child) => /Download SVG/.test(child.textContent)), false);
   } finally { restore(); }
+});
+
+test("downloadMermaidSvg sanitizes and saves the rendered SVG", () => {
+  const restore = installDocument();
+  const previous = {
+    Blob: globalThis.Blob,
+    URL: globalThis.URL,
+    setTimeout: globalThis.setTimeout,
+  };
+  try {
+    const blobs = [];
+    const urls = [];
+    class FakeBlob {
+      constructor(parts, options) {
+        this.parts = parts;
+        this.type = options?.type || "";
+        blobs.push(this);
+      }
+    }
+    globalThis.Blob = FakeBlob;
+    globalThis.URL = {
+      createObjectURL(blob) {
+        const url = `blob:mermaid-${urls.length}`;
+        urls.push({ url, blob });
+        return url;
+      },
+      revokeObjectURL(url) { urls.push({ revoked: url }); },
+    };
+    globalThis.setTimeout = (fn) => { fn(); return 0; };
+
+    const result = downloadMermaidSvg(
+      '<svg xmlns="http://www.w3.org/2000/svg"><script>evil()</script><foreignObject width="40" height="20"><div>Node</div></foreignObject></svg>',
+      {
+        filename: "diagram.svg",
+        createObjectURL: globalThis.URL.createObjectURL,
+        revokeObjectURL: globalThis.URL.revokeObjectURL,
+        BlobCtor: FakeBlob,
+      },
+    );
+    assert.equal(result.filename, "diagram.svg");
+    assert.doesNotMatch(result.svg, /<script/i);
+    assert.doesNotMatch(result.svg, /foreignObject/i);
+    assert.match(result.svg, /<text[^>]*>Node<\/text>/);
+    assert.equal(blobs.length, 1);
+    assert.equal(blobs[0].type, "image/svg+xml;charset=utf-8");
+    assert.equal(blobs[0].parts[0], result.svg);
+    assert.equal(document.body.children.length, 0);
+    assert.equal(urls[0]?.url, "blob:mermaid-0");
+    assert.ok(urls.some((entry) => entry.revoked === "blob:mermaid-0"));
+  } finally {
+    globalThis.Blob = previous.Blob;
+    globalThis.URL = previous.URL;
+    globalThis.setTimeout = previous.setTimeout;
+    restore();
+  }
+});
+
+test("createMermaidPreview Download SVG uses the rendered source", async () => {
+  const restore = installDocument();
+  try {
+    const downloaded = [];
+    const root = await createMermaidPreview("graph TD; A-->B", {
+      render: async () => '<svg xmlns="http://www.w3.org/2000/svg"><text>A</text></svg>',
+      downloadSvg: (svg, options) => {
+        downloaded.push({ svg, options });
+        return { filename: options.filename, svg };
+      },
+      filename: "chart.svg",
+    });
+    const button = root.children[0].children[0];
+    assert.equal(button.textContent, "Download SVG");
+    button.handlers.click();
+    assert.equal(downloaded.length, 1);
+    assert.match(downloaded[0].svg, /<text>A<\/text>/);
+    assert.equal(downloaded[0].options.filename, "chart.svg");
+  } finally { restore();
+  }
 });
