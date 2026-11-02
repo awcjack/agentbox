@@ -47,6 +47,12 @@ are cached per selection, and can be reloaded with Refresh. TUI-only built-ins
 are not advertised. `/auto on`, `/auto off`, and `/auto status` are suggested only
 when the process actually registers `auto`.
 
+Prefix a message with `!` to run a shell command immediately through Pi's RPC
+`bash` command (OpenCode / Pi TUI parity). Output streams into the transcript and
+is included in the next model context. Use `!!` to run a command while excluding
+its output from context. Attachments are not allowed with shell prefixes. Stop
+sends `abort_bash` while a shell command is running.
+
 ### Persistent defaults
 
 Open **Settings** in the session sidebar (the sessions drawer on mobile) with an
@@ -208,9 +214,11 @@ The configured executable must be absolute and must resolve at startup to a
 path under `/nix/store`; the resolved path, not the mutable symlink, is used for
 all children. Unknown keys at every RPC configuration level are startup errors.
 
-Profile `allowedCommands` may narrow the global command set. `bash`, session
+Profile `allowedCommands` may narrow the global command set. Session
 switch/fork/clone/new-session, HTML export, and raw `extension_ui_response` are
-always forbidden. Profile arguments also cannot set supervisor-owned mode,
+always forbidden. User shell (`bash`) is allowed by default so the web UI can
+run OpenCode-style `!command` / `!!command` without prompting the model.
+Profile arguments also cannot set supervisor-owned mode,
 name, session, session ID, session directory, continue, resume, or fork flags.
 Extension dialogs must use the checked UI endpoint.
 

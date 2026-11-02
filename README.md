@@ -762,8 +762,10 @@ provider patches and portable workspace check are all maintained in Agentbox;
 consumers only configure host paths, authentication, networking and services.
 
 `profiles`, command allowlists, token scopes, origins, and resource/time limits
-are typed. Session-switch/fork/clone/new-session, direct bash, HTML export, and
-raw UI-response commands are always forbidden by the supervisor. Extension UI
+are typed. Session-switch/fork/clone/new-session, HTML export, and raw
+UI-response commands are always forbidden by the supervisor. User shell (`bash`)
+is allowed so the web composer can run OpenCode-style `!command` / `!!command`
+without prompting the model (same as Pi's interactive TUI). Extension UI
 dialogs use the checked `/ui` endpoint. Run `agentbox pi-rpc` to show the URL and
 check health; see `rpc-runtime/README.md` for routes and scopes.
 The container entrypoint bounds the API log and caps each backoff-controlled

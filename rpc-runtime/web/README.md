@@ -119,6 +119,8 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   into older messages reduces the composer to a compact row; clicking or typing
   in the prompt, or returning to the latest messages, restores its previous size.
   Drafts are preserved, Send/Stop remain available, and agent requests stay visible.
+  Prefix with `!` (or `!!` to hide output from the model) to run a shell command
+  immediately, matching OpenCode and Pi TUI behavior.
 - Safe Markdown subset: headings, paragraphs, lists, quotes, rules, emphasis,
   links, pipe tables (including column alignment), and fenced code with copy/select fallback. `md`/`markdown` fences offer a
   Preview/Source toggle using the same safe renderer (nested fences stay source).
