@@ -17,19 +17,21 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 
 - Responsive chat workspace with a mobile session drawer, profile filtering,
   named sessions, and persisted-history resume. The denser charcoal sidebar lists
-  browser **Recents** first, then the **Projects** folder tree, then a quieter
-  **Archived** disclosure. Archiving removes a conversation from Recents (and from
-  this browser's saved Recents preference) so it only appears under Archived.
-  Title-only rows use a soft active accent bar, right-side
-  progress spinners and blue unread dots. Status, profile, cwd and date stay in
-  tooltips and accessible labels. Rename and archive controls appear on hover/focus
-  and stay visible on touch devices.
-- New session selects a session folder, without a profile or directory picker.
-  Pick an existing label from the list, choose **Create new folder…** to enter a
-  name such as `Work/Project`, or leave **Ungrouped**. Pi starts in the configured
-  profile cwd. A folder heading's **+** action opens the same dialog with that
-  group preselected, even while collapsed. It does not toggle the heading.
-  Creation expands the chosen group.
+  browser **Recents** first, then **Projects** (one root per configured/discovered
+  profile, with that profile's cwd), then a quieter **Archived** disclosure.
+  Archiving removes a conversation from Recents (and from this browser's saved
+  Recents preference) so it only appears under Archived. Title-only rows use a soft
+  active accent bar, right-side progress spinners and blue unread dots. Status,
+  profile, cwd and date stay in tooltips and accessible labels. Rename and archive
+  controls appear on hover/focus and stay visible on touch devices.
+- **Projects are profiles.** Each sidebar project root is a Pi RPC profile
+  (`cwd` + `sessionDir`). Use a project's **+** (or a nested folder **+**) to start
+  a session in that working directory. Session folders remain organizational labels
+  *inside* a project; they do not change cwd. New Session shows the chosen project
+  and optional folder, without a separate profile or server-directory picker.
+  Pick an existing folder label, choose **Create new folder…** for a name such as
+  `Work/Project`, or leave **Ungrouped**. A folder heading's **+** preselects that
+  group without toggling collapse. Creation expands the chosen project and group.
 - Each opened session has a tab. Switch tabs with the mouse or Left/Right,
   Home/End keys; drafts and approvals remain independent. Closing a tab leaves
   Pi running and its draft available when reopened from the sidebar. End & archive
@@ -43,34 +45,36 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   to collapse to a 64px conversation-bubble rail; drag right or press Right to
   expand. Bubbles have status-colored auras and title/status previews on hover
   or keyboard focus, displayed outside the scrolling rail.
-- Create sessions in nested sidebar folders such as `Work/Agentbox` using New
-  session or a folder heading's **+** action. Use **New folder** next to Refresh
-  to add an empty group in this browser before any session exists; drag sessions
-  into it or use its **+** action afterward. Empty folder labels are a local
-  display preference (`agentbox.pi.pinned-folders.v1`), not server state. Folder
-  membership is saved on the server, keyed by profile and native conversation ID,
-  so it follows resume/archive and runtime restarts across browsers and devices.
+- Create sessions in nested folders under a project (for example `Work/Agentbox`)
+  using New session or a folder/project **+** action. Use **New folder** next to
+  Refresh to add an empty group under the current project before any session
+  exists; drag sessions into it or use its **+** afterward. Empty folder labels are
+  a local display preference (`agentbox.pi.pinned-folders.v1`, preferably
+  `[profile, folder]` tuples; legacy bare strings still load), not server state.
+  Folder membership is saved on the server, keyed by profile and native conversation
+  ID, so it follows resume/archive and runtime restarts across browsers and devices.
   Other devices refresh assignments every 15 seconds, or immediately with Refresh.
   Changes require `sessions:write` and persistent profile session storage. New
   sessions receive their assignment before the first prompt is written to Pi
   history. Existing browser-saved folders are imported at login when no server
   assignment exists; failed imports are retained locally for retry. Server
-  assignments win. Live and resumeable history share one folder tree; sessions
-  without an assignment appear under **Ungrouped**. Click a folder heading (or press
-  Enter/Space when focused) to collapse or expand it; this state survives sidebar
-  refreshes. Closed folders still expose session bubbles when the sidebar itself
-  is collapsed.
-- Use a folder heading's **×** action to delete that label. Confirming calls
-  `DELETE /v1/session-folders?profile=...` with `{folder}`, which ungroups every
-  matching assignment (exact or nested) across the selected profiles and moves
-  those sessions to **Ungrouped**. Conversations are kept; only the folder label
-  is removed. Browser-only empty pins under that path are cleared from this
-  device. Ungrouped itself cannot be deleted.
-- On desktop, drag a session onto a folder heading or its contents to move it.
-  Drop onto **Ungrouped** to remove its folder assignment; this target remains
-  available even when empty. Closed folder headings accept drops, and the target
-  highlights while dragging. Moves use the shared server-side assignments.
-  Session rows show Archive instead of a Move to folder button.
+  assignments win. Live and resumeable history share one tree per project; sessions
+  without an assignment appear under that project's **Ungrouped**. Click a project
+  or folder heading (or press Enter/Space when focused) to collapse or expand it;
+  this state survives sidebar refreshes. Closed folders still expose session bubbles
+  when the sidebar itself is collapsed.
+- Use a folder heading's **×** action to delete that label within its project.
+  Confirming calls `DELETE /v1/session-folders?profile=...` with `{folder}`, which
+  ungroups every matching assignment (exact or nested) in that project and moves
+  those sessions to **Ungrouped**. Conversations are kept; only the folder label is
+  removed. Browser-only empty pins under that path for the project are cleared from
+  this device. Project roots and Ungrouped itself cannot be deleted.
+- On desktop, drag a session onto a folder heading or its contents to move it
+  within the same project. Cross-project drops are rejected. Drop onto **Ungrouped**
+  to remove its folder assignment; this target remains available even when empty.
+  Closed folder headings accept drops, and the target highlights while dragging.
+  Moves use the shared server-side assignments. Session rows show Archive instead of
+  a Move to folder button.
 - Use **✎ Rename session** on a running runtime row to persist its name through
   Pi's `set_session_name` RPC (write access required). Reopen historical or
   archived conversations first to rename them. Cancel leaves the name unchanged.
@@ -221,8 +225,9 @@ Settings includes browser-local display preferences (no credentials are stored):
   and model ID. The current model remains visible; **Show all models** clears the
   hidden list. New models are visible by default. This does not change model access,
   Pi defaults, or other browsers.
-- **Hide Profile section:** hides the sidebar filter and resets it to All profiles.
-  New session always uses the session-folder picker.
+- **Hide Profile section:** hides the sidebar filter and resets it to All profiles
+  (every project remains visible under Projects). New session still binds to a
+  project via the sidebar **+** / current selection and the session-folder picker.
 Preferences persist across page reloads when local storage is available; if storage
 is blocked, the UI reports that changes apply only to the current page.
 

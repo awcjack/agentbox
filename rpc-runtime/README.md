@@ -93,22 +93,26 @@ not a misleading off state. The browser refuses to send `/auto` to the model in
 that case. Deploy the updated runtime and policy extension and start a new Pi
 session; merely refreshing the page does not upgrade an existing child process.
 
-Profiles define administrator-owned workspace roots and history directories.
-The New Session dialog selects a sidebar session-folder label, leaving the
-working directory at the configured profile cwd. Each sidebar folder has a **+**
-action that preselects that group without toggling its collapsed state. API clients
-may still request an explicit cwd within a profile root; both the path and its
-canonical target are checked so symlinks cannot escape that root.
-The UI uses native Pi sessions and credentials;
-it does not convert OpenCode conversations or import OpenCode authentication.
-Each additional profile needs a distinct, non-overlapping persistent session
-directory. Pi provider credentials in environment variables must be explicitly
-mapped into the profile, separate from the browser's RPC password.
+Profiles define administrator-owned workspace roots and history directories. In the
+browser UI they appear as **Projects**: each project root is one profile
+(`cwd` + `sessionDir`). Choosing a project's **+** (or New Session after selecting
+that project) starts Pi in that profile's cwd. Nested sidebar folders are only
+organizational labels inside a project; they do not change the working directory.
+The New Session dialog shows the selected project and an optional session-folder
+label. Each project/folder heading has a **+** that preselects that target without
+toggling collapse. API clients may still request an explicit cwd within a profile
+root; both the path and its canonical target are checked so symlinks cannot escape
+that root. The UI uses native Pi sessions and credentials; it does not convert
+OpenCode conversations or import OpenCode authentication. Each additional profile
+needs a distinct, non-overlapping persistent session directory. Pi provider
+credentials in environment variables must be explicitly mapped into the profile,
+separate from the browser's RPC password.
 
 Optional `autoDiscoverProfiles` scans one absolute root at supervisor startup and
 synthesizes a profile for each immediate child directory (`cwd=<root>/<name>`,
-`sessionDir=<sessionDirPrefix>/--<name>--`). Explicit `profiles` entries always
-win on name conflicts. Discovery skips invalid profile names, excluded names,
+`sessionDir=<sessionDirPrefix>/--<name>--`). Those discovered profiles become
+Projects in the sidebar automatically. Explicit `profiles` entries always win on
+name conflicts. Discovery skips invalid profile names, excluded names,
 `excludePrefixes` (default `tmp-`), non-directories, and symlink targets outside
 the root. It fails closed when the root is missing or discovery would exceed
 `maxProfiles`. Keep the explicit default `sessionDir` as a sibling path such as
