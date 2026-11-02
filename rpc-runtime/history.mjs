@@ -363,3 +363,22 @@ export async function listSessionFolders(root, profile, profileName) {
     return folders.sort((a, b) => a.id.localeCompare(b.id));
   } finally { await storage.close(); }
 }
+
+export function sessionFolderMatches(path, folder) {
+  return folder === path || folder.startsWith(`${path}/`);
+}
+
+// Ungroup every persisted assignment under folder (exact or nested). Empty
+// tombstones prevent older browsers from resurrecting removed labels.
+export async function deleteSessionFolder(root, profile, profileName, folder) {
+  folder = normalizeSessionFolder(folder);
+  if (!folder) throw new Error("folder must not be empty");
+  const matches = (await listSessionFolders(root, profile, profileName))
+    .filter((item) => item.folder && sessionFolderMatches(folder, item.folder));
+  const ungrouped = [];
+  for (const item of matches) {
+    await writeSessionFolder(root, profile, profileName, item.id, "");
+    ungrouped.push({ id: item.id, folder: "" });
+  }
+  return { folder, ungrouped };
+}

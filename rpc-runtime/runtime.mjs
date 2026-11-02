@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, selectFolder } from "./folders.mjs";
 import { discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
@@ -1152,7 +1152,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         try { return json(response, 200, await browseFolders(config.profiles, url.searchParams.get("path"))); }
         catch { throw new HttpError(400, "invalid_folder", "Choose an accessible folder within a configured workspace."); }
       }
-      if (url.pathname === "/v1/session-folders" && ["GET", "PUT"].includes(request.method)) {
+      if (url.pathname === "/v1/session-folders" && ["GET", "PUT", "DELETE"].includes(request.method)) {
         authenticate(request, config, request.method === "GET" ? "sessions:read" : "sessions:write");
         const profileName = url.searchParams.get("profile");
         if (!config.profiles.has(profileName)) throw new HttpError(400, "invalid_profile", "a configured profile is required");
@@ -1168,16 +1168,26 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           }
           try { folder = normalizeSessionFolder(body.folder); }
           catch (error) { throw new HttpError(400, "invalid_session_folder", error.message); }
+        } else if (request.method === "DELETE") {
+          body = await readJson(request, config.limits.maxBodyBytes);
+          if (!body || typeof body !== "object" || Array.isArray(body)
+            || Object.keys(body).some((key) => key !== "folder")
+            || typeof body.folder !== "string") {
+            throw new HttpError(400, "invalid_session_folder", "expected {folder: string}");
+          }
+          try { folder = normalizeSessionFolder(body.folder); }
+          catch (error) { throw new HttpError(400, "invalid_session_folder", error.message); }
+          if (!folder) throw new HttpError(400, "invalid_session_folder", "folder must not be empty");
         }
         let root;
         try { root = await sessionFolderDirectory(profile); }
         catch (error) { throw new HttpError(409, "session_folders_unavailable", error.message); }
-        if (body) {
+        if (request.method === "PUT" && body) {
           const owned = [...sessions.values()].some((session) => session.profileName === profileName && session.nativeSessionId === body.id && !session.exit);
           if (!owned && !await resolveHistorySession(profile, body.id)) throw new HttpError(404, "session_not_found", "an exact, unique Pi session for this profile was not found");
         }
         try {
-          if (!body) {
+          if (request.method === "GET") {
             const assignments = new Map((await listSessionFolders(root, profile, profileName)).map((item) => [item.id, item.folder]));
             // Pi may not persist its header until the first prompt. Include new
             // sessions immediately so other browsers see their chosen group.
@@ -1185,6 +1195,22 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
               if (session.profileName === profileName && session.folder !== undefined && !assignments.has(session.nativeSessionId)) assignments.set(session.nativeSessionId, session.folder);
             }
             return json(response, 200, { folders: [...assignments].map(([id, folder]) => ({ id, folder })) });
+          }
+          if (request.method === "DELETE") {
+            const result = await deleteSessionFolder(root, profile, profileName, folder);
+            const ids = new Set(result.ungrouped.map((item) => item.id));
+            // Active sessions may not have a native JSONL yet; still clear their
+            // live folder label so other browsers stop showing the group.
+            for (const session of sessions.values()) {
+              if (session.profileName !== profileName || !session.folder || !sessionFolderMatches(folder, session.folder)) continue;
+              if (!ids.has(session.nativeSessionId)) {
+                await writeSessionFolder(root, profile, profileName, session.nativeSessionId, "");
+                result.ungrouped.push({ id: session.nativeSessionId, folder: "" });
+                ids.add(session.nativeSessionId);
+              }
+              session.folder = "";
+            }
+            return json(response, 200, result);
           }
           folder = await writeSessionFolder(root, profile, profileName, body.id, folder, { importOnly: body.importOnly });
           for (const session of sessions.values()) {
