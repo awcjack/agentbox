@@ -16,10 +16,12 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 ## Features
 
 - Responsive chat workspace with a mobile session drawer, profile filtering,
-  named sessions, and persisted-history resume. The compact sidebar uses title-only
-  rows, subtle selection, right-side progress spinners and blue unread dots.
-  Status, profile, cwd and date stay in tooltips and accessible labels. Rename and
-  archive controls appear on hover/focus and stay visible on touch devices.
+  named sessions, and persisted-history resume. The compact sidebar labels the
+  folder tree **Projects** and lists **Recents** from this browser after a session
+  is opened. Title-only rows use subtle selection, right-side progress spinners and
+  blue unread dots. Status, profile, cwd and date stay in tooltips and accessible
+  labels. Rename and archive controls appear on hover/focus and stay visible on
+  touch devices.
 - New session selects a session folder, without a profile or directory picker.
   Pick an existing label from the list, choose **Create new folder…** to enter a
   name such as `Work/Project`, or leave **Ungrouped**. Pi starts in the configured
@@ -117,6 +119,13 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   Raw HTML is never interpreted.
   Remote Markdown images are not fetched; only validated inline raster data is
   displayed. Tool input/output/details and nonempty thinking are collapsible.
+- After each user turn, write/edit/patch/delete/move tool calls are summarized in
+  an **Edited N files** card with approximate `+`/`-` line counts from tool
+  arguments (not a git diff). The first three paths are listed; the rest expand
+  under **Show more files**. Failed tool results are omitted. No undo/backend.
+  Click a path to open a desktop **file preview** pane (Markdown rendered safely,
+  other text as monospace) sourced from the latest matching write/edit/read in the
+  transcript. Escape or × closes the pane; it is not a live filesystem browser.
 - Confirm, select, input, and editor approvals, including cancellation and
   supervisor-driven expiry/resolution across browsers. Approval edits and message
   drafts survive session switches within the current tab, not reload/logout.
@@ -246,6 +255,8 @@ node --check web/app.mjs
 node --check web/transport.mjs
 node --check web/markdown.mjs
 node --check web/mermaid-preview.mjs
+node --check web/file-changes.mjs
+node --check web/context-pane.mjs
 ```
 
 ### Optional Real-Browser Smoke
