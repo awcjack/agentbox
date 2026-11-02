@@ -78,8 +78,9 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/v1/profiles") return json(response, 200, { profiles: ["default"] });
     if (url.pathname === "/v1/folders") {
-      directoryBrowseCalls++;
+      // Root listing feeds Projects cwd labels; only path browsing counts as directory UI use.
       if (!url.searchParams.has("path")) return json(response, 200, { roots: [{ profile: "default", path: "/workspace" }] });
+      directoryBrowseCalls++;
       const path = url.searchParams.get("path");
       return json(response, 200, { path, root: "/workspace", parent: path === "/workspace" ? null : "/workspace", directories: path === "/workspace" ? [{ name: "project", path: "/workspace/project" }] : [] });
     }
@@ -362,6 +363,8 @@ try {
       const sessionName = `${label} coding session [slow snapshot]`;
       assert.equal(await page.locator("#new-profile").count(), 0, "new session has no profile picker");
       assert.equal(await page.getByRole("button", { name: "Browse", exact: true }).count(), 0);
+      assert.match(await page.locator("#new-project-label").textContent(), /default/);
+      assert.ok((await page.locator("#new-project-label").textContent()).includes("/workspace"));
       await page.locator("#new-folder").selectOption("__create__");
       await page.locator("#new-folder-create").fill("Work/Agentbox");
       await page.locator("#new-name").fill(sessionName);
@@ -370,9 +373,12 @@ try {
       const session = [...sessions.values()].find((session) => session.name === sessionName);
       assert.ok(session);
       const creation = calls.find((call) => call.method === "POST" && call.body?.name === sessionName).body;
+      assert.equal(creation.profile, "default");
       assert.equal(creation.folder, "Work/Agentbox");
-      assert.equal(creation.cwd, undefined, "session labels never change cwd");
+      assert.equal(creation.cwd, undefined, "project selection uses profile cwd, not an explicit cwd field");
       assert.equal(directoryBrowseCalls, 0, "new session never browses server directories");
+      await openSidebar();
+      assert.equal(await page.locator('.session-project[data-project-profile="default"]').count(), 1, "profiles appear as Projects");
       assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 1);
       await until(() => calls.some((call) => call.id === session.id && call.command?.type === "get_state"), "initial state RPC arrived");
       assert.equal(calls.some((call) => call.id === session.id && call.command?.type === "get_available_models"), false, "catalog waits for initial snapshot");
@@ -401,13 +407,17 @@ try {
         await page.locator("#folder-name").fill("Inbox/Empty");
         await page.locator("#create-folder").click();
         await until(() => page.locator('.session-folder[data-folder-path="Inbox/Empty"] .folder-empty').count().then((count) => count === 1), "empty pinned folder appears");
-        assert.equal(await page.evaluate(() => localStorage.getItem("agentbox.pi.pinned-folders.v1")), JSON.stringify(["Inbox/Empty"]));
-        const parentFolder = page.locator('summary[data-folder-key="main:/Work"]').locator("..");
+        assert.equal(
+          await page.evaluate(() => localStorage.getItem("agentbox.pi.pinned-folders.v1")),
+          JSON.stringify([["default", "Inbox/Empty"], ["default", "Work/Agentbox"]]),
+        );
+        const parentFolder = page.locator('summary[data-folder-key="main:default:/Work"]').locator("..");
         await parentFolder.locator(":scope > summary").click();
         assert.equal(await parentFolder.getAttribute("open"), null);
-        await page.getByRole("button", { name: "New session in Work", exact: true }).click();
+        await page.getByRole("button", { name: "New session in default / Work", exact: true }).click();
         assert.equal(await parentFolder.getAttribute("open"), null, "folder + does not toggle collapse");
         assert.equal(await page.locator("#new-folder").inputValue(), "Work");
+        assert.match(await page.locator("#new-project-label").textContent(), /default/);
         assert.equal(await page.locator("#new-folder-create-wrap").isHidden(), true);
         assert.ok((await page.locator("#new-folder option").evaluateAll((options) => options.map((option) => option.value))).includes("Work/Agentbox"));
         assert.ok((await page.locator("#new-folder option").evaluateAll((options) => options.map((option) => option.value))).includes("__create__"));
@@ -418,7 +428,7 @@ try {
         await until(() => page.locator("#session-status").textContent().then((text) => text === "READY"), "second tab ready");
         const second = [...sessions.values()].find((item) => item.name === `${label} second tab`);
         assert.equal(serverFolders.get(second.nativeSessionId), "Work");
-        assert.equal(await page.locator('summary[data-folder-key="main:/Work"]').locator("..").getAttribute("open"), "");
+        assert.equal(await page.locator('summary[data-folder-key="main:default:/Work"]').locator("..").getAttribute("open"), "");
         await page.locator("#prompt").fill("Second session draft");
         assert.equal(await page.locator("#session-tabs .session-tab-select").count(), 2);
         await page.locator("#session-tabs .session-tab-select").first().click();
@@ -528,7 +538,7 @@ try {
       assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox");
       await page.getByRole("button", { name: "Delete folder Work", exact: true }).click();
       assert.equal(await page.locator("#delete-folder-dialog").isVisible(), true);
-      assert.equal(await page.locator("#delete-folder-description").textContent(), "Work");
+      assert.equal(await page.locator("#delete-folder-description").textContent(), "default / Work");
       await page.locator("#cancel-delete-folder").click();
       assert.equal(await page.locator("#delete-folder-dialog").isVisible(), false);
       assert.equal(serverFolders.get(session.nativeSessionId), "Work/Agentbox", "cancel keeps nested assignment");

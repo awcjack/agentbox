@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import {
   compareArchivedSessions, resolveRecentEntries, initSidebarResize, initSessionDragDrop, sessionActivitySymbol,
   sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders,
-  readPinnedFolders, savePinnedFolders, folderOpenKey, isFolderOpen, partitionFolderEntries,
+  readPinnedFolders, savePinnedFolders, pinnedFoldersForProfile, folderOpenKey, isFolderOpen,
+  partitionFolderEntries, partitionProjectEntries,
 } from "./sidebar.mjs";
 
 test("session icons distinguish every activity and retain history and unknown fallbacks", () => {
@@ -397,6 +398,8 @@ test("session drag moves to the closest nested folder, clears before move, and e
 
 test("folder open keys share one main tree and fall back to legacy live/past", () => {
   assert.equal(folderOpenKey("main", "Work/Agentbox"), "main:/Work/Agentbox");
+  assert.equal(folderOpenKey("main", "", "default"), "main:default:");
+  assert.equal(folderOpenKey("main", "Work", "default"), "main:default:/Work");
   assert.equal(folderOpenKey("main", ""), "main:");
   const map = new Map([["live:/Work", false]]);
   assert.equal(isFolderOpen(map, "main", "Work"), false);
@@ -404,6 +407,23 @@ test("folder open keys share one main tree and fall back to legacy live/past", (
   assert.equal(isFolderOpen(map, "main", "Work"), true);
   assert.equal(isFolderOpen(new Map(), "main", "Inbox"), true);
   assert.equal(isFolderOpen(new Map([["past:", false]]), "main", ""), false);
+  // Profile-scoped keys fall back to flat pre-project keys.
+  assert.equal(isFolderOpen(new Map([["main:/Work", false]]), "main", "Work", "default"), false);
+  assert.equal(isFolderOpen(new Map([["main:default:/Work", true], ["main:/Work", false]]), "main", "Work", "default"), true);
+});
+
+test("partitionProjectEntries keeps configured profile order", () => {
+  const entries = [
+    { session: { id: "1", profile: "agentbox" }, historical: false },
+    { session: { id: "2", profile: "default" }, historical: true },
+    { session: { id: "3", profile: "agentbox" }, historical: true },
+    { session: { id: "4", profile: "extra" }, historical: false },
+  ];
+  const byProfile = partitionProjectEntries(entries, ["default", "agentbox"]);
+  assert.deepEqual([...byProfile.keys()], ["default", "agentbox", "extra"]);
+  assert.equal(byProfile.get("default").length, 1);
+  assert.equal(byProfile.get("agentbox").length, 2);
+  assert.equal(byProfile.get("extra")[0].session.id, "4");
 });
 
 test("partitionFolderEntries merges live and history into one Ungrouped/folder set", () => {
@@ -535,21 +555,64 @@ const pinnedStorageKey = "agentbox.pi.pinned-folders.v1";
 
 test("pinned folder storage normalizes, sorts, and clears empty sets", () => {
   const storage = folderStorage();
-  assert.deepEqual([...readPinnedFolders(storage)], []);
-  assert.equal(savePinnedFolders(storage, new Set([" / Work // Nested / ", "Alpha", ""])), true);
+  assert.deepEqual(readPinnedFolders(storage), []);
+  assert.equal(savePinnedFolders(storage, [" / Work // Nested / ", "Alpha", ""]), true);
   assert.equal(storage.values.get(pinnedStorageKey), JSON.stringify(["Alpha", "Work/Nested"]));
-  assert.deepEqual([...readPinnedFolders(storage)], ["Alpha", "Work/Nested"]);
-  assert.equal(savePinnedFolders(storage, new Set()), true);
+  assert.deepEqual(readPinnedFolders(storage), [
+    { profile: null, folder: "Alpha" },
+    { profile: null, folder: "Work/Nested" },
+  ]);
+  assert.equal(savePinnedFolders(storage, []), true);
   assert.equal(storage.values.has(pinnedStorageKey), false);
-  assert.deepEqual([...readPinnedFolders(storage)], []);
+  assert.deepEqual(readPinnedFolders(storage), []);
 });
 
-test("pinned folder storage rejects invalid names and survives corrupt JSON", () => {
+test("pinned folders can be scoped to a project/profile", () => {
   const storage = folderStorage();
-  assert.equal(savePinnedFolders(storage, new Set(["Work/../Nope"])), false);
+  assert.equal(savePinnedFolders(storage, [
+    { profile: "default", folder: "Work" },
+    { profile: "agentbox", folder: "UI" },
+    "Shared",
+    ["default", "Inbox"],
+  ]), true);
+  assert.equal(
+    storage.values.get(pinnedStorageKey),
+    JSON.stringify(["Shared", ["agentbox", "UI"], ["default", "Inbox"], ["default", "Work"]]),
+  );
+  const pins = readPinnedFolders(storage);
+  assert.deepEqual([...pinnedFoldersForProfile(pins, "default")].sort(), ["Inbox", "Shared", "Work"]);
+  assert.deepEqual([...pinnedFoldersForProfile(pins, "agentbox")].sort(), ["Shared", "UI"]);
+  assert.deepEqual([...pinnedFoldersForProfile(pins, "other")].sort(), ["Shared"]);
+});
+
+test("pinned folder storage skips invalid names and survives corrupt JSON", () => {
+  const storage = folderStorage();
+  assert.equal(savePinnedFolders(storage, ["Work/../Nope"]), true);
   assert.equal(storage.values.has(pinnedStorageKey), false);
+  assert.equal(savePinnedFolders(storage, ["Good", "Work/../Nope", " / Trimmed / "]), true);
+  assert.equal(storage.values.get(pinnedStorageKey), JSON.stringify(["Good", "Trimmed"]));
   storage.setItem(pinnedStorageKey, "{not-json");
-  assert.deepEqual([...readPinnedFolders(storage)], []);
+  assert.deepEqual(readPinnedFolders(storage), []);
   storage.setItem(pinnedStorageKey, JSON.stringify(["Good", 12, null, " / Trimmed / "]));
-  assert.deepEqual([...readPinnedFolders(storage)], ["Good", "Trimmed"]);
+  assert.deepEqual(readPinnedFolders(storage), [
+    { profile: null, folder: "Good" },
+    { profile: null, folder: "Trimmed" },
+  ]);
+});
+
+test("session drag rejects drop targets from a different project", () => {
+  const s = dragSetup();
+  s.source.session.profile = "default";
+  s.folder.dataset.projectProfile = "agentbox";
+  s.fire("dragstart");
+  assert.equal(s.fire("dragover", s.folder).defaultPrevented, false);
+  assert.equal(s.folder.classes.has("drag-over"), false);
+  assert.equal(s.fire("drop", s.folder).defaultPrevented, false);
+  assert.deepEqual(s.moves, []);
+  assert.equal(s.ends(), 1);
+  s.folder.dataset.projectProfile = "default";
+  s.fire("dragstart");
+  assert.equal(s.fire("dragover", s.folder).defaultPrevented, true);
+  s.fire("drop", s.folder);
+  assert.deepEqual(s.moves, [[s.source, "Work"]]);
 });
