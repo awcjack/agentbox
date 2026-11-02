@@ -19,6 +19,35 @@ export function compareArchivedSessions(a, b) {
   return String(b.createdAt || b.modifiedAt || "").localeCompare(String(a.createdAt || a.modifiedAt || ""));
 }
 
+// Resolve browser Recents against live + history. Archived conversations belong
+// under Archived, not Recents, even when includeArchived history still lists them.
+export function resolveRecentEntries(recentSessions, {
+  sessions = [],
+  history = [],
+  filter = "",
+  activeNative = new Set(),
+  isArchived = () => false,
+  limit = 8,
+} = {}) {
+  return recentSessions
+    .map((entry) => {
+      const liveMatch = sessions.find((session) => session.id === entry.id);
+      if (liveMatch) return { session: liveMatch, historical: false };
+      const historyMatch = history.find((session) => session.id === entry.id && (!filter || session.profile === filter));
+      if (
+        historyMatch
+        && !activeNative.has(`${historyMatch.profile}:${historyMatch.id}`)
+        && !isArchived(historyMatch)
+      ) {
+        return { session: historyMatch, historical: true };
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .filter((entry, index, list) => list.findIndex((item) => item.session.id === entry.session.id) === index)
+    .slice(0, limit);
+}
+
 // Folder membership follows the native conversation across runtime restarts.
 export function sessionFolderKey(session, historical = false) {
   return JSON.stringify([session.profile, historical ? session.id : session.nativeSessionId || `runtime:${session.id}`]);

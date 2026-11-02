@@ -1,7 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
-import { compareArchivedSessions, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries } from "./sidebar.mjs";
+import { compareArchivedSessions, resolveRecentEntries, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
@@ -604,17 +604,9 @@ function renderSessions() {
     ...live.slice().sort((a, b) => String(b.lastActivityAt).localeCompare(String(a.lastActivityAt))).map((session) => ({ session, historical: false })),
     ...past.slice().sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt))).map((session) => ({ session, historical: true })),
   ];
-  const recentEntries = recentSessions
-    .map((entry) => {
-      const liveMatch = sessions.find((session) => session.id === entry.id);
-      if (liveMatch) return { session: liveMatch, historical: false };
-      const historyMatch = history.find((session) => session.id === entry.id && (!filter || session.profile === filter));
-      if (historyMatch && !activeNative.has(`${historyMatch.profile}:${historyMatch.id}`)) return { session: historyMatch, historical: true };
-      return null;
-    })
-    .filter(Boolean)
-    .filter((entry, index, list) => list.findIndex((item) => item.session.id === entry.session.id) === index)
-    .slice(0, 8);
+  const recentEntries = resolveRecentEntries(recentSessions, {
+    sessions, history, filter, activeNative, isArchived, limit: 8,
+  });
   // Recents first so recently opened threads stay above the Projects tree.
   if (token && recentEntries.length) {
     root.append(element("div", "list-heading recents-heading", "Recents"));
@@ -799,6 +791,14 @@ function rememberRecent(session) {
     at: Date.now(),
   };
   recentSessions = [entry, ...recentSessions.filter((item) => item.id !== entry.id)].slice(0, 12);
+  try { preferenceStorage?.setItem(recentsKey, JSON.stringify(recentSessions)); } catch { /* Browser storage may be blocked. */ }
+}
+function forgetRecent(...ids) {
+  const drop = new Set(ids.filter((id) => typeof id === "string" && id));
+  if (!drop.size) return;
+  const next = recentSessions.filter((item) => !drop.has(item.id));
+  if (next.length === recentSessions.length) return;
+  recentSessions = next;
   try { preferenceStorage?.setItem(recentsKey, JSON.stringify(recentSessions)); } catch { /* Browser storage may be blocked. */ }
 }
 
@@ -1866,6 +1866,7 @@ $("end-form").addEventListener("submit", async (event) => {
     if (ownEpoch !== epoch) return;
     listVersion++; // Invalidate list/history requests started before DELETE.
     endedHistory.add(`${ctx.meta.profile}:${ctx.meta.nativeSessionId}`);
+    forgetRecent(ctx.id, ctx.meta.id, ctx.meta.nativeSessionId);
     sessions = sessions.filter((session) => ctx.historical ? session.nativeSessionId !== ctx.meta.nativeSessionId : session.id !== ctx.id);
     if (current?.id === ctx.id) {
       selection++; current = null; $("approvals").replaceChildren();
