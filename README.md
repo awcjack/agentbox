@@ -709,8 +709,17 @@ services.agentbox.settings.piRpcApi = {
   ];
   profiles.default = {
     cwd = "/workspace";
-    sessionDir = "/home/agent/.pi/agent/sessions";
+    # Keep this outside the discovery prefix tree when auto-discovery is on.
+    sessionDir = "/home/agent/.pi/agent/sessions/--workspace--";
     # Optional git/gh access, only if GH_TOKEN exists in environmentFile.
+    env.GH_TOKEN = "GH_TOKEN";
+  };
+  # Optional: one profile per immediate /workspace child at pi-rpc startup.
+  autoDiscoverProfiles = {
+    enable = true;
+    root = "/workspace";
+    sessionDirPrefix = "/home/agent/.pi/agent/sessions";
+    excludePrefixes = [ "tmp-" ];
     env.GH_TOKEN = "GH_TOKEN";
   };
   limits.maxBodyBytes = 8 * 1024 * 1024; # JSON includes base64 image overhead.
@@ -726,11 +735,17 @@ origin, including its scheme and port, even
 when the UI and API share an origin. Use TLS or a trusted VPN for remote access.
 
 Profiles define workspace roots and persistent Pi session directories on the
-server. New session chooses a sidebar session-folder label such as `Work/Project`;
+server. With `autoDiscoverProfiles.enable = true`, pi-rpc also turns each
+immediate child of `root` into a profile (`cwd=<root>/<name>`,
+`sessionDir=<sessionDirPrefix>/--<name>--`) at startup. Explicit profiles win on
+name conflicts; discovery skips `exclude` / `excludePrefixes`, invalid names,
+non-directories, and symlink escapes. Restart pi-rpc to pick up new folders.
+This is soft project selection inside one container, not hard isolation. New
+session chooses a sidebar session-folder label such as `Work/Project`;
 it starts Pi in the configured profile cwd. Folder headings also have a **+**
 action to start a conversation in that group. Folder labels do not select a server
 directory. API clients requesting an explicit cwd remain confined to the approved
-workspace root. Sessions
+workspace root. Pi loads project `AGENTS.md` / `CLAUDE.md` from the session cwd. Sessions
 open in tabs, with independent drafts and background processes; closing a tab
 leaves Pi running, while End & archive stops it. Each sidebar row also offers
 Archive, including saved conversations without starting Pi. The compact sidebar

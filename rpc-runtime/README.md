@@ -105,6 +105,18 @@ Each additional profile needs a distinct, non-overlapping persistent session
 directory. Pi provider credentials in environment variables must be explicitly
 mapped into the profile, separate from the browser's RPC password.
 
+Optional `autoDiscoverProfiles` scans one absolute root at supervisor startup and
+synthesizes a profile for each immediate child directory (`cwd=<root>/<name>`,
+`sessionDir=<sessionDirPrefix>/--<name>--`). Explicit `profiles` entries always
+win on name conflicts. Discovery skips invalid profile names, excluded names,
+`excludePrefixes` (default `tmp-`), non-directories, and symlink targets outside
+the root. It fails closed when the root is missing or discovery would exceed
+`maxProfiles`. Keep the explicit default `sessionDir` as a sibling path such as
+`.../sessions/--workspace--`, not the shared prefix directory itself, or overlap
+checks reject startup. Discovered profiles share the same Pi credentials home;
+this is soft project selection, not container isolation. Pi still loads each
+project's `AGENTS.md` / `CLAUDE.md` from that profile's cwd.
+
 Image prompts include base64 overhead in the JSON body. For example, set
 `limits.maxBodyBytes` to `8388608` and `limits.maxRecordBytes` to `16777216` for
 larger image-bearing requests and Pi records. These are finite limits, not an
@@ -134,10 +146,18 @@ unlimited upload endpoint; large transcripts and event replay remain bounded.
     "profiles": {
       "default": {
         "cwd": "/workspace",
-        "sessionDir": "/home/agent/.pi/agent/sessions",
+        "sessionDir": "/home/agent/.pi/agent/sessions/--workspace--",
         "args": ["--approve"],
         "envReferences": { "PROVIDER_TOKEN": "PI_PROFILE_PROVIDER_TOKEN" }
       }
+    },
+    "autoDiscoverProfiles": {
+      "enable": true,
+      "root": "/workspace",
+      "sessionDirPrefix": "/home/agent/.pi/agent/sessions",
+      "excludePrefixes": ["tmp-"],
+      "maxProfiles": 64,
+      "envReferences": { "PROVIDER_TOKEN": "PI_PROFILE_PROVIDER_TOKEN" }
     },
     "limits": {
       "maxSessions": 16,
