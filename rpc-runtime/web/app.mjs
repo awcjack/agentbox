@@ -6,7 +6,7 @@ import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
 import { findFilePreview, isMarkdownPath, pathBreadcrumb } from "./context-pane.mjs";
-import { commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
+import { bangCommand, commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments, initComposerFileDrop } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
@@ -197,21 +197,24 @@ function updateControls() {
   $("auto-mode").title = ctx && !autoMode ? "This Pi session has not reported auto-mode support. Deploy the updated runtime and policy extension, then start a new Pi session; the current mode cannot be confirmed." : !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply. This session's choice is retained on restart/resume." : "Auto mode is off. Normal permission rules apply. Click to enable for this session and retain its choice on restart/resume.";
   $("prompt").disabled = !ctx || readOnly;
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
+  const bashRunning = Boolean(ctx?.bash?.running);
   $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy || !(draft.text.trim() || draft.images.length);
-  $("send").firstChild.textContent = ctx?.record.sending ? "Sending " : streaming ? "Queue " : "Send ";
-  $("send-mode").hidden = !streaming;
+  $("send").firstChild.textContent = ctx?.record.sending ? (bashRunning ? "Running " : "Sending ") : streaming ? "Queue " : "Send ";
+  $("send-mode").hidden = !streaming || bashRunning;
   $("send-mode").disabled = !canWrite(ctx);
-  $("stop").hidden = !streaming;
-  $("stop").disabled = !canWrite(ctx, "abort") || ctx?.stopping;
+  $("stop").hidden = !streaming && !bashRunning;
+  $("stop").disabled = bashRunning
+    ? !canWrite(ctx, "abort_bash") || ctx?.stopping
+    : !canWrite(ctx, "abort") || ctx?.stopping;
   $("stop").textContent = ctx?.stopping ? "Stopping..." : "Stop";
-  $("model").disabled = !canWrite(ctx, "set_model") || streaming || ctx?.modelBusy || ctx?.thinkingBusy || !ctx?.record.models.length;
+  $("model").disabled = !canWrite(ctx, "set_model") || streaming || bashRunning || ctx?.modelBusy || ctx?.thinkingBusy || !ctx?.record.models.length;
   renderThinking(ctx);
   $("session-title").textContent = ctx ? displayTitle(ctx.meta) : "Pi coding workspace";
   $("session-subtitle").textContent = ctx ? `${ctx.meta?.profile || "workspace"} / ${ctx.meta?.cwd || ctx.state.sessionId || ctx.id}` : "Code, tools, and persistent conversations.";
-  $("session-status").textContent = !ctx ? "WORKSPACE" : !ctx.ready ? "SYNCING" : readOnly ? "READ ONLY" : ctx.meta?.status !== "running" ? (ctx.meta?.status || "OFFLINE").toUpperCase() : !ctx.online ? "OFFLINE" : streaming ? "WORKING" : "READY";
-  $("session-status").classList.toggle("working", streaming);
-  $("activity-text").textContent = !ctx ? "Choose a session to start" : readOnly ? "Read-only access" : ctx.meta?.status !== "running" ? "This process has ended. Resume from history to continue." : !ctx.online ? (ctx.meta.activity === "starting" ? "Starting Pi and initializing extensions. Your draft stays here." : "Synchronizing safely. Your draft stays here.") : ctx.stopping ? "Waiting for the agent to stop..." : ctx.state.isCompacting ? "Compacting conversation..." : streaming ? "Agent is working. You can steer or queue a follow-up." : "Ready when you are";
-  document.querySelector(".activity").classList.toggle("busy", streaming && ctx?.online);
+  $("session-status").textContent = !ctx ? "WORKSPACE" : !ctx.ready ? "SYNCING" : readOnly ? "READ ONLY" : ctx.meta?.status !== "running" ? (ctx.meta?.status || "OFFLINE").toUpperCase() : !ctx.online ? "OFFLINE" : streaming || bashRunning ? "WORKING" : "READY";
+  $("session-status").classList.toggle("working", streaming || bashRunning);
+  $("activity-text").textContent = !ctx ? "Choose a session to start" : readOnly ? "Read-only access" : ctx.meta?.status !== "running" ? "This process has ended. Resume from history to continue." : !ctx.online ? (ctx.meta.activity === "starting" ? "Starting Pi and initializing extensions. Your draft stays here." : "Synchronizing safely. Your draft stays here.") : ctx.stopping ? "Waiting for the agent to stop..." : ctx.state.isCompacting ? "Compacting conversation..." : bashRunning ? "Running shell command..." : streaming ? "Agent is working. You can steer or queue a follow-up." : "Ready when you are";
+  document.querySelector(".activity").classList.toggle("busy", (streaming || bashRunning) && ctx?.online);
   const pending = ctx?.state.pendingMessageCount || 0;
   $("queue-count").textContent = pending ? `${pending} queued` : "";
   $("welcome-foot").textContent = !token ? "Connect to your runtime to get started." : ctx ? "Your session is ready. Make the first move." : "Create a new session or pick up where you left off.";
@@ -1029,7 +1032,7 @@ function renderMessages() {
     const article = element("article", `message ${message.role === "user" ? "user" : "assistant"}`);
     article.dataset.messageKey = `${message.role}:${index}`;
     const header = element("div", "message-header");
-    header.append(element("span", "avatar", message.role === "user" ? "u" : "pi"), element("span", "", message.role === "user" ? "You" : message.role === "assistant" ? "Pi agent" : message.role || "Context"));
+    header.append(element("span", "avatar", message.role === "user" ? "u" : message.role === "bashExecution" ? "!" : "pi"), element("span", "", message.role === "user" ? "You" : message.role === "assistant" ? "Pi agent" : message.role === "bashExecution" ? "Shell" : message.role || "Context"));
     if (message.role === "assistant" && message.model) {
       const model = element("span", "message-model", `${message.model}${message.provider ? ` / ${message.provider}` : ""}`);
       model.title = message.responseModel ? `Response model: ${message.responseModel}` : model.textContent;
@@ -1056,7 +1059,10 @@ function renderMessages() {
       } else renderContent(body, [block]);
     }
     if (message.summary) body.append(renderMarkdown(message.summary));
-    if (message.role === "bashExecution") body.append(element("pre", "", `${message.command || ""}\n${message.output || ""}`));
+    if (message.role === "bashExecution") {
+      const label = message.excludeFromContext ? "!!" : "!";
+      body.append(element("pre", "", `${label}${message.command || ""}\n${message.output || ""}`));
+    }
     if (message.errorMessage || ["error", "aborted"].includes(message.stopReason)) body.append(element("div", "message-error", message.errorMessage || (message.stopReason === "aborted" ? "Response stopped." : "The agent could not complete this response.")));
     if (message.role === "assistant" && !body.childElementCount) continue;
     if (previousArticle && canGroupActions(previousMessage, message)) {
@@ -1100,6 +1106,17 @@ function renderMessages() {
     next.append(renderTool(call, result, id));
   }
   flushFileChanges(next, turnChanges, turnKey);
+  if (ctx.bash?.running) {
+    const article = element("article", "message assistant");
+    article.dataset.messageKey = "bash:live";
+    const header = element("div", "message-header");
+    header.append(element("span", "avatar", "!"), element("span", "", "Shell"));
+    const body = element("div", "message-content");
+    const label = ctx.bash.excludeFromContext ? "!!" : "!";
+    body.append(element("pre", "", `${label}${ctx.bash.command || ""}\n${ctx.bash.output || ""}`));
+    article.append(header, body);
+    next.append(article);
+  }
   if (ctx.meta?.status !== "running" && ctx.meta?.stderr) {
     const detail = element("details", "tool-detail"); detail.dataset.detailKey = "stderr";
     detail.append(element("summary", "", "Process diagnostics"), element("pre", "", ctx.meta.stderr)); next.append(detail);
@@ -1205,7 +1222,7 @@ function renderApprovals(ctx) {
 function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
     cancelModels(ctx); ctx.modelsRequested = true; ctx.record.models = [];
-    ctx.record.messages = []; ctx.partial = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
+    ctx.record.messages = []; ctx.partial = null; ctx.bash = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
     ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
     ctx.commands = undefined; ctx.commandError = null; ctx.thinkingCatalog = null;
     renderMessages();
@@ -1303,6 +1320,14 @@ function handleEvent(ctx, frame) {
     ctx.tools.set(event.toolCallId, { ...previous, ...result, toolName: event.toolName || previous.toolName, args: event.args || previous.args, running: type !== "tool_execution_end", isError: event.isError || false });
     if (type === "tool_execution_end") requestRefresh(ctx);
     scheduleRender();
+  } else if (type === "bash_execution_update") {
+    const previous = ctx.bash || { command: "", output: "", running: true };
+    ctx.bash = {
+      ...previous,
+      output: `${previous.output || ""}${typeof event.delta === "string" ? event.delta : ""}`,
+      running: true,
+    };
+    scheduleRender();
   } else if (type === "queue_update") {
     ctx.state.pendingMessageCount = (event.steering?.length || 0) + (event.followUp?.length || 0); ctx.stateRevision++; updateControls();
   } else if (type === "extension_ui_request") {
@@ -1328,9 +1353,10 @@ function handleEvent(ctx, frame) {
       showNotice(event.error || "The agent process has ended. Resume a saved session to continue.", true);
       ctx.streamController.abort(); updateControls();
     }
-  } else if (type === "response" && ["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "set_session_name", "abort", "prompt", "steer", "follow_up", "clear_queue"].includes(event.command)) {
+  } else if (type === "response" && ["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level", "set_session_name", "abort", "abort_bash", "bash", "prompt", "steer", "follow_up", "clear_queue"].includes(event.command)) {
     if (["set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level"].includes(event.command)) ctx.stateRevision++;
     if (["set_model", "cycle_model"].includes(event.command)) ctx.thinkingCatalog = null;
+    if (["bash", "abort_bash"].includes(event.command)) ctx.bash = null;
     updateControls(); requestRefresh(ctx);
   } else if (["extension_error", "auto_retry_start"].includes(type)) {
     showNotice(event.error || event.errorMessage || "The agent is retrying a provider request.", true);
@@ -1344,7 +1370,7 @@ async function runSession(ctx) {
   while (active(ctx)) {
     clearTimeout(ctx.refreshTimer); ctx.refreshTimer = null;
     cancelModels(ctx);
-    ctx.connecting = true; ctx.online = false; ctx.ready = false; ctx.partial = null; ctx.tools.clear();
+    ctx.connecting = true; ctx.online = false; ctx.ready = false; ctx.partial = null; ctx.bash = null; ctx.tools.clear();
     setNetwork("reconnecting", failures ? "Reconnecting" : "Connecting"); updateControls();
     try {
       // Do not overlap a reconnect snapshot with a snapshot started by the old stream.
@@ -1543,7 +1569,7 @@ function activate(meta, { reconnect = false } = {}) {
   if (!reconnect && current?.id === meta.id && active(current)) { drawer(false); return; }
   selection++;
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
-  const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, ready: false, online: false, cursor: 0 };
+  const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, bash: null, ready: false, online: false, cursor: 0 };
   ctx.record.models = [];
   current = ctx; followBottom = true; setComposerCompact(false);
   rememberRecent(meta);
@@ -1773,6 +1799,34 @@ $("composer").addEventListener("submit", async (event) => {
   const draft = ctx.record.draft, text = draft.text.trim(), attachments = draft.images.slice(), version = draft.version, ownEpoch = epoch;
   const images = attachments.filter((file) => file.type !== "file");
   if (!text && !attachments.length) return;
+  const bang = bangCommand(text);
+  if (bang) {
+    if (!bang.command) { showNotice("Type a shell command after ! (or !! to hide output from the model).", true); return; }
+    if (attachments.length) { showNotice("Shell commands cannot include attachments. Remove them or send without !.", true); return; }
+    if (!canWrite(ctx, "bash")) { showNotice("This profile does not allow direct shell commands.", true); return; }
+    ctx.record.sending = true;
+    ctx.bash = { command: bang.command, output: "", running: true, excludeFromContext: bang.excludeFromContext };
+    updateControls(); scheduleRender();
+    try {
+      const command = { type: "bash", command: bang.command };
+      if (bang.excludeFromContext) command.excludeFromContext = true;
+      await rpc(ctx, command, true);
+      if (ownEpoch !== epoch) return;
+      if (draft.version === version) { draft.text = ""; draft.images = []; draft.version++; }
+      ctx.record.notice = null;
+      if (current?.record === ctx.record) { restoreDraft(); showNotice(""); requestRefresh(current); }
+    } catch (error) {
+      if (ownEpoch !== epoch) return;
+      if (current?.record === ctx.record) report(error, current, { write: true, command: "bash", ambiguous: true });
+      else ctx.record.notice = { message: `${error.message} Your draft was kept. The shell command may have started; inspect this session before resending.`, error: true };
+    } finally {
+      if (ownEpoch === epoch) {
+        ctx.bash = null; ctx.record.sending = false;
+        if (current?.record === ctx.record) { updateControls(); scheduleRender(); requestRefresh(current); }
+      }
+    }
+    return;
+  }
   if (/^\/auto(?:\s|$)/.test(text) && !ctx.meta.autoMode) {
     showNotice("This Pi session has not reported the new /auto command. Deploy the updated policy extension and start a new session. Nothing was sent to the model.", true); return;
   }
@@ -1810,6 +1864,16 @@ $("prompt").addEventListener("keydown", (event) => {
 });
 $("stop").addEventListener("click", async () => {
   const ctx = current;
+  if (ctx?.bash?.running) {
+    if (!canWrite(ctx, "abort_bash") || ctx.stopping) return;
+    ctx.stopping = true; updateControls();
+    try {
+      await rpc(ctx, { type: "abort_bash" }, true);
+      if (active(ctx)) { showNotice("Shell command stop requested."); requestRefresh(ctx); }
+    } catch (error) { report(error, ctx, { write: true, command: "abort_bash", ambiguous: true }); }
+    finally { if (active(ctx)) { ctx.stopping = false; updateControls(); } }
+    return;
+  }
   if (!canWrite(ctx, "abort") || ctx.stopping) return;
   ctx.stopping = true; updateControls();
   try {

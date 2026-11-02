@@ -709,6 +709,7 @@ test("configuration requires hashed tokens and prevents command/profile escape",
   assert.throws(() => normalizeConfig({ piRpcApi: { auth: { tokens: [] }, profiles: {} } }), /non-empty array/);
   assert.throws(() => normalizeConfig(config({ auth: { tokens: [{ sha256: "plaintext", scopes: ["*"] }] } })), /SHA-256/);
   assert.throws(() => normalizeConfig(config({ allowedCommands: ["prompt", "switch_session"] })), /forbidden command/);
+  assert.ok(normalizeConfig(config({ allowedCommands: ["prompt", "bash"] })).profiles.get("default").allowedCommands.has("bash"));
   assert.throws(() => normalizeConfig(config({ profiles: { default: { cwd: "relative" } } })), /absolute path/);
   for (const argument of [
     "--continue", "-c", "--fork", "--mode=rpc", "--name", "-n", "--no-session",
@@ -1190,12 +1191,40 @@ test("forbidden and unknown commands never reach Pi", async (t) => {
   const { baseUrl, children } = await fixture(t);
   const id = await createSession(baseUrl);
   const before = children[0].input;
-  for (const type of ["bash", "switch_session", "not_a_command"]) {
+  for (const type of ["switch_session", "not_a_command", "export_html"]) {
     const result = await request(baseUrl, `/v1/sessions/${id}/rpc`, { method: "POST", body: { type } });
     assert.equal(result.response.status, 403);
     assert.equal(result.body.error.code, "command_forbidden");
   }
   assert.equal(children[0].input, before);
+});
+
+test("user bash RPC commands are allowed by default for OpenCode-style !", async (t) => {
+  const cfg = config({ allowedCommands: undefined });
+  assert.ok(normalizeConfig(cfg).profiles.get("default").allowedCommands.has("bash"));
+  assert.equal(internals.HARD_FORBIDDEN_COMMANDS.has("bash"), false);
+  const { baseUrl, children } = await fixture(t, cfg);
+  const id = await createSession(baseUrl);
+  const promise = request(baseUrl, `/v1/sessions/${id}/rpc`, {
+    method: "POST",
+    body: { type: "bash", command: "echo hi", excludeFromContext: true },
+  });
+  await waitForInput(children[0], /"type":"bash"/);
+  const forwarded = JSON.parse(children[0].input.trim().split("\n").at(-1));
+  assert.equal(forwarded.type, "bash");
+  assert.equal(forwarded.command, "echo hi");
+  assert.equal(forwarded.excludeFromContext, true);
+  children[0].output({
+    type: "response",
+    id: forwarded.id,
+    command: "bash",
+    success: true,
+    data: { output: "hi\n", exitCode: 0, cancelled: false, truncated: false },
+  });
+  const result = await promise;
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.success, true);
+  assert.equal(result.body.data.output, "hi\n");
 });
 
 test("strict LF records preserve Unicode separators and protocol faults kill the child", async (t) => {
@@ -1744,3 +1773,4 @@ test("saved history archive requires delete scope, retains history and never sta
   assert.equal((await request(second.baseUrl, "/v1/history?profile=default&includeArchived=true")).body.sessions[0].archived, true);
   assert.equal((await request(second.baseUrl, `/v1/history/${RESUME_ID}?profile=other`, { method: "DELETE" })).response.status, 400);
 });
+

@@ -42,6 +42,7 @@ const DEFAULT_ALLOWED_COMMANDS = [
   "abort",
   "abort_bash",
   "abort_retry",
+  "bash",
   "clear_queue",
   "compact",
   "cycle_model",
@@ -70,7 +71,6 @@ const DEFAULT_ALLOWED_COMMANDS = [
 
 const KNOWN_COMMANDS = new Set([
   ...DEFAULT_ALLOWED_COMMANDS,
-  "bash",
   "clone",
   "export_html",
   "extension_ui_response",
@@ -80,8 +80,9 @@ const KNOWN_COMMANDS = new Set([
 ]);
 
 // These commands escape the supervisor's session ownership or filesystem policy.
+// User-initiated shell (`bash` / web `!` prefix) is allowed: it mirrors Pi TUI
+// and OpenCode direct execution for the authenticated operator, not LLM tools.
 const HARD_FORBIDDEN_COMMANDS = new Set([
-  "bash",
   "clone",
   "export_html",
   "extension_ui_response",

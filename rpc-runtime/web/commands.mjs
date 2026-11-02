@@ -1,3 +1,15 @@
+// OpenCode/Pi TUI parity: a leading ! or !! runs a shell command via RPC bash
+// instead of prompting the model. !! excludes the output from model context.
+export function bangCommand(text) {
+  if (typeof text !== "string") return null;
+  const match = /^(!!?)([\s\S]*)$/.exec(text);
+  if (!match) return null;
+  return {
+    command: match[2].replace(/^\s+/, ""),
+    excludeFromContext: match[1] === "!!",
+  };
+}
+
 // Only complete an initial slash command, never prose, selected text, or a
 // command's ordinary arguments. Auto has explicit, discoverable mode arguments.
 export function commandQuery(text, start = text.length, end = start) {

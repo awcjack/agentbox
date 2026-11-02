@@ -1608,6 +1608,7 @@ in
             "abort"
             "abort_bash"
             "abort_retry"
+            "bash"
             "clear_queue"
             "compact"
             "cycle_model"
@@ -1633,7 +1634,7 @@ in
             "set_steering_mode"
             "steer"
           ];
-          description = "Pi RPC commands globally allowed by the supervisor. Filesystem/session escape commands remain hard-denied.";
+          description = "Pi RPC commands globally allowed by the supervisor. Includes user shell (`bash` / web `!` prefix). Session-switch/fork/clone/new-session, HTML export, and raw UI-response commands remain hard-denied.";
         };
         profiles = lib.mkOption {
           type = lib.types.attrsOf (

@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { commandQuery, commandSuggestions } from "./commands.mjs";
+import { bangCommand, commandQuery, commandSuggestions } from "./commands.mjs";
+
+test("bangCommand parses OpenCode-style ! and !! prefixes", () => {
+  assert.deepEqual(bangCommand("!ls -la"), { command: "ls -la", excludeFromContext: false });
+  assert.deepEqual(bangCommand("!  pwd"), { command: "pwd", excludeFromContext: false });
+  assert.deepEqual(bangCommand("!!git status"), { command: "git status", excludeFromContext: true });
+  assert.deepEqual(bangCommand("!!!echo"), { command: "!echo", excludeFromContext: true });
+  assert.deepEqual(bangCommand("!"), { command: "", excludeFromContext: false });
+  assert.equal(bangCommand("ls"), null);
+  assert.equal(bangCommand("/bash ls"), null);
+  assert.equal(bangCommand(" !ls"), null, "leading space is not a bang after trim happens upstream");
+});
 
 const commands = [
   { name: "auto", description: "Toggle auto mode", source: "extension" },
