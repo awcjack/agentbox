@@ -8,8 +8,8 @@ import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
 import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
-import { browseFolders, selectFolder } from "./folders.mjs";
-import { discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
+import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
+import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
 const WEB_DIR = new URL("./web/", import.meta.url);
@@ -439,6 +439,26 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
           allowedCommands: templateCommands,
         });
         discoveredProfiles.push(entry.name);
+      }
+
+      // History folders for projects whose cwd is temporarily missing stay visible
+      // under default instead of disappearing from the session list.
+      const defaultProfile = profiles.get("default");
+      if (defaultProfile?.sessionDir) {
+        const ownedForOrphans = [];
+        for (const [name, profile] of profiles) {
+          if (profile.sessionDir === undefined) continue;
+          ownedForOrphans.push({ name, path: profile.sessionDir });
+        }
+        const orphans = discoverOrphanSessionDirs({
+          sessionDirPrefix: discovery.sessionDirPrefix,
+          existingSessionDirs: ownedForOrphans,
+          ...(dependencies.readdirSync ? { readdirSync: dependencies.readdirSync } : {}),
+          ...(dependencies.statSync ? { statSync: dependencies.statSync } : {}),
+        });
+        if (orphans.length) {
+          defaultProfile.extraSessionDirs = orphans.map((item) => item.sessionDir);
+        }
       }
     }
   }
@@ -1304,7 +1324,13 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           const resumePath = saved?.path;
           if (saved && saved.cwd !== profile.cwd) {
             try { profile = (await selectFolder(config.profiles, saved.cwd, body.profile)).profile; }
-            catch { throw new HttpError(400, "invalid_folder", "The saved session folder is unavailable or outside its workspace."); }
+            catch {
+              // Project working directories can disappear while history remains.
+              // Keep the selected profile root when the saved cwd still belongs under it.
+              if (!(profile.allowSubdirectories && containsFolder(saved.cwd, profile.cwd))) {
+                throw new HttpError(400, "invalid_folder", "The saved session folder is unavailable or outside its workspace.");
+              }
+            }
           }
           if (body.resume && !resumePath) throw new HttpError(404, "resume_not_found", "an exact, unique Pi session for this profile was not found");
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
