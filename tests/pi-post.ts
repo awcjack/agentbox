@@ -123,6 +123,7 @@ try {
   const queued = await child.tool("send_message", { to: "sibling", body: "Queued while offline" })
   assert.equal(queued.details.receipts[0].status, "queued")
   assert.equal(sibling.messages.length, 1)
+
   const siblingId = "33333333-3333-4333-8333-333333333333"
   const siblingCwd = join(root, "sibling-project")
   const resumed = await start(siblingId, "sibling", siblingCwd, mainId)
@@ -179,6 +180,17 @@ try {
   fs.writeFileSync(parentRecord, JSON.stringify(legacy))
   assert.doesNotMatch((await parent.tool("list_sessions", { all: true })).content[0].text, /parent/)
   await assert.rejects(parent.tool("send_message", { to: parentAddress, body: "Unknown archive state" }), /unregistered or archived/)
+
+  // Outbound caps reject chatty sends before deposit (per-target within 60s).
+  for (let i = 0; i < 4; i++) {
+    await parent.tool("send_message", { to: "unrelated", body: `Coordinate once ${i}` })
+  }
+  await assert.rejects(
+    parent.tool("send_message", { to: "unrelated", body: "Ack ping should fail" }),
+    /rate limit/,
+  )
+  assert.equal(unrelated.messages.length, 4, "rate-limited send must not deposit")
+
   console.log("pi-post integration tests passed")
 } finally {
   for (const session of sessions) await session.emit("session_shutdown")

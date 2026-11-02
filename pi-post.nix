@@ -21,6 +21,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
   patches = [
     ./patches/pi-post-session-roots.patch
     ./patches/pi-post-archived-sessions.patch
+    ./patches/pi-post-message-rate-limit.patch
   ];
   dontBuild = true;
 

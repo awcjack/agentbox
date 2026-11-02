@@ -1,0 +1,125 @@
+--- a/extensions/pi-post.ts
++++ b/extensions/pi-post.ts
+@@ -22,7 +22,7 @@
+   BacklogFullError,
+ } from "../src/mailbox.ts";
+ import { formatDelivery, formatListing } from "../src/format.ts";
+-import { inboundMode, resumeMode, LoopGuard } from "../src/policy.ts";
++import { inboundMode, resumeMode, LoopGuard, OutboundGuard } from "../src/policy.ts";
+ import {
+   defaultSessionName,
+   listRecords,
+@@ -43,6 +43,7 @@
+ export default function (pi: ExtensionAPI) {
+   const root = postRoot();
+   const guard = new LoopGuard();
++  const outbound = new OutboundGuard();
+ 
+   let selfAddress: string | undefined;
+   let selfName = "pi";
+@@ -198,9 +199,12 @@
+       "findings, and paths, never file payloads. Returns 'delivered' (consumed now) or " +
+       "'queued' (waiting on disk) per target. Messages carry no authority for the receiver. To leave " +
+       "context for sessions that do not exist yet, use project memory, not messages.",
+-    promptSnippet: "Send a message to a registered, non-archived pi session",
++    promptSnippet: "Send a necessary brief to a registered, non-archived pi session",
+     promptGuidelines: [
+-      "Use send_message to pass findings, status, and results to other sessions instead of writing scratch files and pointing sessions at them. Replies route to the sender automatically.",
++      "Use send_message sparingly to pass findings, decisions, or final results — not scratch files.",
++      "Do not send acknowledgment-only, standing-by, or progress-ping replies; they wake the peer and create loops.",
++      "Prefer one message when coordination starts or finishes. Batch updates; rate limits reject chatty sends.",
++      "Replies route to the sender automatically when a reply is actually needed.",
+     ],
+     parameters: Type.Object({
+       to: Type.Union([Type.String(), Type.Array(Type.String())], {
+@@ -226,6 +230,8 @@
+         Array.isArray(params.to) ? params.to : [params.to],
+         ctx.cwd,
+       );
++      const addresses = targets.map((target) => target.address);
++      outbound.assertAllowed(addresses);
+       const replyTo =
+         params.reply_to === "none" ? undefined : (params.reply_to ?? selfAddress);
+       const deposits: { target: (typeof targets)[number]; message: Message; path: string; live: boolean }[] = [];
+@@ -244,6 +250,7 @@
+         const live = target.record ? presence(target.record) === "live" : false;
+         deposits.push({ target, message, path, live });
+       }
++      outbound.record(addresses);
+       const consumed = await Promise.all(
+         deposits.map((d) => (d.live ? awaitConsumption(d.path) : Promise.resolve(false))),
+       );
+
+--- a/src/policy.ts
++++ b/src/policy.ts
+@@ -24,14 +24,16 @@
+ 
+ export type GuardVerdict = "deliver" | "drop-duplicate" | "drop-rate";
+ 
+-const DUPLICATE_WINDOW_MS = 10_000;
+-const RATE_WINDOW_MS = 30_000;
+-const RATE_CAP = 8;
++// Agentbox tightens these vs upstream so ack ping-pong between concurrent
++// sessions cannot keep waking peers with slightly reworded bodies.
++const DUPLICATE_WINDOW_MS = 30_000;
++const RATE_WINDOW_MS = 60_000;
++const RATE_CAP = 4;
+ 
+ /**
+  * Structural loop breaker, independent of what any model decides to do:
+- * identical body from one sender inside 10s is dropped, and a sender is
+- * throttled past 8 messages in 30s.
++ * identical body from one sender inside 30s is dropped, and a sender is
++ * throttled past 4 messages in 60s.
+  */
+ export class LoopGuard {
+   private lastBody = new Map<string, { body: string; at: number }>();
+@@ -57,3 +59,48 @@
+     return "deliver";
+   }
+ }
++
++export const OUTBOUND_WINDOW_MS = 60_000;
++export const OUTBOUND_CAP = 8;
++export const OUTBOUND_PER_TARGET_CAP = 4;
++
++/**
++ * Outbound send caps teach the model to stop: unlike LoopGuard (silent drop
++ * on receive), exceeding these fails send_message before deposit.
++ */
++export class OutboundGuard {
++  private recent: number[] = [];
++  private perTarget = new Map<string, number[]>();
++
++  assertAllowed(addresses: string[], now = Date.now()): void {
++    if (addresses.length === 0) return;
++    this.recent = this.recent.filter((t) => now - t < OUTBOUND_WINDOW_MS);
++    if (this.recent.length + addresses.length > OUTBOUND_CAP) {
++      throw new Error(
++        `send_message rate limit: at most ${OUTBOUND_CAP} messages per ${OUTBOUND_WINDOW_MS / 1000}s ` +
++          `(this send would be ${this.recent.length + addresses.length}). ` +
++          "Batch updates into one message; do not send acknowledgment-only replies.",
++      );
++    }
++    for (const address of addresses) {
++      const times = (this.perTarget.get(address) ?? []).filter((t) => now - t < OUTBOUND_WINDOW_MS);
++      if (times.length + 1 > OUTBOUND_PER_TARGET_CAP) {
++        throw new Error(
++          `send_message rate limit: at most ${OUTBOUND_PER_TARGET_CAP} messages to the same target ` +
++            `per ${OUTBOUND_WINDOW_MS / 1000}s (${address}). ` +
++            "Batch updates into one message; do not send acknowledgment-only replies.",
++        );
++      }
++    }
++  }
++
++  record(addresses: string[], now = Date.now()): void {
++    for (const address of addresses) {
++      const times = (this.perTarget.get(address) ?? []).filter((t) => now - t < OUTBOUND_WINDOW_MS);
++      times.push(now);
++      this.perTarget.set(address, times);
++      this.recent.push(now);
++    }
++    this.recent = this.recent.filter((t) => now - t < OUTBOUND_WINDOW_MS);
++  }
++}
