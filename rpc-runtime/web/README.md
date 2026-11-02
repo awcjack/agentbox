@@ -30,6 +30,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   Home/End keys; drafts and approvals remain independent. Closing a tab leaves
   Pi running and its draft available when reopened from the sidebar. End & archive
   stops it. Tab navigation and drafts stay in page memory, cleared on reload/logout.
+  Tabs reuse the sidebar activity colors: green spinner while loading/running,
+  yellow when input or action is needed, blue for finished (unread), and muted
+  idle/ended markers. Hover or focus a tab to read the status label.
 - Drag the desktop sidebar's right edge to resize it. The focused separator also
   supports Left/Right arrows, Shift for larger steps, and Home/End for limits.
   The transcript and composer resize with it. Drag below 180px (or press Home)
