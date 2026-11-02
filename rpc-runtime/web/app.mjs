@@ -198,6 +198,7 @@ function updateControls() {
   $("prompt").disabled = !ctx || readOnly;
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
   const bashRunning = Boolean(ctx?.bash?.running);
+  syncBashElapsedTimer(ctx);
   $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy || !(draft.text.trim() || draft.images.length);
   $("send").firstChild.textContent = ctx?.record.sending ? (bashRunning ? "Running " : "Sending ") : streaming ? "Queue " : "Send ";
   $("send-mode").hidden = !streaming || bashRunning;
@@ -213,7 +214,15 @@ function updateControls() {
   $("session-subtitle").textContent = ctx ? `${ctx.meta?.profile || "workspace"} / ${ctx.meta?.cwd || ctx.state.sessionId || ctx.id}` : "Code, tools, and persistent conversations.";
   $("session-status").textContent = !ctx ? "WORKSPACE" : !ctx.ready ? "SYNCING" : readOnly ? "READ ONLY" : ctx.meta?.status !== "running" ? (ctx.meta?.status || "OFFLINE").toUpperCase() : !ctx.online ? "OFFLINE" : streaming || bashRunning ? "WORKING" : "READY";
   $("session-status").classList.toggle("working", streaming || bashRunning);
-  $("activity-text").textContent = !ctx ? "Choose a session to start" : readOnly ? "Read-only access" : ctx.meta?.status !== "running" ? "This process has ended. Resume from history to continue." : !ctx.online ? (ctx.meta.activity === "starting" ? "Starting Pi and initializing extensions. Your draft stays here." : "Synchronizing safely. Your draft stays here.") : ctx.stopping ? "Waiting for the agent to stop..." : ctx.state.isCompacting ? "Compacting conversation..." : bashRunning ? "Running shell command..." : streaming ? "Agent is working. You can steer or queue a follow-up." : "Ready when you are";
+  const bashLabel = bashRunning
+    ? (() => {
+      const prefix = ctx.bash.excludeFromContext ? "!!" : "!";
+      const command = ctx.bash.command || "";
+      const short = command.length > 48 ? `${command.slice(0, 45)}…` : command;
+      return `Running ${prefix}${short}`;
+    })()
+    : "";
+  $("activity-text").textContent = !ctx ? "Choose a session to start" : readOnly ? "Read-only access" : ctx.meta?.status !== "running" ? "This process has ended. Resume from history to continue." : !ctx.online ? (ctx.meta.activity === "starting" ? "Starting Pi and initializing extensions. Your draft stays here." : "Synchronizing safely. Your draft stays here.") : ctx.stopping ? "Waiting for the agent to stop..." : ctx.state.isCompacting ? "Compacting conversation..." : bashRunning ? bashLabel : streaming ? "Agent is working. You can steer or queue a follow-up." : "Ready when you are";
   document.querySelector(".activity").classList.toggle("busy", (streaming || bashRunning) && ctx?.online);
   const pending = ctx?.state.pendingMessageCount || 0;
   $("queue-count").textContent = pending ? `${pending} queued` : "";
@@ -1021,6 +1030,59 @@ function renderTool(call, result, key) {
   }
   return detail;
 }
+
+let bashElapsedTimer = null;
+function syncBashElapsedTimer(ctx = current) {
+  const running = Boolean(ctx?.bash?.running);
+  if (running && !bashElapsedTimer) {
+    bashElapsedTimer = setInterval(() => {
+      if (!current?.bash?.running) {
+        clearInterval(bashElapsedTimer); bashElapsedTimer = null; return;
+      }
+      scheduleRender();
+    }, 1000);
+  } else if (!running && bashElapsedTimer) {
+    clearInterval(bashElapsedTimer); bashElapsedTimer = null;
+  }
+}
+
+function bashState(bash) {
+  if (bash?.running) {
+    if (bash.startedAt) {
+      const seconds = Math.max(0, Math.floor((Date.now() - bash.startedAt) / 1000));
+      return `running · ${seconds}s`;
+    }
+    return "running";
+  }
+  if (bash?.cancelled) return "cancelled";
+  if (typeof bash?.exitCode === "number" && bash.exitCode !== 0) return `exit ${bash.exitCode}`;
+  if (bash?.truncated) return "truncated";
+  return "complete";
+}
+
+// OpenCode / Claude Code-style shell card: live "running" while output streams,
+// then a collapsible command/result after completion.
+function renderBashExecution(bash, key) {
+  const failed = Boolean(bash?.cancelled || (typeof bash?.exitCode === "number" && bash.exitCode !== 0));
+  const detail = element("details", `tool-detail${failed ? " error" : ""}${bash?.running ? " running" : ""}`);
+  detail.dataset.detailKey = `bash:${key}`;
+  const summary = element("summary", "tool-summary");
+  const prefix = bash?.excludeFromContext ? "!!" : "!";
+  summary.append(element("span", "tool-name", "Shell"));
+  summary.append(element("span", "tool-preview", `${prefix}${bash?.command || ""}`));
+  summary.append(element("span", "tool-state", bashState(bash)));
+  detail.append(summary);
+  detail.append(element("div", "tool-label", "COMMAND"), element("pre", "", `${prefix}${bash?.command || ""}`));
+  if (bash?.output || bash?.running) {
+    detail.append(element("div", "tool-label", "OUTPUT"), element("pre", "", bash?.output || ""));
+  }
+  if (bash?.fullOutputPath) {
+    detail.append(element("div", "tool-label", "FULL OUTPUT"), element("pre", "", bash.fullOutputPath));
+  }
+  if (bash?.running) detail.open = true;
+  return detail;
+}
+
 // Keep live transcript nodes mounted: replacing the tree on every token resets
 // disclosure layout, image loading, selection and browser scroll anchoring.
 function patchTranscript(parent, next) {
@@ -1106,8 +1168,7 @@ function renderMessages() {
     }
     if (message.summary) body.append(renderMarkdown(message.summary));
     if (message.role === "bashExecution") {
-      const label = message.excludeFromContext ? "!!" : "!";
-      body.append(element("pre", "", `${label}${message.command || ""}\n${message.output || ""}`));
+      body.append(renderBashExecution(message, messageKey(message) || String(index)));
     }
     if (message.errorMessage || ["error", "aborted"].includes(message.stopReason)) body.append(element("div", "message-error", message.errorMessage || (message.stopReason === "aborted" ? "Response stopped." : "The agent could not complete this response.")));
     if (message.role === "assistant" && !body.childElementCount) continue;
@@ -1158,8 +1219,7 @@ function renderMessages() {
     const header = element("div", "message-header");
     header.append(element("span", "avatar", "!"), element("span", "", "Shell"));
     const body = element("div", "message-content");
-    const label = ctx.bash.excludeFromContext ? "!!" : "!";
-    body.append(element("pre", "", `${label}${ctx.bash.command || ""}\n${ctx.bash.output || ""}`));
+    body.append(renderBashExecution(ctx.bash, "live"));
     article.append(header, body);
     next.append(article);
   }
@@ -1168,6 +1228,8 @@ function renderMessages() {
     detail.append(element("summary", "", "Process diagnostics"), element("pre", "", ctx.meta.stderr)); next.append(detail);
   }
   for (const node of next.querySelectorAll("details")) node.open = open.has(node.dataset.detailKey);
+  // Keep the in-flight shell card expanded so streamed output stays visible.
+  for (const node of next.querySelectorAll("details.tool-detail.running")) node.open = true;
   patchTranscript(root, next);
   $("welcome").hidden = Boolean(root.childElementCount);
   if (followBottom) conversation.scrollTop = conversation.scrollHeight;
@@ -1851,7 +1913,7 @@ $("composer").addEventListener("submit", async (event) => {
     if (attachments.length) { showNotice("Shell commands cannot include attachments. Remove them or send without !.", true); return; }
     if (!canWrite(ctx, "bash")) { showNotice("This profile does not allow direct shell commands.", true); return; }
     ctx.record.sending = true;
-    ctx.bash = { command: bang.command, output: "", running: true, excludeFromContext: bang.excludeFromContext };
+    ctx.bash = { command: bang.command, output: "", running: true, excludeFromContext: bang.excludeFromContext, startedAt: Date.now() };
     updateControls(); scheduleRender();
     try {
       const command = { type: "bash", command: bang.command };
