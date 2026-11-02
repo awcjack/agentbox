@@ -58,6 +58,12 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   Enter/Space when focused) to collapse or expand it; this state survives sidebar
   refreshes. Closed folders still expose session bubbles when the sidebar itself
   is collapsed.
+- Use a folder heading's **×** action to delete that label. Confirming calls
+  `DELETE /v1/session-folders?profile=...` with `{folder}`, which ungroups every
+  matching assignment (exact or nested) across the selected profiles and moves
+  those sessions to **Ungrouped**. Conversations are kept; only the folder label
+  is removed. Browser-only empty pins under that path are cleared from this
+  device. Ungrouped itself cannot be deleted.
 - On desktop, drag a session onto a folder heading or its contents to move it.
   Drop onto **Ungrouped** to remove its folder assignment; this target remains
   available even when empty. Closed folder headings accept drops, and the target

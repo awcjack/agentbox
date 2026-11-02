@@ -243,6 +243,7 @@ present, it must exactly match `allowedOrigins`.
 | `GET /v1/history?profile=default` | `sessions:read` | Native Pi history from the approved profile's session directory |
 | `GET /v1/session-folders?profile=default` | `sessions:read` | Shared folder assignments as `{folders:[{id,folder}]}` |
 | `PUT /v1/session-folders?profile=default` | `sessions:write` | Assign a native session with `{id,folder}`; empty folder ungroups |
+| `DELETE /v1/session-folders?profile=default` | `sessions:write` | Delete a folder label with `{folder}`; ungroups exact and nested matches |
 | `POST /v1/sessions` | `sessions:create` | Create or resume a supervised child |
 | `GET /v1/sessions` | `sessions:read` | List in-memory sessions |
 | `GET /v1/sessions/:id` | `sessions:read` | Session state and bounded stderr tail |
@@ -337,7 +338,11 @@ and on manual Refresh. Legacy browser assignments are imported on login using
 `{id,folder,importOnly:true}`: atomic create-if-absent returns the stored winner
 without overwriting another device's assignment. Ungrouping persists an empty
 folder tombstone (also returned by GET), preventing an older browser from
-resurrecting removed assignments.
+resurrecting removed assignments. DELETE `{folder:"Work/Project"}` ungroups every
+assignment equal to that label or nested under it (for example `Work/Project/UI`),
+including live sessions that have not yet written a native JSONL header, and
+returns `{folder,ungrouped:[{id,folder:""},...]}`. Empty folder is rejected;
+deleting a label with no matches still succeeds with an empty `ungrouped` list.
 
 `GET /v1/history?profile=default&includeArchived=true` includes archived history
 with an `archived` boolean on each history entry. History includes `createdAt`
