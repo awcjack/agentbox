@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  compareArchivedSessions, initSidebarResize, initSessionDragDrop, sessionActivitySymbol,
+  compareArchivedSessions, resolveRecentEntries, initSidebarResize, initSessionDragDrop, sessionActivitySymbol,
   sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders,
   readPinnedFolders, savePinnedFolders, folderOpenKey, isFolderOpen, partitionFolderEntries,
 } from "./sidebar.mjs";
@@ -42,6 +42,52 @@ test("archive sorting supports older servers and keeps equal creation dates stab
   const legacy = { modifiedAt: "2026-01-01T00:00:00.000Z" };
   const unknown = { name: "Unknown date" };
   assert.deepEqual([unknown, legacy, first, second].sort(compareArchivedSessions), [first, second, legacy, unknown]);
+});
+
+test("recents prefer live sessions and keep resumeable history", () => {
+  const live = { id: "runtime-1", nativeSessionId: "native-1", profile: "default", name: "Live" };
+  const past = { id: "native-2", profile: "default", name: "Past", archived: false };
+  const recent = [{ id: "runtime-1" }, { id: "native-2" }, { id: "missing" }];
+  const resolved = resolveRecentEntries(recent, {
+    sessions: [live],
+    history: [past],
+    isArchived: (session) => Boolean(session.archived),
+  });
+  assert.deepEqual(resolved.map((entry) => [entry.session.id, entry.historical]), [["runtime-1", false], ["native-2", true]]);
+});
+
+test("recents omit archived conversations even when history still lists them", () => {
+  const active = { id: "native-open", profile: "default", name: "Open", archived: false };
+  const archived = { id: "native-archived", profile: "work", name: "Archived", archived: true };
+  const ended = { id: "native-ended", profile: "default", name: "Ended", archived: false };
+  const recent = [{ id: "native-archived" }, { id: "native-ended" }, { id: "native-open" }];
+  const endedHistory = new Set(["default:native-ended"]);
+  const resolved = resolveRecentEntries(recent, {
+    sessions: [],
+    history: [active, archived, ended],
+    isArchived: (session) => session.archived || endedHistory.has(`${session.profile}:${session.id}`),
+  });
+  assert.deepEqual(resolved.map((entry) => entry.session.id), ["native-open"]);
+});
+
+test("recents hide history that is already running and honor profile filter and limit", () => {
+  const live = { id: "runtime-a", nativeSessionId: "native-a", profile: "work", status: "running" };
+  const work = { id: "native-b", profile: "work", archived: false };
+  const personal = { id: "native-c", profile: "personal", archived: false };
+  const recent = [{ id: "native-a" }, { id: "native-b" }, { id: "native-c" }, { id: "native-b" }];
+  const resolved = resolveRecentEntries(recent, {
+    sessions: [live],
+    history: [
+      { id: "native-a", profile: "work", archived: false },
+      work,
+      personal,
+    ],
+    filter: "work",
+    activeNative: new Set(["work:native-a"]),
+    isArchived: (session) => Boolean(session.archived),
+    limit: 1,
+  });
+  assert.deepEqual(resolved.map((entry) => [entry.session.id, entry.historical]), [["native-b", true]]);
 });
 
 test("folder keys follow native identity across runtime restarts and history", () => {
