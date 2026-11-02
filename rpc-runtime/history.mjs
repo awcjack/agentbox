@@ -52,11 +52,41 @@ export function conversationDraft(message) {
   return { text: text.join("\n"), images };
 }
 
+async function resolveSessionDirectory(path) {
+  if (typeof path !== "string" || !path) return null;
+  const resolved = resolve(path);
+  if (!(await lstat(resolved)).isDirectory()) return null;
+  return realpath(resolved);
+}
+
 async function historyDirectory(profile) {
   if (typeof profile.sessionDir !== "string" || !profile.sessionDir) return null;
-  const path = resolve(profile.sessionDir);
-  if (!(await lstat(path)).isDirectory()) return null;
-  return realpath(path);
+  return resolveSessionDirectory(profile.sessionDir);
+}
+
+// Primary sessionDir plus any orphan project folders folded into default when
+// their workspace directories are currently missing.
+async function historyDirectories(profile) {
+  const paths = [];
+  if (typeof profile.sessionDir === "string" && profile.sessionDir) paths.push(profile.sessionDir);
+  if (Array.isArray(profile.extraSessionDirs)) {
+    for (const path of profile.extraSessionDirs) {
+      if (typeof path === "string" && path) paths.push(path);
+    }
+  }
+  const roots = [];
+  const seen = new Set();
+  for (const path of paths) {
+    try {
+      const root = await resolveSessionDirectory(path);
+      if (!root || seen.has(root)) continue;
+      seen.add(root);
+      roots.push(root);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return roots;
 }
 
 async function readHeader(handle, id, cwd, allowSubdirectories = false) {
@@ -74,25 +104,28 @@ async function readHeader(handle, id, cwd, allowSubdirectories = false) {
 export async function resolveHistorySession(profile, id, { details = false } = {}) {
   if (typeof id !== "string" || !NATIVE_SESSION_ID_RE.test(id)) return null;
   try {
-    const root = await historyDirectory(profile);
-    if (!root) return null;
-    const directory = await opendir(root);
-    let visited = 0, match = null;
-    for await (const entry of directory) {
-      if (entry.name === ".session-folders" && entry.isDirectory()) continue;
-      // An incomplete scan cannot establish that a match is unique.
-      if (++visited > MAX_ENTRIES) return null;
-      if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.slice(-42, -6) !== id) continue;
-      const path = join(root, entry.name);
-      let handle;
-      try {
-        handle = await open(path, READ_FLAGS);
-        const parsed = await readHeader(handle, id, profile.cwd, profile.allowSubdirectories);
-        if (!parsed) continue;
-        if (match) return null;
-        match = details ? { path, cwd: parsed.header.cwd } : path;
-      } catch { /* Corrupt, unreadable or replaced entries are not sessions. */ }
-      finally { await handle?.close(); }
+    const roots = await historyDirectories(profile);
+    if (!roots.length) return null;
+    let match = null;
+    for (const root of roots) {
+      const directory = await opendir(root);
+      let visited = 0;
+      for await (const entry of directory) {
+        if (entry.name === ".session-folders" && entry.isDirectory()) continue;
+        // An incomplete scan cannot establish that a match is unique.
+        if (++visited > MAX_ENTRIES) return null;
+        if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.slice(-42, -6) !== id) continue;
+        const path = join(root, entry.name);
+        let handle;
+        try {
+          handle = await open(path, READ_FLAGS);
+          const parsed = await readHeader(handle, id, profile.cwd, profile.allowSubdirectories);
+          if (!parsed) continue;
+          if (match) return null;
+          match = details ? { path, cwd: parsed.header.cwd } : path;
+        } catch { /* Corrupt, unreadable or replaced entries are not sessions. */ }
+        finally { await handle?.close(); }
+      }
     }
     return match;
   } catch { return null; }
@@ -140,12 +173,17 @@ export async function createConversationHistory(profile, sourceId, snapshot, pre
 // Sidecar markers leave native Pi JSONL files untouched. Exclusive creation
 // makes repeated archive requests safe without following existing symlinks.
 export async function archiveHistory(profile, id) {
-  if (!profile.sessionDir) return; // Ephemeral profiles have no browsable history.
   if (!NATIVE_SESSION_ID_RE.test(id)) throw new Error("invalid archive session ID");
   let root;
-  try { root = await historyDirectory(profile); }
-  catch (error) { if (error.code === "ENOENT") return; throw error; }
-  if (!root) throw new Error("invalid history directory");
+  const saved = await resolveHistorySession(profile, id, { details: true });
+  if (saved?.path) {
+    root = resolve(saved.path, "..");
+  } else {
+    if (!profile.sessionDir) return; // Ephemeral profiles have no browsable history.
+    try { root = await historyDirectory(profile); }
+    catch (error) { if (error.code === "ENOENT") return; throw error; }
+    if (!root) throw new Error("invalid history directory");
+  }
   const path = join(root, `.archived-${id.toLowerCase()}`);
   let handle;
   try {
@@ -157,35 +195,45 @@ export async function archiveHistory(profile, id) {
 }
 
 export async function listHistory(profile, profileName, { includeArchived = false } = {}) {
-  if (!profile.sessionDir) return { sessions: [], truncated: false };
-  let directory, root;
+  if (!profile.sessionDir && !(Array.isArray(profile.extraSessionDirs) && profile.extraSessionDirs.length)) {
+    return { sessions: [], truncated: false };
+  }
+  let roots;
   try {
-    root = await historyDirectory(profile);
-    if (!root) return { sessions: [], truncated: false };
-    directory = await opendir(root);
+    roots = await historyDirectories(profile);
   } catch (error) {
     if (error.code === "ENOENT") return { sessions: [], truncated: false };
     throw error;
   }
+  if (!roots.length) return { sessions: [], truncated: false };
   const files = [];
   let visited = 0, truncated = false;
-  for await (const entry of directory) {
-    if (entry.name === ".session-folders" && entry.isDirectory()) continue;
-    if (++visited > MAX_ENTRIES) { truncated = true; break; }
-    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-    const id = entry.name.slice(-42, -6);
-    if (!NATIVE_SESSION_ID_RE.test(id)) continue;
-    const path = join(root, entry.name);
-    try {
-      let archived = false;
+  for (const root of roots) {
+    let directory;
+    try { directory = await opendir(root); }
+    catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    for await (const entry of directory) {
+      if (entry.name === ".session-folders" && entry.isDirectory()) continue;
+      if (++visited > MAX_ENTRIES) { truncated = true; break; }
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const id = entry.name.slice(-42, -6);
+      if (!NATIVE_SESSION_ID_RE.test(id)) continue;
+      const path = join(root, entry.name);
       try {
-        await lstat(join(root, `.archived-${id.toLowerCase()}`));
-        archived = true;
-      } catch (error) { if (error.code !== "ENOENT") throw error; }
-      if (archived && !includeArchived) continue;
-      const info = await lstat(path);
-      if (info.isFile()) files.push({ path, id, archived, modified: info.mtimeMs });
-    } catch { /* A session can be removed while the directory is being scanned. */ }
+        let archived = false;
+        try {
+          await lstat(join(root, `.archived-${id.toLowerCase()}`));
+          archived = true;
+        } catch (error) { if (error.code !== "ENOENT") throw error; }
+        if (archived && !includeArchived) continue;
+        const info = await lstat(path);
+        if (info.isFile()) files.push({ path, id, archived, modified: info.mtimeMs });
+      } catch { /* A session can be removed while the directory is being scanned. */ }
+    }
+    if (truncated) break;
   }
   files.sort((a, b) => b.modified - a.modified);
   if (files.length > 1000) truncated = true;
