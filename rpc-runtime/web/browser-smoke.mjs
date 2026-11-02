@@ -72,9 +72,9 @@ const server = createServer(async (request, response) => {
     }
     if (request.headers.authorization !== "Bearer smoke-token") return json(response, 401, { error: { code: "unauthorized", message: "Invalid smoke token" } });
     let body;
-    if (["POST", "PUT"].includes(request.method)) {
+    if (["POST", "PUT", "DELETE"].includes(request.method) && request.headers["content-type"]?.includes("application/json")) {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      body = JSON.parse(Buffer.concat(chunks).toString());
+      body = JSON.parse(Buffer.concat(chunks).toString() || "null");
     }
     if (url.pathname === "/v1/profiles") return json(response, 200, { profiles: ["default"] });
     if (url.pathname === "/v1/folders") {
