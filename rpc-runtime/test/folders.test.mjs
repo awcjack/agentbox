@@ -55,3 +55,32 @@ test("workspace history includes child folders and returns the saved cwd for res
     assert.equal(await resolveHistorySession(profile, id), null);
   }
 });
+
+test("default history includes orphan project session dirs when cwd is missing", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pi-orphan-history-")));
+  const orphan = await realpath(await mkdtemp(join(tmpdir(), "pi-orphan-project-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(orphan, { recursive: true, force: true }));
+  const workspaceId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+  const orphanId = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+  const workspacePath = join(root, `${workspaceId}.jsonl`);
+  const orphanPath = join(orphan, `${orphanId}.jsonl`);
+  await writeFile(workspacePath, JSON.stringify({ type: "session", version: 3, id: workspaceId, cwd: "/workspace" }) + "\n");
+  await writeFile(orphanPath, JSON.stringify({ type: "session", version: 3, id: orphanId, cwd: "/workspace/brian-associates" }) + "\n"
+    + JSON.stringify({ type: "session_info", name: "intro" }) + "\n");
+
+  const profile = {
+    cwd: "/workspace",
+    sessionDir: root,
+    extraSessionDirs: [orphan],
+    allowSubdirectories: true,
+  };
+  const { sessions } = await listHistory(profile, "default");
+  assert.deepEqual(sessions.map((session) => session.id).sort(), [orphanId, workspaceId].sort());
+  assert.equal(sessions.find((session) => session.id === orphanId).name, "intro");
+  assert.equal(sessions.find((session) => session.id === orphanId).profile, "default");
+  assert.deepEqual(await resolveHistorySession(profile, orphanId, { details: true }), {
+    path: orphanPath,
+    cwd: "/workspace/brian-associates",
+  });
+});

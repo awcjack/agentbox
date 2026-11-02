@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, symlink, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { discoverWorkspaceProfiles } from "../discover-profiles.mjs";
+import { discoverOrphanSessionDirs, discoverWorkspaceProfiles } from "../discover-profiles.mjs";
 import { normalizeConfig } from "../runtime.mjs";
 import { createHash } from "node:crypto";
 
@@ -162,4 +162,58 @@ test("normalizeConfig leaves discovery disabled and rejects bad discovery config
       args: ["--session-dir=/tmp"],
     },
   })), /supervisor-owned/);
+});
+
+test("discoverOrphanSessionDirs returns history folders without a live project profile", async (t) => {
+  const prefix = await mkdtemp(join(tmpdir(), "pi-orphan-sessions-"));
+  t.after(() => rm(prefix, { recursive: true, force: true }));
+  await mkdir(join(prefix, "--workspace--"));
+  await mkdir(join(prefix, "--agentbox--"));
+  await mkdir(join(prefix, "--brian-associates--"));
+  await mkdir(join(prefix, "--home-server--"));
+  await mkdir(join(prefix, ".migration-backups"));
+  await writeFile(join(prefix, "readme.txt"), "nope");
+
+  const orphans = discoverOrphanSessionDirs({
+    sessionDirPrefix: prefix,
+    existingSessionDirs: [
+      { name: "default", path: join(prefix, "--workspace--") },
+      { name: "home-server", path: join(prefix, "--home-server--") },
+    ],
+  });
+  assert.deepEqual(orphans.map((item) => item.name), ["agentbox", "brian-associates"]);
+  assert.equal(orphans[0].sessionDir, join(prefix, "--agentbox--"));
+});
+
+test("normalizeConfig folds orphan project history into default", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-orphan-root-"));
+  const sessions = await mkdtemp(join(tmpdir(), "pi-orphan-prefix-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(sessions, { recursive: true, force: true }));
+  await mkdir(join(root, "home-server"));
+  await mkdir(join(sessions, "--workspace--"));
+  await mkdir(join(sessions, "--home-server--"));
+  await mkdir(join(sessions, "--brian-associates--"));
+  await mkdir(join(sessions, "--agentbox--"));
+
+  const normalized = normalizeConfig(baseConfig({
+    autoDiscoverProfiles: {
+      enable: true,
+      root,
+      sessionDirPrefix: sessions,
+    },
+    profiles: {
+      default: {
+        cwd: root,
+        sessionDir: join(sessions, "--workspace--"),
+      },
+    },
+  }));
+
+  assert.deepEqual([...normalized.profiles.keys()].sort(), ["default", "home-server"]);
+  assert.deepEqual(
+    normalized.profiles.get("default").extraSessionDirs,
+    [join(sessions, "--agentbox--"), join(sessions, "--brian-associates--")],
+  );
+  assert.equal(normalized.profiles.get("home-server").extraSessionDirs, undefined);
 });
