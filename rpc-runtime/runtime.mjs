@@ -9,6 +9,7 @@ import { normalize as normalizePath } from "node:path";
 import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, selectFolder } from "./folders.mjs";
+import { discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
 const WEB_DIR = new URL("./web/", import.meta.url);
@@ -135,7 +136,6 @@ const SCOPES = new Set([
 
 const DIALOG_METHODS = new Set(["confirm", "editor", "input", "select"]);
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PROFILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const SAFE_CHILD_ENV = Object.freeze({
@@ -218,11 +218,11 @@ function normalizeCommands(value, fallback, label) {
   return new Set(commands);
 }
 
-export function normalizeConfig(runtimeConfig, environment = process.env) {
+export function normalizeConfig(runtimeConfig, environment = process.env, dependencies = {}) {
   const root = assertObject(runtimeConfig, "runtime config");
   assertKnownKeys(root, new Set(["version", "defaults", "servers", "piRpcApi"]), "runtime config");
   const raw = assertObject(root.piRpcApi, "piRpcApi");
-  assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "limits"]), "piRpcApi");
+  assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "autoDiscoverProfiles", "limits"]), "piRpcApi");
   const auth = assertObject(raw.auth, "piRpcApi.auth");
   assertKnownKeys(auth, new Set(["tokens"]), "piRpcApi.auth");
   if (!Array.isArray(auth.tokens) || auth.tokens.length === 0) {
@@ -348,6 +348,101 @@ export function normalizeConfig(runtimeConfig, environment = process.env) {
       allowedCommands: profileCommands,
     });
   }
+
+  const discoveredProfiles = [];
+  if (raw.autoDiscoverProfiles !== undefined) {
+    const discovery = assertObject(raw.autoDiscoverProfiles, "piRpcApi.autoDiscoverProfiles");
+    assertKnownKeys(discovery, new Set([
+      "enable", "root", "sessionDirPrefix", "exclude", "excludePrefixes", "maxProfiles",
+      "args", "env", "envReferences", "allowedCommands",
+    ]), "piRpcApi.autoDiscoverProfiles");
+    if (discovery.enable !== true && discovery.enable !== false) {
+      throw new Error("piRpcApi.autoDiscoverProfiles.enable must be a boolean");
+    }
+    if (discovery.enable) {
+      if (typeof discovery.root !== "string" || !discovery.root.startsWith("/")) {
+        throw new Error("piRpcApi.autoDiscoverProfiles.root must be an absolute path");
+      }
+      if (typeof discovery.sessionDirPrefix !== "string" || !discovery.sessionDirPrefix.startsWith("/")) {
+        throw new Error("piRpcApi.autoDiscoverProfiles.sessionDirPrefix must be an absolute path");
+      }
+      const templateArgs = stringArray(discovery.args, [], "piRpcApi.autoDiscoverProfiles.args");
+      const ownsSessionOption = (arg) => [
+        "--continue", "--fork", "--mode", "--name", "--no-session", "--resume", "--session",
+        "--session-id", "--session-dir", "-c", "-n", "-r",
+      ].some((option) => arg === option || (option.startsWith("--") && arg.startsWith(`${option}=`)));
+      if (templateArgs.some(ownsSessionOption)) {
+        throw new Error("piRpcApi.autoDiscoverProfiles.args contains a supervisor-owned option");
+      }
+      const templateEnv = discovery.env === undefined
+        ? {}
+        : assertObject(discovery.env, "piRpcApi.autoDiscoverProfiles.env");
+      if (Object.entries(templateEnv).some(([key, value]) => !ENV_NAME_RE.test(key) || typeof value !== "string")) {
+        throw new Error("piRpcApi.autoDiscoverProfiles.env must map environment variable names to strings");
+      }
+      if (Object.keys(templateEnv).some((key) => authEnvironmentNames.has(key))) {
+        throw new Error("piRpcApi.autoDiscoverProfiles.env must not define an RPC authentication variable");
+      }
+      const templateEnvReferences = discovery.envReferences === undefined
+        ? {}
+        : assertObject(discovery.envReferences, "piRpcApi.autoDiscoverProfiles.envReferences");
+      const resolvedTemplateEnv = { ...templateEnv };
+      for (const [destination, source] of Object.entries(templateEnvReferences)) {
+        if (!ENV_NAME_RE.test(destination) || typeof source !== "string" || !ENV_NAME_RE.test(source)) {
+          throw new Error("piRpcApi.autoDiscoverProfiles.envReferences must map environment variable names to environment variable names");
+        }
+        if (authEnvironmentNames.has(source) || authEnvironmentNames.has(destination)) {
+          throw new Error("piRpcApi.autoDiscoverProfiles.envReferences must not expose an RPC authentication variable");
+        }
+        if (Object.hasOwn(resolvedTemplateEnv, destination)) {
+          throw new Error(`piRpcApi.autoDiscoverProfiles defines ${destination} in both env and envReferences`);
+        }
+        const value = environment[source];
+        if (typeof value !== "string" || value.length === 0) {
+          throw new Error(`piRpcApi.autoDiscoverProfiles.envReferences requires environment variable ${source}`);
+        }
+        resolvedTemplateEnv[destination] = value;
+      }
+      const templateCommands = discovery.allowedCommands === undefined
+        ? new Set(allowedCommands)
+        : normalizeCommands(discovery.allowedCommands, [], "piRpcApi.autoDiscoverProfiles.allowedCommands");
+      for (const command of templateCommands) {
+        if (!allowedCommands.has(command)) throw new Error(`autoDiscoverProfiles cannot add command ${command}`);
+      }
+
+      const ownedBeforeDiscovery = [];
+      for (const [name, profile] of profiles) {
+        if (profile.sessionDir === undefined) continue;
+        ownedBeforeDiscovery.push({ name, path: profile.sessionDir });
+      }
+      // Do not reuse dependencies.realpath: createRuntime uses that hook for the
+      // Pi executable store-path check, which is unrelated to workspace scanning.
+      const discovered = discoverWorkspaceProfiles({
+        root: discovery.root,
+        sessionDirPrefix: discovery.sessionDirPrefix,
+        exclude: discovery.exclude ?? [],
+        excludePrefixes: discovery.excludePrefixes ?? ["tmp-"],
+        maxProfiles: discovery.maxProfiles ?? 64,
+        existingNames: new Set(profiles.keys()),
+        existingSessionDirs: ownedBeforeDiscovery,
+        ...(dependencies.readdirSync ? { readdirSync: dependencies.readdirSync } : {}),
+        ...(dependencies.statSync ? { statSync: dependencies.statSync } : {}),
+        ...(dependencies.discoverRealpathSync ? { realpathSync: dependencies.discoverRealpathSync } : {}),
+      });
+      for (const entry of discovered) {
+        profiles.set(entry.name, {
+          cwd: entry.cwd,
+          allowSubdirectories: true,
+          sessionDir: entry.sessionDir,
+          args: templateArgs,
+          env: resolvedTemplateEnv,
+          allowedCommands: templateCommands,
+        });
+        discoveredProfiles.push(entry.name);
+      }
+    }
+  }
+
   if (profiles.size === 0) throw new Error("piRpcApi.profiles must define at least one profile");
   const ownedSessionDirs = [];
   for (const [name, profile] of profiles) {
@@ -394,7 +489,16 @@ export function normalizeConfig(runtimeConfig, environment = process.env) {
     }
   }
 
-  return { host, port, executable, tokens, profiles, limits, allowedOrigins: new Set(allowedOrigins) };
+  return {
+    host,
+    port,
+    executable,
+    tokens,
+    profiles,
+    discoveredProfiles,
+    limits,
+    allowedOrigins: new Set(allowedOrigins),
+  };
 }
 
 class EventRing {
@@ -977,7 +1081,10 @@ function parseAfterId(request, url) {
 }
 
 export function createRuntime(runtimeConfig, dependencies = {}) {
-  const normalizedConfig = normalizeConfig(runtimeConfig, dependencies.environment ?? process.env);
+  const normalizedConfig = normalizeConfig(runtimeConfig, dependencies.environment ?? process.env, dependencies);
+  if (normalizedConfig.discoveredProfiles.length) {
+    process.stderr.write(`pi-rpc-runtime discovered profiles: ${normalizedConfig.discoveredProfiles.join(", ")}\n`);
+  }
   const resolveExecutable = dependencies.realpath ?? realpathSync;
   let executable;
   try {
@@ -1545,4 +1652,4 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   return { config, server, sessions, listen, close };
 }
 
-export const internals = { attachLfJsonReader, HARD_FORBIDDEN_COMMANDS };
+export const internals = { attachLfJsonReader, HARD_FORBIDDEN_COMMANDS, discoverWorkspaceProfiles, PROFILE_NAME_RE };
