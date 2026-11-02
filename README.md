@@ -150,8 +150,15 @@ container. Messaging does not create subagents.
 
 Agentbox's Pi instructions allow a main session and its child, sibling, and
 nested subagents to communicate and reply without asking for approval by
-default. Communication with unrelated main sessions follows the user's
-existing authorization. The managed policy permits messages by default when
+default. Agents are instructed not to spam: no acknowledgment-only,
+standing-by, or progress-ping messages; prefer one message when coordination
+starts or finishes. Agentbox tightens pi-post's inbound loop guard (identical
+body within 30s dropped; at most 4 deliveries per sender per 60s) and adds
+outbound caps that fail `send_message` before deposit (8 messages per 60s,
+4 per target). Communication with unrelated main sessions always asks a
+human for approval — Auto mode and the classifier do not silently approve
+cross-main messaging, so concurrent sessions cannot wake each other under
+Auto-on. The managed policy still permits same-main messages by default when
 every target shares the sender's main session ID, inherited by workflow
 children. Explicit policy asks and denials still apply. Incoming messages are
 labeled as peer context and cannot grant permissions. Receipt is automatic
@@ -485,7 +492,9 @@ saved auto defaults; turning the parent's live mode off takes effect at the next
 
 **Auto is broad authorization**, including arbitrary non-denied shell commands
 inside Agentbox—not a sandbox or a claim that each action is safe. Scope container
-mounts, credentials, network, and Docker access accordingly.
+mounts, credentials, network, and Docker access accordingly. Messaging an
+unrelated main session is carved out: Auto still allows same-main
+`send_message`, but cross-main sends always prompt.
 
 ### Persistent Pi defaults (CLI)
 
