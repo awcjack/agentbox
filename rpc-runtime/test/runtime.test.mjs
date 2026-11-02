@@ -1677,6 +1677,49 @@ test("session folder creation persists grouping before a prompt without changing
   assert.equal(ephemeral.spawns.length, 0);
 });
 
+test("session folder DELETE ungroups nested labels and live sessions", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-delete-folder-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = config({ profiles: { default: { cwd: "/workspace", sessionDir: root } } });
+  const first = await fixture(t, settings);
+  const path = "/v1/session-folders?profile=default";
+  const del = (body, options = {}) => request(first.baseUrl, path, { method: "DELETE", body, ...options });
+  assert.equal((await del({ folder: "Work" }, { auth: false })).response.status, 401);
+  for (const body of [null, {}, { folder: "" }, { folder: "Work", extra: true }, { folder: 5 }, { folder: "a/../b" }]) {
+    assert.equal((await del(body)).response.status, 400);
+  }
+  assert.deepEqual((await del({ folder: "Missing" })).body, { folder: "Missing", ungrouped: [] });
+  const nested = await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { folder: "Work/Agentbox", name: "Nested" } });
+  const sibling = await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { folder: "Work/Other", name: "Sibling" } });
+  const personal = await request(first.baseUrl, "/v1/sessions", { method: "POST", body: { folder: "Personal", name: "Personal" } });
+  assert.equal(nested.response.status, 201);
+  assert.equal(sibling.response.status, 201);
+  assert.equal(personal.response.status, 201);
+  const nestedId = nested.body.session.nativeSessionId;
+  const siblingId = sibling.body.session.nativeSessionId;
+  const personalId = personal.body.session.nativeSessionId;
+  await writeFile(join(root, `${nestedId}.jsonl`), JSON.stringify({ type: "session", version: 3, id: nestedId, cwd: "/workspace" }) + "\n");
+  await writeFile(join(root, `${siblingId}.jsonl`), JSON.stringify({ type: "session", version: 3, id: siblingId, cwd: "/workspace" }) + "\n");
+  await writeFile(join(root, `${personalId}.jsonl`), JSON.stringify({ type: "session", version: 3, id: personalId, cwd: "/workspace" }) + "\n");
+  const deleted = await del({ folder: " / Work / " });
+  assert.equal(deleted.response.status, 200);
+  assert.equal(deleted.body.folder, "Work");
+  assert.deepEqual(new Set(deleted.body.ungrouped.map((item) => item.id)), new Set([nestedId, siblingId]));
+  assert.ok(deleted.body.ungrouped.every((item) => item.folder === ""));
+  const listed = await request(first.baseUrl, path);
+  assert.deepEqual(new Map(listed.body.folders.map(({ id, folder }) => [id, folder])), new Map([
+    [nestedId, ""],
+    [siblingId, ""],
+    [personalId, "Personal"],
+  ]));
+  assert.equal((await request(first.baseUrl, "/v1/sessions")).body.sessions.find((session) => session.nativeSessionId === nestedId).folder, "");
+  assert.equal((await request(first.baseUrl, "/v1/sessions")).body.sessions.find((session) => session.nativeSessionId === personalId).folder, "Personal");
+  for (const scope of ["sessions:read", "sessions:write", "profiles:read"]) {
+    const scoped = await fixture(t, config({ auth: { tokens: [{ sha256: TOKEN_HASH, scopes: [scope] }] }, profiles: { default: { cwd: "/workspace", sessionDir: root } } }));
+    assert.equal((await request(scoped.baseUrl, path, { method: "DELETE", body: { folder: "Personal" } })).response.status, scope === "sessions:write" ? 200 : 403);
+  }
+});
+
 test("saved history archive requires delete scope, retains history and never starts Pi", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-history-archive-api-"));
   t.after(() => rm(root, { recursive: true, force: true }));

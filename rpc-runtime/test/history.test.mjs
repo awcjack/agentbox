@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, utimes,
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
-import { listSessionFolders, writeSessionFolder, normalizeSessionFolder, sessionFolderDirectory, archiveHistory, createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
+import { listSessionFolders, writeSessionFolder, deleteSessionFolder, sessionFolderMatches, normalizeSessionFolder, sessionFolderDirectory, archiveHistory, createConversationHistory, listHistory, NATIVE_SESSION_ID_RE, resolveHistorySession } from "../history.mjs";
 
 const ID = "01991817-3dac-7000-8123-0123456789ab";
 const OLD_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
@@ -374,4 +374,31 @@ test("imports preserve assignments and tombstones and race safely with updates",
     }
   }
   assert.equal((await readdir(join(root, ".session-folders"))).some((name) => name.startsWith(".session-folder-tmp-")), false);
+});
+
+test("deleteSessionFolder ungroups exact and nested labels and rejects empty folders", async (t) => {
+  const { root, profile } = await fixture(t);
+  const THIRD = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  await writeFile(join(root, `${ID}.jsonl`), header());
+  await writeFile(join(root, `${OLD_ID}.jsonl`), header(OLD_ID));
+  await writeFile(join(root, `${THIRD}.jsonl`), header(THIRD));
+  await writeSessionFolder(root, profile, "default", ID, "Work/Agentbox");
+  await writeSessionFolder(root, profile, "default", OLD_ID, "Work/Other");
+  await writeSessionFolder(root, profile, "default", THIRD, "Personal");
+  assert.equal(sessionFolderMatches("Work", "Work/Agentbox"), true);
+  assert.equal(sessionFolderMatches("Work", "Work"), true);
+  assert.equal(sessionFolderMatches("Work", "Workplace"), false);
+  await assert.rejects(deleteSessionFolder(root, profile, "default", ""));
+  await assert.rejects(deleteSessionFolder(root, profile, "default", " / / "));
+  assert.deepEqual(await deleteSessionFolder(root, profile, "default", "Missing"), { folder: "Missing", ungrouped: [] });
+  const nested = await deleteSessionFolder(root, profile, "default", "Work");
+  assert.equal(nested.folder, "Work");
+  assert.deepEqual(new Set(nested.ungrouped.map((item) => item.id)), new Set([ID, OLD_ID]));
+  assert.ok(nested.ungrouped.every((item) => item.folder === ""));
+  assert.deepEqual(await listSessionFolders(root, profile, "default"), [
+    { id: ID, folder: "" },
+    { id: OLD_ID, folder: "" },
+    { id: THIRD, folder: "Personal" },
+  ].sort((a, b) => a.id.localeCompare(b.id)));
+  assert.equal(await writeSessionFolder(root, profile, "default", ID, "resurrect", { importOnly: true }), "");
 });
