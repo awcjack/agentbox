@@ -98,7 +98,9 @@ test("discoverWorkspaceProfiles rejects symlink escape and over-limit trees", as
 
 test("normalizeConfig merges discovered profiles and keeps explicit overrides", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-discover-config-"));
+  const sessions = await mkdtemp(join(tmpdir(), "pi-discover-sessions-"));
   t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(sessions, { recursive: true, force: true }));
   await mkdir(join(root, "aogb-erp"));
   await mkdir(join(root, "custom"));
   await mkdir(join(root, "tmp-ignore"));
@@ -107,7 +109,7 @@ test("normalizeConfig merges discovered profiles and keeps explicit overrides", 
     autoDiscoverProfiles: {
       enable: true,
       root,
-      sessionDirPrefix: "/home/agent/.pi/agent/sessions",
+      sessionDirPrefix: sessions,
       excludePrefixes: ["tmp-"],
       args: ["--approve"],
       envReferences: { GH_TOKEN: "GH_TOKEN" },
@@ -115,11 +117,11 @@ test("normalizeConfig merges discovered profiles and keeps explicit overrides", 
     profiles: {
       default: {
         cwd: root,
-        sessionDir: "/home/agent/.pi/agent/sessions/--workspace--",
+        sessionDir: `${sessions}/--workspace--`,
       },
       custom: {
         cwd: join(root, "custom"),
-        sessionDir: "/home/agent/.pi/agent/sessions/--custom-explicit--",
+        sessionDir: `${sessions}/--custom-explicit--`,
         args: ["--no-context-files"],
       },
     },
@@ -129,11 +131,12 @@ test("normalizeConfig merges discovered profiles and keeps explicit overrides", 
   assert.deepEqual([...normalized.profiles.keys()].sort(), ["aogb-erp", "custom", "default"]);
   assert.deepEqual(normalized.discoveredProfiles, ["aogb-erp"]);
   assert.equal(normalized.profiles.get("aogb-erp").cwd, join(root, "aogb-erp"));
-  assert.equal(normalized.profiles.get("aogb-erp").sessionDir, "/home/agent/.pi/agent/sessions/--aogb-erp--");
+  assert.equal(normalized.profiles.get("aogb-erp").sessionDir, `${sessions}/--aogb-erp--`);
   assert.deepEqual(normalized.profiles.get("aogb-erp").args, ["--approve"]);
   assert.equal(normalized.profiles.get("aogb-erp").env.GH_TOKEN, "secret-token");
   assert.deepEqual(normalized.profiles.get("custom").args, ["--no-context-files"]);
-  assert.equal(normalized.profiles.get("custom").sessionDir, "/home/agent/.pi/agent/sessions/--custom-explicit--");
+  assert.equal(normalized.profiles.get("custom").sessionDir, `${sessions}/--custom-explicit--`);
+  assert.equal(normalized.profiles.get("default").extraSessionDirs, undefined);
 });
 
 test("normalizeConfig leaves discovery disabled and rejects bad discovery config", () => {
@@ -183,6 +186,17 @@ test("discoverOrphanSessionDirs returns history folders without a live project p
   });
   assert.deepEqual(orphans.map((item) => item.name), ["agentbox", "brian-associates"]);
   assert.equal(orphans[0].sessionDir, join(prefix, "--agentbox--"));
+});
+
+test("discoverOrphanSessionDirs treats a missing sessionDirPrefix as empty", () => {
+  assert.deepEqual(discoverOrphanSessionDirs({
+    sessionDirPrefix: "/tmp/pi-orphan-missing-prefix-does-not-exist",
+    existingSessionDirs: [{ name: "default", path: "/tmp/pi-orphan-missing-prefix-does-not-exist/--workspace--" }],
+  }), []);
+  assert.throws(() => discoverOrphanSessionDirs({
+    sessionDirPrefix: "/tmp/pi-orphan-missing-prefix-does-not-exist",
+    readdirSync() { const error = new Error("EACCES: permission denied"); error.code = "EACCES"; throw error; },
+  }), /could not be read/);
 });
 
 test("normalizeConfig folds orphan project history into default", async (t) => {

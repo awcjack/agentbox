@@ -136,6 +136,9 @@ export function discoverOrphanSessionDirs({
   try {
     entries = readdirSync(resolvedPrefix, { withFileTypes: true });
   } catch (error) {
+    // Fresh installs and Nix check sandboxes may not have created the prefix yet.
+    // No directory means there are simply no orphan history folders to attach.
+    if (error && (error.code === "ENOENT" || /ENOENT/.test(String(error.message || "")))) return [];
     throw new Error(`orphanSessionDirs.sessionDirPrefix could not be read: ${error.message}`);
   }
 
