@@ -228,6 +228,7 @@ in
         cp ${./rpc-runtime/runtime.mjs} $out/runtime.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs
         cp ${./rpc-runtime/folders.mjs} $out/folders.mjs
+        cp ${./rpc-runtime/discover-profiles.mjs} $out/discover-profiles.mjs
         cp ${./rpc-runtime/supervise.sh} $out/supervise.sh
         cp ${./rpc-runtime/test}/*.test.mjs $out/test/
         cp -r ${./rpc-runtime/web} $out/web
