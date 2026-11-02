@@ -106,3 +106,55 @@ export function discoverWorkspaceProfiles({
   }
   return candidates;
 }
+
+const SESSION_FOLDER_RE = /^--([A-Za-z0-9][A-Za-z0-9._-]{0,63})--$/;
+
+/**
+ * Find persistent `--name--` history folders that no longer have a live project
+ * profile. Callers attach these to the default profile so sessions remain listed
+ * when workspace directories come and go.
+ */
+export function discoverOrphanSessionDirs({
+  sessionDirPrefix,
+  existingSessionDirs = [],
+  readdirSync = defaultReaddirSync,
+  statSync = defaultStatSync,
+} = {}) {
+  const resolvedPrefix = assertAbsoluteNormalized(sessionDirPrefix, "orphanSessionDirs.sessionDirPrefix");
+  if (!Array.isArray(existingSessionDirs)) {
+    throw new Error("orphanSessionDirs.existingSessionDirs must be an array");
+  }
+  const owned = new Set();
+  for (const item of existingSessionDirs) {
+    if (!item || typeof item.path !== "string" || !item.path) {
+      throw new Error("orphanSessionDirs.existingSessionDirs entries require a path");
+    }
+    owned.add(item.path);
+  }
+
+  let entries;
+  try {
+    entries = readdirSync(resolvedPrefix, { withFileTypes: true });
+  } catch (error) {
+    throw new Error(`orphanSessionDirs.sessionDirPrefix could not be read: ${error.message}`);
+  }
+
+  const orphans = [];
+  for (const entry of entries) {
+    const matched = SESSION_FOLDER_RE.exec(entry.name);
+    if (!matched) continue;
+    const name = matched[1];
+    if (!PROFILE_NAME_RE.test(name)) continue;
+    const sessionDir = `${resolvedPrefix}/${entry.name}`;
+    if (normalizePath(sessionDir) !== sessionDir) continue;
+    if (owned.has(sessionDir)) continue;
+    try {
+      if (!statSync(sessionDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    orphans.push({ name, sessionDir });
+  }
+  orphans.sort((a, b) => a.name.localeCompare(b.name));
+  return orphans;
+}
