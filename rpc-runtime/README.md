@@ -121,6 +121,13 @@ checks reject startup. Discovered profiles share the same Pi credentials home;
 this is soft project selection, not container isolation. Pi still loads each
 project's `AGENTS.md` / `CLAUDE.md` from that profile's cwd.
 
+When a previously discovered project's working directory is missing at startup,
+its `--name--` history folder is attached to the **default** profile as an extra
+session directory. Those conversations stay listed under default (never hidden)
+until the project directory returns and discovery recreates the project profile.
+Resuming such a session falls back to the default workspace root when the saved
+cwd is temporarily unavailable.
+
 Image prompts include base64 overhead in the JSON body. For example, set
 `limits.maxBodyBytes` to `8388608` and `limits.maxRecordBytes` to `16777216` for
 larger image-bearing requests and Pi records. These are finite limits, not an
