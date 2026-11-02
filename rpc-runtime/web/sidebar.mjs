@@ -253,8 +253,9 @@ export function initSessionDragDrop(root, { getSource, canMove, move, onEnd }) {
   function dropTargetAllows(sourceEntry, target) {
     if (!sourceEntry || !target || !canMove(sourceEntry)) return false;
     const project = target.dataset.projectProfile;
-    // Folder targets inside Projects must stay in the session's profile/cwd.
-    if (project && project !== sourceEntry.session.profile) return false;
+    // Cross-project moves rewrite persisted history into another profile cwd.
+    // Live runtime rows keep the process cwd, so only historical rows may leave.
+    if (project && project !== sourceEntry.session.profile && !sourceEntry.historical) return false;
     return true;
   }
   root.addEventListener("dragover", (event) => {
@@ -276,12 +277,13 @@ export function initSessionDragDrop(root, { getSource, canMove, move, onEnd }) {
     const target = closest(event.target, "[data-folder-path]");
     const allowed = dropTargetAllows(source, target);
     const folder = target?.dataset.folderPath;
+    const profile = target?.dataset.projectProfile;
     const previous = clear();
     if (!previous) return;
     try {
       if (allowed) {
         event.preventDefault();
-        move(previous, folder);
+        move(previous, { folder, profile });
       }
     } finally {
       onEnd?.();

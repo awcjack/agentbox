@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, opendir, realpath, rename, unlink } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { containsFolder } from "./folders.mjs";
 import { messageTitle } from "./web/session-title.mjs";
@@ -192,6 +192,121 @@ export async function archiveHistory(profile, id) {
   } catch (error) {
     if (error.code !== "EEXIST" || !(await lstat(path)).isFile()) throw error;
   } finally { await handle?.close(); }
+}
+
+// Relocate a persisted conversation into another profile's sessionDir, rewriting
+// the session header cwd so history discovery accepts it under the target. Folder
+// labels stay optional organizational metadata on the destination profile.
+export async function moveHistorySession(sourceProfile, sourceProfileName, targetProfile, targetProfileName, id, { folder = "", maxBytes } = {}) {
+  if (!NATIVE_SESSION_ID_RE.test(id)) throw new Error("invalid session ID");
+  if (typeof sourceProfileName !== "string" || !sourceProfileName) throw new Error("source profile name is required");
+  if (typeof targetProfileName !== "string" || !targetProfileName) throw new Error("target profile name is required");
+  if (sourceProfileName === targetProfileName) throw new Error("source and target profiles must differ");
+  if (typeof maxBytes !== "number" || !(maxBytes > 0)) throw new Error("maxBytes is required");
+  folder = normalizeSessionFolder(folder);
+  if (typeof targetProfile?.sessionDir !== "string" || !targetProfile.sessionDir) {
+    throw new Error("target profile has no session directory");
+  }
+
+  const existingTarget = await resolveHistorySession(targetProfile, id, { details: true });
+  const saved = await resolveHistorySession(sourceProfile, id, { details: true });
+  if (!saved?.path && !existingTarget?.path) throw new Error("source history is not uniquely persisted");
+
+  await mkdir(targetProfile.sessionDir, { recursive: true, mode: 0o700 });
+  const targetRoot = await historyDirectory(targetProfile);
+  if (!targetRoot) throw new Error("target history directory unavailable");
+
+  let destination = existingTarget?.path || null;
+  let archived = false;
+
+  if (!destination) {
+    const sourcePath = saved.path;
+    const sourceRoot = resolve(sourcePath, "..");
+    const handle = await open(sourcePath, READ_FLAGS);
+    let content;
+    try {
+      const parsed = await readHeader(handle, id, sourceProfile.cwd, sourceProfile.allowSubdirectories);
+      if (!parsed || parsed.header.version !== 3) throw new Error("unsupported source history");
+      if (parsed.info.size > maxBytes) throw new Error("source history exceeds size limit");
+      const buffer = Buffer.alloc(parsed.info.size + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const after = await handle.stat();
+      if (bytesRead !== parsed.info.size || after.size !== parsed.info.size || after.mtimeMs !== parsed.info.mtimeMs) {
+        throw new Error("source history changed");
+      }
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
+      const newline = text.indexOf("\n");
+      if (newline <= 0) throw new Error("invalid source history");
+      const header = JSON.parse(text.slice(0, newline));
+      if (header?.type !== "session" || header.id !== id || header.version !== 3) throw new Error("invalid source history");
+      header.cwd = targetProfile.cwd;
+      content = Buffer.from(`${JSON.stringify(header)}${text.slice(newline)}`, "utf8");
+    } finally { await handle.close(); }
+
+    try {
+      const marker = await lstat(join(sourceRoot, `.archived-${id.toLowerCase()}`));
+      if (!marker.isFile()) throw new Error("invalid archive marker");
+      archived = true;
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+
+    destination = join(targetRoot, basename(sourcePath));
+    const temporary = join(targetRoot, `.move-${id}.tmp`);
+    const child = await open(temporary, "wx", 0o600);
+    try {
+      await child.writeFile(content);
+      await child.sync();
+      await link(temporary, destination); // Fail closed if the destination already exists.
+    } finally {
+      await child.close();
+      await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+    }
+
+    if (archived) {
+      const marker = join(targetRoot, `.archived-${id.toLowerCase()}`);
+      let markerHandle;
+      try {
+        markerHandle = await open(marker, "wx", 0o600);
+        await markerHandle.sync();
+      } catch (error) {
+        if (error.code !== "EEXIST" || !(await lstat(marker)).isFile()) throw error;
+      } finally { await markerHandle?.close(); }
+    }
+
+    if (archived) {
+      await unlink(join(sourceRoot, `.archived-${id.toLowerCase()}`)).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+    await unlink(sourcePath);
+  } else if (saved?.path && saved.path !== destination) {
+    const sourceRoot = resolve(saved.path, "..");
+    try {
+      const marker = await lstat(join(sourceRoot, `.archived-${id.toLowerCase()}`));
+      if (marker.isFile()) {
+        archived = true;
+        await unlink(join(sourceRoot, `.archived-${id.toLowerCase()}`)).catch((error) => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    await unlink(saved.path).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  } else {
+    try {
+      const marker = await lstat(join(targetRoot, `.archived-${id.toLowerCase()}`));
+      archived = marker.isFile();
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+
+  const targetFolderRoot = await sessionFolderDirectory(targetProfile);
+  await writeSessionFolder(targetFolderRoot, targetProfile, targetProfileName, id, folder);
+  try {
+    const sourceFolderRoot = await sessionFolderDirectory(sourceProfile);
+    if (sourceFolderRoot !== targetFolderRoot) {
+      await writeSessionFolder(sourceFolderRoot, sourceProfile, sourceProfileName, id, "");
+    }
+  } catch { /* Source folder storage may be missing after a completed move. */ }
+
+  return { id, profile: targetProfileName, cwd: targetProfile.cwd, folder, archived };
 }
 
 export async function listHistory(profile, profileName, { includeArchived = false } = {}) {

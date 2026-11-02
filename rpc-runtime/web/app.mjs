@@ -368,7 +368,10 @@ function canMoveSession({ session, historical }) {
 const sessionDrag = initSessionDragDrop($("sessions"), {
   getSource: (key) => rowSources.get(key),
   canMove: canMoveSession,
-  move: ({ session, historical }, folder) => assignSessionFolder(session, historical, folder),
+  move: ({ session, historical }, { folder, profile } = {}) => {
+    if (profile && profile !== session.profile) moveSessionProject(session, historical, profile, folder);
+    else assignSessionFolder(session, historical, folder);
+  },
   onEnd: () => renderSessions(),
 });
 const folderPath = (profile) => `/v1/session-folders?profile=${encodeURIComponent(profile)}`;
@@ -443,6 +446,48 @@ async function assignSessionFolder(session, historical, value) {
     if (folder) sessionFolders.set(key, folder); else sessionFolders.delete(key);
     legacyFolders.delete(key); saveSessionFolders(preferenceStorage, legacyFolders);
     showNotice("Folder saved on the server and shared across devices.");
+  } catch (error) { if (ownEpoch === epoch) report(error, null, { write: true }); }
+  finally {
+    if (ownEpoch === epoch) {
+      movingFolders.delete(key); folderVersion++; renderSessions();
+      clearTimeout(folderPoll); folderPoll = setTimeout(() => refreshFolders(), 15000);
+    }
+  }
+}
+async function moveSessionProject(session, historical, targetProfile, value) {
+  if (!historical) {
+    showNotice("End the running session before moving it to another project.", true);
+    return;
+  }
+  if (!canMoveSession({ session, historical }) || !targetProfile || !folderProfiles.has(targetProfile)) return;
+  const key = sessionFolderKey(session, historical);
+  const ownEpoch = epoch;
+  movingFolders.add(key); folderVersion++; renderSessions();
+  try {
+    const folder = normalizeFolder(value);
+    const result = await api.request(`/v1/history/${encodeURIComponent(session.id)}/move`, {
+      method: "POST",
+      body: { profile: session.profile, targetProfile, folder },
+      signal: auth.signal,
+    });
+    if (ownEpoch !== epoch) return;
+    sessionFolders.delete(key);
+    legacyFolders.delete(key); saveSessionFolders(preferenceStorage, legacyFolders);
+    const nextKey = sessionFolderKey({ profile: targetProfile, id: session.id }, true);
+    if (folder) sessionFolders.set(nextKey, folder); else sessionFolders.delete(nextKey);
+    const saved = history.find((item) => item.profile === session.profile && item.id === session.id);
+    if (saved) {
+      saved.profile = targetProfile;
+      if (result?.cwd) saved.cwd = result.cwd;
+    }
+    folderOpen.set(`main:project:${targetProfile}`, true);
+    if (folder) {
+      for (let size = 1; size <= folder.split("/").length; size++) {
+        folderOpen.set(folderOpenKey("main", folder.split("/").slice(0, size).join("/"), targetProfile), true);
+      }
+    }
+    showNotice(`Moved to project ${targetProfile}${folder ? ` / ${folder}` : ""}.`);
+    await refreshSessions();
   } catch (error) { if (ownEpoch === epoch) report(error, null, { write: true }); }
   finally {
     if (ownEpoch === epoch) {
@@ -536,6 +581,7 @@ function renderSessions() {
       const projectOpenKey = `${sectionKey}:project:${profileName}`;
       const project = element("details", "session-folder session-project");
       project.dataset.projectProfile = profileName;
+      project.dataset.folderPath = "";
       project.open = folderOpen.has(projectOpenKey) ? folderOpen.get(projectOpenKey) !== false : true;
       const projectSummary = element("summary", "folder-heading project-heading");
       projectSummary.append(element("span", "folder-label", profileName));
@@ -602,8 +648,8 @@ function renderSessions() {
         }
         summary.dataset.folderKey = key;
         summary.title = path
-          ? `Toggle ${path}; drop a ${profileName} session here to move it`
-          : `Toggle Ungrouped; drop a ${profileName} session here to remove it from its folder`;
+          ? `Toggle ${path}; drop a session here to move it into ${profileName} / ${path}`
+          : `Toggle Ungrouped; drop a session here to place it in ${profileName} without a folder`;
         const children = element("div", "folder-children");
         details.append(summary, children);
         summary.addEventListener("click", (event) => {

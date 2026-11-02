@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
@@ -1270,6 +1270,57 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         } finally { creating.delete(reservation); }
         response.statusCode = 204;
         return response.end();
+      }
+      const historyMove = /^\/v1\/history\/([^/]+)\/move$/.exec(url.pathname);
+      if (historyMove && request.method === "POST") {
+        authenticate(request, config, "sessions:write");
+        const id = historyMove[1];
+        if (!NATIVE_SESSION_ID_RE.test(id)) throw new HttpError(400, "invalid_session", "an exact native session UUID is required");
+        const body = await readJson(request, config.limits.maxBodyBytes);
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).some((key) => !["profile", "targetProfile", "folder"].includes(key))
+          || typeof body.profile !== "string" || typeof body.targetProfile !== "string"
+          || (Object.hasOwn(body, "folder") && typeof body.folder !== "string")) {
+          throw new HttpError(400, "invalid_history_move", "expected {profile, targetProfile, folder?: string}");
+        }
+        if (!config.profiles.has(body.profile) || !config.profiles.has(body.targetProfile)) {
+          throw new HttpError(400, "invalid_profile", "configured source and target profiles are required");
+        }
+        if (body.profile === body.targetProfile) {
+          throw new HttpError(400, "invalid_history_move", "source and target profiles must differ");
+        }
+        let folder = "";
+        if (body.folder !== undefined) {
+          try { folder = normalizeSessionFolder(body.folder); }
+          catch (error) { throw new HttpError(400, "invalid_session_folder", error.message); }
+        }
+        if ([...sessions.values(), ...preparing].some((session) => session.nativeSessionId.toLowerCase() === id.toLowerCase() && !session.exit)
+          || creating.has(`resume:${id.toLowerCase()}`) || conversationSources.has(`resume:${id.toLowerCase()}`)) {
+          throw new HttpError(409, "session_active", "End the running session before moving it to another project.");
+        }
+        const reservation = `resume:${id.toLowerCase()}`;
+        creating.add(reservation);
+        try {
+          try {
+            return json(response, 200, await moveHistorySession(
+              config.profiles.get(body.profile), body.profile,
+              config.profiles.get(body.targetProfile), body.targetProfile,
+              id, { folder, maxBytes: config.limits.maxRecordBytes },
+            ));
+          } catch (error) {
+            const message = error?.message || "history could not be moved";
+            if (message.includes("not uniquely persisted") || message.includes("not found")) {
+              throw new HttpError(404, "session_not_found", "an exact, unique Pi session for this profile was not found");
+            }
+            if (message.includes("must differ") || message.includes("no session directory") || message.includes("maxBytes")) {
+              throw new HttpError(400, "invalid_history_move", message);
+            }
+            if (message.includes("exceeds size limit") || message.includes("EEXIST") || message.includes("changed") || message.includes("unsupported") || message.includes("invalid source")) {
+              throw new HttpError(409, "history_move_conflict", message);
+            }
+            throw new HttpError(502, "history_move_failed", message);
+          }
+        } finally { creating.delete(reservation); }
       }
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
         authenticate(request, config, "sessions:read");
