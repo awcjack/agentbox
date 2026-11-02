@@ -133,24 +133,80 @@ export async function renderMermaidDiagram(source, { load = loadMermaid } = {}) 
   return svg;
 }
 
-// Present Mermaid SVG as an isolated image. Scripts and event handlers do not
-// run from data: image/svg+xml, which keeps diagram preview free of code execution.
-export function mermaidSvgImage(svg, alt = "Mermaid diagram") {
+function assertMermaidSvg(svg) {
   const text = String(svg ?? "").trim();
   if (!/^<svg[\s>]/i.test(text) && !/^<\?xml[\s\S]*?<svg[\s>]/i.test(text)) {
     throw new Error("Mermaid did not return SVG");
   }
-  const cleaned = sanitizeMermaidSvg(text);
+  return sanitizeMermaidSvg(text);
+}
+
+// Present Mermaid SVG as an isolated image. Scripts and event handlers do not
+// run from data: image/svg+xml, which keeps diagram preview free of code execution.
+export function mermaidSvgImage(svg, alt = "Mermaid diagram") {
+  const cleaned = assertMermaidSvg(svg);
   const img = element("img", "mermaid-diagram");
   img.alt = alt;
   img.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cleaned)}`;
   return img;
 }
 
-export async function createMermaidPreview(source, { render = renderMermaidDiagram } = {}) {
+// Offer the same sanitized SVG the preview shows as a local file download.
+export function downloadMermaidSvg(svg, {
+  filename = "mermaid-diagram.svg",
+  createObjectURL = globalThis.URL?.createObjectURL?.bind(globalThis.URL),
+  revokeObjectURL = globalThis.URL?.revokeObjectURL?.bind(globalThis.URL),
+  BlobCtor = globalThis.Blob,
+} = {}) {
+  const cleaned = assertMermaidSvg(svg);
+  if (typeof createObjectURL !== "function" || typeof BlobCtor !== "function") {
+    throw new Error("SVG download is unavailable in this browser");
+  }
+  const blob = new BlobCtor([cleaned], { type: "image/svg+xml;charset=utf-8" });
+  const url = createObjectURL(blob);
+  const link = element("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.append(link);
+  try {
+    if (typeof link.click === "function") link.click();
+    else link.dispatchEvent?.(new Event("click"));
+  } finally {
+    link.remove();
+    if (typeof revokeObjectURL === "function") {
+      setTimeout(() => revokeObjectURL(url), 1000);
+    }
+  }
+  return { filename, svg: cleaned };
+}
+
+export async function createMermaidPreview(source, {
+  render = renderMermaidDiagram,
+  downloadSvg = downloadMermaidSvg,
+  filename = "mermaid-diagram.svg",
+} = {}) {
   const root = element("div", "mermaid-preview markdown-preview");
   try {
-    root.append(mermaidSvgImage(await render(source)));
+    const svg = await render(source);
+    const toolbar = element("div", "mermaid-toolbar");
+    const download = element("button", "text-button", "Download SVG");
+    download.type = "button";
+    download.title = "Download the rendered diagram as an SVG file";
+    download.addEventListener("click", () => {
+      try {
+        downloadSvg(svg, { filename });
+      } catch (error) {
+        download.textContent = "Download failed";
+        download.title = String(error?.message || error);
+        setTimeout(() => {
+          download.textContent = "Download SVG";
+          download.title = "Download the rendered diagram as an SVG file";
+        }, 2500);
+      }
+    });
+    toolbar.append(download);
+    root.append(toolbar, mermaidSvgImage(svg));
   } catch (error) {
     root.classList.add("mermaid-error");
     root.append(element("p", "", `Mermaid preview failed: ${error?.message || error}`));
