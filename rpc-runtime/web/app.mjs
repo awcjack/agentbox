@@ -19,6 +19,18 @@ const hiddenModels = readHiddenModels(preferenceStorage);
 const sessionFolders = new Map();
 const legacyFolders = readSessionFolders(preferenceStorage);
 let pinnedFolders = readPinnedFolders(preferenceStorage);
+// One-time cleanup: Projects are profiles now, so drop leftover browser folder
+// pins/assignments that still recreate empty sidebar folders after migration.
+const clearFoldersKey = "agentbox.pi.clear-folder-structure.v1";
+try {
+  if (preferenceStorage?.getItem(clearFoldersKey) !== "done") {
+    preferenceStorage.removeItem("agentbox.pi.pinned-folders.v1");
+    preferenceStorage.removeItem("agentbox.pi.session-folders.v1");
+    preferenceStorage.setItem(clearFoldersKey, "done");
+    pinnedFolders = [];
+    legacyFolders.clear();
+  }
+} catch { /* Browser storage may be blocked. */ }
 const folderProfiles = new Set(), movingFolders = new Set(), deletingFolders = new Set();
 let folderPoll = null, folderVersion = 0, foldersLoading = false;
 let folderDeleteTarget = null;
