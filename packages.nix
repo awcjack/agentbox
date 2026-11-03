@@ -21,6 +21,7 @@ let
   agentbox-neovim = pkgs.callPackage ./neovim.nix { };
   pi-post = pkgs.callPackage ./pi-post.nix { };
   pi-cursor = pkgs.callPackage ./pi-cursor.nix { };
+  pi-agentsmd = pkgs.callPackage ./pi-agentsmd.nix { };
   pi-agentbox-mcp-runtime = pkgs.callPackage ./runtime { };
   agentbox-pi-goal-runtime = pkgs.callPackage ./goal-runtime { };
   agentbox-pi-rpc-runtime = pkgs.callPackage ./rpc-runtime { inherit pi-coding-agent; };
@@ -48,6 +49,7 @@ in
     agentbox-pi-goal-runtime
     agentbox-pi-rpc-runtime
     pi-agentbox-mcp-runtime
+    pi-agentsmd
     pi-coding-agent
     pi-post
     pi-cursor
@@ -109,6 +111,7 @@ in
           agentbox-pi-rpc-runtime
           opencode
           pi-agentbox-mcp-runtime
+          pi-agentsmd
           pi-coding-agent
           pi-post
           pi-cursor
@@ -240,6 +243,15 @@ in
         [ ! -f "$test" ] || tests+=("$test")
       done
       TEST_BASH=${pkgs.bash}/bin/bash node --test "''${tests[@]}"
+      touch $out
+    '';
+
+  pi-agentsmd-test =
+    pkgs.runCommand "pi-agentsmd-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+      node --experimental-strip-types ${./tests/pi-agentsmd.mjs} \
+        ${pi-agentsmd.extension} \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
       touch $out
     '';
 

@@ -15,6 +15,7 @@ on:
       - "network-image.nix"
       - "packages.nix"
       - "pi-cursor.nix"
+      - "pi-agentsmd.nix"
       - "neovim.nix"
       - "package.nix"
       - "extensions/**"
@@ -33,6 +34,7 @@ on:
       - "network-image.nix"
       - "packages.nix"
       - "pi-cursor.nix"
+      - "pi-agentsmd.nix"
       - "neovim.nix"
       - "package.nix"
       - "extensions/**"
@@ -90,6 +92,7 @@ jobs:
             pi-workflow-extension-test \
             pi-policy-extension-test \
             pi-goal-extension-test \
+            pi-agentsmd-test \
             pi-codex-wrapper-test \
             pi-cursor-test \
             pi-lsp-client-test \

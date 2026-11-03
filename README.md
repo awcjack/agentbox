@@ -49,8 +49,8 @@ Auth directly.
 Pi runs through an immutable wrapper that rejects `-e`/`--extension`, disables
 extension discovery, and force-loads trusted Agentbox extensions in this order:
 core integration, workflow, session messaging, MCP, Codex accounts, OpenAI Fast,
-Cursor subscription provider, upstream Goal (parent sessions only), and final
-managed policy.
+Cursor subscription provider, AGENTS.md `/init` (`pi-agentsmd`), upstream Goal
+(parent sessions only), and final managed policy.
 Delegated workflow jobs and RPC sessions re-enter the same wrapper. Pi's
 positional package/config/auth management commands remain available, but their
 installed extensions are not discovered by agent runs. The final policy fails closed
@@ -97,6 +97,26 @@ pinning a provider or model. Roles inherit the active Pi selection unless
 configured otherwise. Todo/task state follows the current session branch,
 delegation has concurrency/job/step/output limits, and `question` works in both
 the TUI and an RPC-provided UI.
+
+### Pi `/init` for AGENTS.md
+
+The image bundles upstream [`pi-agentsmd` 0.2.1](https://pi.dev/packages/pi-agentsmd),
+pinned by hash and force-loaded for CLI, browser, RPC, and delegated sessions.
+Install telemetry from the published package is stripped so the reviewed extension
+does not phone home. No runtime `pi install` is needed. In a trusted project:
+
+```text
+/init
+/init --force
+```
+
+`/init` asks the active model to inspect the repository and create `AGENTS.md`.
+If the file already exists, pass `--force` (or `-f`) to reconcile it. The package
+itself only injects a prompt; the model writes the file through normal tools.
+Project trust is required first (`/trust`). Rebuild/redeploy the image and start a
+new Pi process to pick this up; `pi update` does not change the immutable bundle.
+Run `nix build .#pi-agentsmd-test .#pi-codex-wrapper-test` to verify offline load,
+command registration, and wrapper force-loading without model calls.
 
 ### Cursor subscription in Pi
 
@@ -255,7 +275,7 @@ already launches the container wrapper and needs no separate installer.
 Focused offline checks (also run in CI):
 
 ```sh
-nix build .#agentbox-pi-goal-runtime .#pi-goal-extension-test .#pi-codex-wrapper-test
+nix build .#agentbox-pi-goal-runtime .#pi-goal-extension-test .#pi-agentsmd-test .#pi-codex-wrapper-test
 ```
 
 The extension check uses Pi 0.87.1's real Jiti loader, lazy TUI/RPC routes, managed

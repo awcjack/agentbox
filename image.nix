@@ -98,6 +98,7 @@
   pi-coding-agent,
   pi-post,
   pi-cursor,
+  pi-agentsmd,
   pi-agentbox-mcp-runtime,
   agentbox-pi-goal-runtime ? callPackage ./goal-runtime { },
   agentbox-pi-rpc-runtime,
@@ -747,6 +748,7 @@ let
       -e ${piAgentboxExtensions}/pi-codex-accounts.ts \
       -e ${piAgentboxExtensions}/pi-openai-fast.ts \
       -e ${pi-cursor.extension} \
+      -e ${pi-agentsmd.extension} \
       "''${goalArgs[@]}" \
       -e ${piPolicyExtension} \
       "$@"

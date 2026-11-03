@@ -2,6 +2,7 @@
 let
   inherit (pkgs) lib;
   pi-cursor = pkgs.callPackage ../pi-cursor.nix { };
+  pi-agentsmd = pkgs.callPackage ../pi-agentsmd.nix { };
   fakePi = pkgs.writeShellScriptBin "pi" ''
     printf '%s\n' "$@"
   '';
@@ -16,7 +17,7 @@ let
       inherit (pkgs) coreutils runCommand;
       pi-coding-agent = fakePi;
       pi-post = pkgs.callPackage ../pi-post.nix { };
-      inherit pi-cursor;
+      inherit pi-cursor pi-agentsmd;
       agentbox-pi-goal-runtime = pkgs.callPackage ../goal-runtime { };
       dockerTools.buildLayeredImageWithNixDb = args: args;
       buildEnv = args: lib.findFirst (path: lib.isDerivation path && path.name == "pi") null args.paths;
@@ -43,25 +44,29 @@ pkgs.runCommand "pi-codex-wrapper-test" { } ''
   test "''${args[14]}" = ${pi-cursor.extension}
   test -f "''${args[14]}"
   test "''${args[15]}" = -e
-  case "''${args[16]}" in
+  test "''${args[16]}" = ${pi-agentsmd.extension}
+  test -f "''${args[16]}"
+  test "''${args[17]}" = -e
+  case "''${args[18]}" in
     /nix/store/*/lib/agentbox-pi-goal-runtime/node_modules/@narumitw/pi-goal/dist/index.ts) ;;
     *) exit 1 ;;
   esac
-  test -f "''${args[16]}"
-  test "''${args[17]}" = -e
-  test "''${args[18]##*/}" = pi-policy.ts
-  test "''${args[19]}" = --mode
-  test "''${args[20]}" = rpc
+  test -f "''${args[18]}"
+  test "''${args[19]}" = -e
+  test "''${args[20]##*/}" = pi-policy.ts
+  test "''${args[21]}" = --mode
+  test "''${args[22]}" = rpc
   # A child must never register Goal or widen its role's active tool set.
   for childEnv in PI_WORKFLOW_CHILD=1 PI_WORKFLOW_APPROVAL_VERSION=1 PI_WORKFLOW_APPROVAL_VERSION=; do
     mapfile -t childArgs < <(env "$childEnv" ${wrapper}/bin/pi --mode json)
-    test "''${#childArgs[@]}" = 19
+    test "''${#childArgs[@]}" = 21
     test "''${childArgs[6]##*/}" = pi-post.ts
     test "''${childArgs[12]##*/}" = pi-openai-fast.ts
     test "''${childArgs[14]}" = "''${args[14]}"
-    test "''${childArgs[16]##*/}" = pi-policy.ts
-    test "''${childArgs[17]}" = --mode
-    test "''${childArgs[18]}" = json
+    test "''${childArgs[16]}" = "''${args[16]}"
+    test "''${childArgs[18]##*/}" = pi-policy.ts
+    test "''${childArgs[19]}" = --mode
+    test "''${childArgs[20]}" = json
   done
   for flag in -e -e/tmp/untrusted.ts --extension --extension=/tmp/untrusted.ts; do
     status=0
