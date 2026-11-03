@@ -135,9 +135,13 @@ its `--name--` history folder is attached to the **default** profile as an extra
 session directory. Those conversations stay listed under default (never hidden)
 until the project directory returns and discovery recreates the project profile.
 Resuming such a session falls back to the default workspace root when the saved
-cwd is temporarily unavailable. If `sessionDirPrefix` itself does not exist yet
-(fresh install or empty volume), orphan scanning is a no-op rather than a
-startup failure.
+cwd is missing. Before starting Pi, the runtime atomically updates the saved
+session header cwd to that root, preserving the session ID, file location and
+conversation entries. This fallback is persistent: once resumed, the session
+stays under default even if the old project directory returns. Inaccessible or
+out-of-workspace existing directories are rejected rather than rebased. If
+`sessionDirPrefix` itself does not exist yet (fresh install or empty volume),
+orphan scanning is a no-op rather than a startup failure.
 
 Image prompts include base64 overhead in the JSON body. For example, set
 `limits.maxBodyBytes` to `8388608` and `limits.maxRecordBytes` to `16777216` for
