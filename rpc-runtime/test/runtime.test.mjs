@@ -110,6 +110,34 @@ async function fixture(t, customConfig = config(), options = {}) {
   return { runtime, children, spawns, baseUrl };
 }
 
+for (const missing of [true, false]) test(`resume ${missing ? "rebases missing" : "retains existing"} project cwd before spawning Pi`, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-missing-cwd-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sessionDir = join(root, "sessions"), orphanDir = join(root, "orphan");
+  await mkdir(sessionDir);
+  await mkdir(orphanDir);
+  const path = join(orphanDir, `saved_${RESUME_ID}.jsonl`);
+  const tail = '\n{"type":"custom","id":"entry","data":"preserve me"}\n';
+  const header = { type: "session", version: 3, id: RESUME_ID, cwd: join(root, "project"), timestamp: "2026-01-01T00:00:00Z" };
+  if (!missing) await mkdir(header.cwd);
+  await writeFile(path, JSON.stringify(header) + tail);
+  let observedHeader;
+  const cfg = config({ profiles: { default: { cwd: root, sessionDir } } });
+  const f = await fixture(t, cfg, { onSpawn: () => { observedHeader = JSON.parse(readFileSync(path, "utf8").split("\n")[0]); } });
+  // Orphan directories are normally populated by startup auto-discovery.
+  f.runtime.config.profiles.get("default").extraSessionDirs = [orphanDir];
+  f.runtime.config.profiles.get("default").allowSubdirectories = true;
+  const result = await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default", resume: RESUME_ID } });
+  assert.equal(result.response.status, 201, JSON.stringify(result.body));
+  const expectedCwd = missing ? root : header.cwd;
+  assert.equal(f.spawns[0].options.cwd, expectedCwd);
+  assert.deepEqual(observedHeader, { ...header, cwd: expectedCwd });
+  assert.equal(await readFile(path, "utf8"), JSON.stringify({ ...header, cwd: expectedCwd }) + tail);
+  const history = await request(f.baseUrl, "/v1/history?profile=default");
+  assert.equal(history.response.status, 200);
+  assert.ok(history.body.sessions.some((session) => session.id === RESUME_ID));
+});
+
 test("end stops the child and archives history across runtime restarts", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-archive-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
