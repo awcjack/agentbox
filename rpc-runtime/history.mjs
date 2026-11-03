@@ -131,6 +131,41 @@ export async function resolveHistorySession(profile, id, { details = false } = {
   } catch { return null; }
 }
 
+// Persist a missing-project fallback before Pi opens the session: newer Pi
+// versions validate the header cwd even when the child is spawned elsewhere.
+export async function rebaseHistorySession(profile, id, saved, maxBytes) {
+  const source = await resolveHistorySession(profile, id, { details: true });
+  if (!source || source.path !== saved.path || source.cwd !== saved.cwd) throw new Error("source history changed");
+  const handle = await open(source.path, READ_FLAGS);
+  const temporary = join(resolve(source.path, ".."), `.rebase-${randomUUID()}.tmp`);
+  let child;
+  try {
+    const parsed = await readHeader(handle, id, profile.cwd, profile.allowSubdirectories);
+    if (!parsed || parsed.header.cwd !== saved.cwd || parsed.header.version !== 3 || parsed.info.size > maxBytes) {
+      throw new Error("unsupported source history");
+    }
+    const buffer = Buffer.alloc(parsed.info.size + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const after = await handle.stat();
+    if (bytesRead !== parsed.info.size || after.size !== parsed.info.size || after.mtimeMs !== parsed.info.mtimeMs) throw new Error("source history changed");
+    const newline = buffer.indexOf(10);
+    if (newline < 0) throw new Error("invalid source history");
+    child = await open(temporary, "wx", 0o600);
+    await child.writeFile(Buffer.concat([
+      Buffer.from(JSON.stringify({ ...parsed.header, cwd: profile.cwd })),
+      buffer.subarray(newline, bytesRead),
+    ]));
+    await child.sync();
+    const current = await lstat(source.path);
+    if (current.dev !== after.dev || current.ino !== after.ino || current.size !== after.size || current.mtimeMs !== after.mtimeMs) throw new Error("source history changed");
+    await rename(temporary, source.path);
+  } finally {
+    await handle.close();
+    await child?.close();
+    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  }
+}
+
 // Read-only validation of the source. All writes go to an exclusively created
 // child file, published only when complete. No client-supplied paths are used.
 export async function createConversationHistory(profile, sourceId, snapshot, prefix, id, maxBytes) {

@@ -1,12 +1,12 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, rebaseHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
@@ -1377,11 +1377,17 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           if (saved && saved.cwd !== profile.cwd) {
             try { profile = (await selectFolder(config.profiles, saved.cwd, body.profile)).profile; }
             catch {
-              // Project working directories can disappear while history remains.
-              // Keep the selected profile root when the saved cwd still belongs under it.
-              if (!(profile.allowSubdirectories && containsFolder(saved.cwd, profile.cwd))) {
+              // Only a missing project may fall back, never an inaccessible folder
+              // or a symlink escaping the workspace. Pi also validates the header
+              // cwd, so persist the fallback before launching the child.
+              let missing = false;
+              try { await stat(saved.cwd); }
+              catch (error) { missing = error.code === "ENOENT"; }
+              if (!(missing && profile.allowSubdirectories && containsFolder(saved.cwd, profile.cwd))) {
                 throw new HttpError(400, "invalid_folder", "The saved session folder is unavailable or outside its workspace.");
               }
+              await selectFolder(config.profiles, profile.cwd, body.profile);
+              await rebaseHistorySession(profile, body.resume, saved, config.limits.maxRecordBytes);
             }
           }
           if (body.resume && !resumePath) throw new HttpError(404, "resume_not_found", "an exact, unique Pi session for this profile was not found");
