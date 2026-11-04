@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs"
 import { pathToFileURL } from "node:url"
 import { basename, dirname, isAbsolute, resolve } from "node:path"
 import { APPROVAL_ENV, openApprovalClient, selectApproval } from "./pi-approval.ts"
+import { commandInspectionVariants, isSensitivePath, shellPathTokens, shellTokens } from "./path-policy.ts"
 
 const DEFAULT_CONFIG_PATH = "/etc/pi/agentbox-policy.json"
 const SIGNAL_PATH = "/home/agent/.local/bin/agent-signal.sh"
@@ -329,30 +330,6 @@ function isWithin(path: string, root: string) {
   return path === root || path.startsWith(`${root}/`)
 }
 
-function isSensitivePath(path: string, writing: boolean) {
-  const normalized = path.toLowerCase().replaceAll("\\", "/")
-  const name = basename(normalized)
-  if (!writing && name.endsWith(".pub")) return false
-  if (/\.env\.(?:example|sample|template)$/.test(name)) return false
-
-  const sensitiveDirectories = [
-    "/.ssh/", "/.gnupg/", "/.aws/", "/.azure/", "/.kube/", "/.docker/",
-    "/.config/gcloud/", "/.local/share/keyrings/", "/.password-store/", "/secrets/",
-  ]
-  if (sensitiveDirectories.some((segment) => normalized.includes(segment))) return true
-  if (["/.ssh", "/.gnupg", "/.aws", "/.azure", "/.kube", "/.docker", "/secrets"].some((suffix) => normalized.endsWith(suffix))) return true
-  if (/\/(?:proc\/[^/]+\/environ|etc\/(?:shadow|gshadow|sudoers))$/.test(normalized)) return true
-  if (/\/\.git\/(?:config|credentials)$/.test(normalized)) return true
-  if (/\/\.pi\/(?:auth|credentials)\.json$/.test(normalized)) return true
-  if ([".env", ".netrc", ".npmrc", ".pypirc", ".git-credentials", "credentials.json", "auth.json"].includes(name)) return true
-  if (name.startsWith(".env.")) return true
-  if (/^(?:id_rsa|id_ed25519|id_ecdsa)(?:\.|$)/.test(name)) return true
-  if (/\.(?:pem|key|p12|pfx|gpg)$/.test(name)) return true
-  if (/^(?:secret|secrets|credentials?|service-account|gcp-key)(?:[._-].*)?\.ya?ml$/.test(name)) return true
-  if (/^(?:service-account|gcp-key)(?:[._-].*)?\.json$/.test(name)) return true
-  return false
-}
-
 function managedPaths(configPath: string) {
   return [
     "/etc/agentbox",
@@ -368,59 +345,6 @@ function managedPaths(configPath: string) {
 
 function isManagedWrite(path: string, configPath: string) {
   return isWithin(path, "/nix/store") || managedPaths(configPath).some((managed) => isWithin(path, managed))
-}
-
-function shellTokens(command: string) {
-  return (command.match(/"(?:\\.|[^"\\])*"|'[^']*'|[^\s;&|<>]+/g) ?? [])
-    .map((token) => token.replace(/^['"]|['"]$/g, "").replace(/[),]+$/g, ""))
-}
-
-function commandInspectionVariants(command: string) {
-  const variants = [command]
-  const seen = new Set(variants)
-
-  for (let index = 0; index < variants.length && variants.length < 16; index++) {
-    const tokens = shellTokens(variants[index])
-    for (let tokenIndex = 0; tokenIndex < tokens.length - 1; tokenIndex++) {
-      const interpreter = basename(tokens[tokenIndex]).toLowerCase()
-      const shell = /^(?:ba|da|a|z|k|fi)?sh$/.test(interpreter)
-      const code = /^(?:python(?:\d+(?:\.\d+)?)?|node|ruby|perl|php)$/.test(interpreter)
-      if (!shell && !code) continue
-
-      for (let argumentIndex = tokenIndex + 1; argumentIndex < Math.min(tokens.length - 1, tokenIndex + 4); argumentIndex++) {
-        const argument = tokens[argumentIndex]
-        const executesText = shell ? /^-[^-]*c/.test(argument) : /^(?:-c|-e|--eval)$/.test(argument)
-        if (!executesText) continue
-
-        const payload = tokens[argumentIndex + 1]
-        if (payload && !seen.has(payload)) {
-          seen.add(payload)
-          variants.push(payload)
-        }
-        if (code && payload) {
-          const normalizedCode = payload.replace(/[^A-Za-z0-9_./~*=$+\-]+/g, " ")
-          if (normalizedCode && !seen.has(normalizedCode)) {
-            seen.add(normalizedCode)
-            variants.push(normalizedCode)
-          }
-        }
-        break
-      }
-    }
-  }
-
-  return variants
-}
-
-function shellPathTokens(command: string) {
-  const paths: string[] = []
-  for (const token of shellTokens(command)) {
-    const value = /^(?:of|if|target|dest|destination)=(.+)$/.exec(token)?.[1] ?? token
-    if (value.startsWith("/") || value.startsWith("./") || value.startsWith("../") || value.startsWith("~") || value.startsWith(".")) {
-      paths.push(value)
-    }
-  }
-  return paths
 }
 
 function shellWrites(command: string) {
@@ -468,7 +392,9 @@ async function immutableReason(
   if (!extracted.complete) return "Pi policy cannot safely inspect this tool input within its target limits"
   const targets = extracted.targets
   const isWrite = WRITE_TOOLS.has(toolName)
-  const pathTargets = FILE_TOOLS.has(toolName)
+  // A bash command is source text, never one filesystem path. Inspect its
+  // extracted targets below (including canonical aliases), not its basename.
+  const pathTargets = toolName === "bash" ? [] : FILE_TOOLS.has(toolName)
     ? targets
     : targets.filter((target) => target.path || looksLikePath(target.value))
 

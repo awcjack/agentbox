@@ -3,6 +3,7 @@ import { execFile } from "node:child_process"
 import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { isIP } from "node:net"
+import { isSensitivePath, shellPathTokens } from "./path-policy.ts"
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path"
 import {
   createLspClient,
@@ -27,7 +28,6 @@ Agentbox session communication:
 
 const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics", "code_navigation"])
 const EDIT_TOOLS = new Set(["write", "edit"])
-const SECRET_READER_RE = /(?:^|[;&|\s])(cat|head|tail|base64|sed|awk|grep|egrep|fgrep|rg|ag|nl|tac|rev|cut|tr|fold|expand|paste|column|col|less|more|most|pg|xxd|od|hexdump|strings|base32|uuencode|vi|vim|nvim|nano|ex|view|emacs|dd|cp|mv|install|rsync|ln)(?:\s|$)/
 const GIT_COMMIT_RE = /(?:^|[;&|\s])git\s+commit(?:\s|$)/
 const WRITE_COMMAND_RE = /(?:^|[;&|\s])(rm|rmdir|truncate|tee|touch|chmod|chown|dd|cp|mv|install|rsync|ln|sed\s+-i|perl\s+-i)(?:\s|$)|(?:^|[^<])>{1,2}\s*/
 const MAX_TOOL_OUTPUT = 30_000
@@ -224,26 +224,8 @@ function expandPath(path: string, cwd: string) {
   return isAbsolute(path) ? path : resolve(cwd, path)
 }
 
-function isTemplate(path: string) {
-  return /\.env\.(example|sample|template)$/i.test(path)
-}
-
-function isSecretPath(rawPath: string, cwd: string) {
-  const path = expandPath(rawPath, cwd).replaceAll("\\", "/")
-  if (isTemplate(path)) return false
-
-  const name = basename(path).toLowerCase()
-  const segments = path.toLowerCase().split("/")
-  if (segments.some((segment) => [".ssh", ".aws", ".kube", "secrets"].includes(segment))) return true
-  if (path.toLowerCase().includes("/.config/gcloud/")) return true
-  if ([".env", ".env.local", ".netrc", ".npmrc", ".pypirc", ".git-credentials", "credentials.json"].includes(name)) return true
-  if (name.startsWith(".env") && /(local|dev|prod|stag|test)/.test(name)) return true
-  if (name.startsWith("values") && /(dev|prod|stag|test)/.test(name)) return true
-  if (/secret.*\.ya?ml$/i.test(name)) return true
-  if (/\.(pem|key|gpg|asc)$/i.test(name)) return true
-  if (/^(id_rsa|id_ed25519|id_ecdsa)/i.test(name)) return true
-  if (/^(service-account|gcp-key).*\.json$/i.test(name)) return true
-  return false
+function isSecretPath(rawPath: string, cwd: string, writing = false) {
+  return isSensitivePath(expandPath(rawPath, cwd), writing)
 }
 
 function toolPath(input: Record<string, unknown>) {
@@ -254,10 +236,7 @@ function toolPath(input: Record<string, unknown>) {
 }
 
 function secretPathInCommand(command: string, cwd: string) {
-  const tokens = command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []
-  return tokens
-    .map((token) => token.replace(/^['"]|['"]$/g, ""))
-    .some((token) => isSecretPath(token, cwd))
+  return shellPathTokens(command).some((token) => isSecretPath(token, cwd, WRITE_COMMAND_RE.test(command)))
 }
 
 function managedPaths() {
@@ -571,9 +550,8 @@ export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies =
       if (path && EDIT_TOOLS.has(event.toolName) && isManagedPath(path, ctx.cwd)) {
         return { block: true, reason: "Agentbox policy blocks edits to managed Pi integration files" }
       }
-      if (path && isSecretPath(path, ctx.cwd)) {
-        const publicKey = path.toLowerCase().endsWith(".pub") && !EDIT_TOOLS.has(event.toolName)
-        if (!publicKey) return { block: true, reason: `Agentbox policy blocks access to sensitive path: ${path}` }
+      if (path && isSecretPath(path, ctx.cwd, EDIT_TOOLS.has(event.toolName))) {
+        return { block: true, reason: `Agentbox policy blocks access to sensitive path: ${path}` }
       }
     }
 
@@ -584,7 +562,7 @@ export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies =
     if (WRITE_COMMAND_RE.test(command) && (protectedPathInCommand(command, ctx.cwd) || command.includes("/nix/store/"))) {
       return { block: true, reason: "Agentbox policy blocks shell access to managed Pi integration files" }
     }
-    if (SECRET_READER_RE.test(command) && secretPathInCommand(command, ctx.cwd)) {
+    if (secretPathInCommand(command, ctx.cwd)) {
       return { block: true, reason: "Agentbox policy blocks shell-based access to sensitive paths" }
     }
     if (!GIT_COMMIT_RE.test(command)) return

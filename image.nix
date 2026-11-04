@@ -700,6 +700,7 @@ let
   piAgentboxExtensions = runCommand "pi-agentbox-extensions" { } ''
     mkdir -p $out
     cp ${./extensions/pi-agentbox.ts} $out/pi-agentbox.ts
+    cp ${./extensions/path-policy.ts} $out/path-policy.ts
     cp ${./extensions/lsp-client.ts} $out/lsp-client.ts
     cp ${./extensions/pi-workflow.ts} $out/pi-workflow.ts
     cp ${./extensions/pi-policy.ts} $out/pi-policy.ts

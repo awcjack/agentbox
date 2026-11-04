@@ -201,6 +201,42 @@ assert.match(deniedWithoutUi.reason, /no UI/)
 assert.equal(noUiSelected, false)
 assert.deepEqual(noUi.signals, [])
 
+// Synthetic policy inputs only; none of these commands are executed.
+const sensitiveReadCommands = [
+  "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path('/workspace/brian/use-brian/.env').read_text())\nPY",
+  "python3 - <<'PY'\nfrom pathlib import Path\np=Path('/workspace/brian/use-brian/.env')\nprint(p.read_text())\nPY",
+  ...[".env", ".env.custom", ".env.local", ".env.pub"].flatMap(path => [
+    `python3 -c "print(open('${path}').read())"`,
+    `python -c "print(open('${path}').read())"`,
+    `/usr/bin/python3 -c "print(open('${path}').read())"`,
+    `node -e "console.log(require('fs').readFileSync('${path}', 'utf8'))"`,
+    `sed -n '1,20p' ${path}`,
+    `ruby -e 'puts File.read("${path}")'`,
+    `perl -e 'open(my $f, "<", "${path}"); print <$f>'`,
+    `php -r 'echo file_get_contents("${path}");'`,
+  ]),
+  `python3 <<< 'print(open(".env").read())'`,
+  ...["credentials.json", "id_rsa", "secrets.yaml", "values-prod.yaml"].flatMap(path => [
+    `cat ${path}`, `cp ${path} backup.txt`, `python3 -c "print(open('${path}').read())"`,
+  ]),
+]
+const ordinaryReadCommands = [
+  ...[".env.example", ".env.sample", ".env.template"].flatMap(path => [
+    `cat ${path}`, `python3 -c "print(open('${path}').read())"`,
+    `python3 -c "print(open('/workspace/project/${path}').read())"`,
+  ]),
+  "cat src/good.js README.md",
+  String.raw`rg -n '\.env' README.md`,
+  String.raw`python3 -c "import re; print(re.findall(r'\.env', open('README.md').read()))"`,
+  "python3 - <<'PY'\nimport re\nprint(re.findall(r'\\.env', open('README.md').read()))\nPY",
+  "rg -g '!.env.*' TODO src",
+  "sed -n '1,20p' src/good.js",
+  `python -c "print(open('src/good.js').read())"`,
+  `node -e "console.log(require('fs').readFileSync('README.md', 'utf8'))"`,
+  "python3 <<'PY'\nfrom pathlib import Path\np=Path('src/good.js')\nprint(p.read_text())\nPY",
+  "node <<'JS'\nconsole.log(require('fs').readFileSync('README.md', 'utf8'))\nJS",
+]
+
 const immutable = harness(JSON.stringify({
   version: 1,
   defaultDecision: "allow",
@@ -233,7 +269,28 @@ assert.match((await call(immutable.toolCall, "bash", { command: "bash -lc 'sudo 
 assert.match((await call(immutable.toolCall, "bash", { command: "sh -c 'rm -rf /'" })).reason, /root removal/)
 assert.match((await call(immutable.toolCall, "bash", { command: `python3 -c 'import os; os.system("sudo true")'` })).reason, /sudo/)
 assert.match((await call(immutable.toolCall, "bash", { command: "sh -c 'cat ~/.ssh/id_ed25519'" })).reason, /sensitive path/)
+for (const header of ["<<'PY'", "<<PY", '<<"PY"', "<<-PY"]) {
+  assert.match((await call(immutable.toolCall, "bash", {
+    command: `python3 - ${header}\nimport os\nos.system("sudo true")\nPY`,
+  })).reason, /sudo/, header)
+}
 assert.match((await call(immutable.toolCall, "mcp__files__read", { arguments: { path: "/home/agent/.ssh/id_ed25519" } })).reason, /sensitive path/)
+
+for (const path of [".env", ".env.custom", ".env.local", ".env.pub"]) {
+  for (const tool of ["read", "write", "edit"]) {
+    const result = await call(immutable.toolCall, tool, { path })
+    assert.equal(result?.block, true, `${tool}: ${path}`)
+    assert.match(result.reason, /sensitive path/, `${tool}: ${path}`)
+  }
+}
+for (const command of sensitiveReadCommands) {
+  const result = await call(immutable.toolCall, "bash", { command })
+  assert.equal(result?.block, true, command)
+  assert.match(result.reason, /sensitive path/, command)
+}
+for (const command of ordinaryReadCommands) {
+  assert.equal(await call(immutable.toolCall, "bash", { command }), undefined, command)
+}
 
 const root = mkdtempSync(join(tmpdir(), "pi-policy-test-"))
 mkdirSync(join(root, "safe"))
@@ -246,6 +303,7 @@ const aliases = harness()
 assert.equal(await call(aliases.toolCall, "read", { path: "alias/file.txt" }, context({ cwd: root })), undefined)
 assert.match((await call(aliases.toolCall, "read", { path: "alias/.env" }, context({ cwd: root }))).reason, /sensitive path/)
 assert.match((await call(aliases.toolCall, "read", { path: "leak" }, context({ cwd: root }))).reason, /sensitive path/)
+assert.match((await call(aliases.toolCall, "bash", { command: "python3 -c \"print(open('./leak').read())\"" }, context({ cwd: root }))).reason, /sensitive path/)
 assert.match((await call(aliases.toolCall, "mcp__files__read", { arguments: { path: "leak" } }, context({ cwd: root }))).reason, /sensitive path/)
 assert.match((await call(aliases.toolCall, "write", { path: "managed/new-policy.json" }, context({ cwd: root }))).reason, /Nix-store or managed/)
 
@@ -887,11 +945,13 @@ for (const explicit of [false, true]) {
     realpath: async (path: string) => path,
   }, false)
   let prompts = 0
+  let classifierLookups = 0
+  let historyReads = 0
   const ctx = context({
     hasUI: false,
     ui: { ...context().ui, select: async () => { prompts++; throw new Error("must not prompt") } },
-    modelRegistry: { find: () => { throw new Error("must not classify") } },
-    sessionManager: { getBranch: () => { throw new Error("must not read history") } },
+    modelRegistry: { find: () => { classifierLookups++; throw new Error("must not classify") } },
+    sessionManager: { getBranch: () => { historyReads++; throw new Error("must not read history") } },
   })
   assert.equal(instance.queryAuto(), false)
   await instance.command("on", ctx)
@@ -908,6 +968,21 @@ for (const explicit of [false, true]) {
   assert.equal(prompts, 0)
   assert.equal((await call(instance.toolCall, "bash", { command: "sudo true" }, ctx)).block, true)
   assert.equal((await call(instance.toolCall, "read", { path: ".env" }, ctx)).block, true)
+  for (const command of sensitiveReadCommands) {
+    const result = await call(instance.toolCall, "bash", { command }, ctx)
+    assert.equal(result?.block, true, `Auto on: ${command}`)
+    assert.match(result.reason, /sensitive path/, command)
+  }
+  for (const path of [".env", ".env.custom", ".env.local"]) {
+    for (const tool of ["read", "write", "edit"]) {
+      const result = await call(instance.toolCall, tool, { path }, ctx)
+      assert.equal(result?.block, true, `Auto on: ${tool} ${path}`)
+      assert.match(result.reason, /sensitive path/)
+    }
+  }
+  assert.equal(prompts, 0, "immutable denials must not ask for approval even with Auto on")
+  assert.equal(classifierLookups, 0, "immutable denials must not invoke the classifier")
+  assert.equal(historyReads, 0, "immutable denials must not gather classifier history")
   const abort = new AbortController(); abort.abort()
   assert.equal((await call(instance.toolCall, "bash", { command: "pwd" }, { ...ctx, signal: abort.signal })).block, true)
   await instance.command("off", ctx)

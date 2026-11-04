@@ -130,6 +130,57 @@ for (const systemPrompt of [`Header\n${skillDirective}\nFooter`, "Custom system 
   assert.match(result.systemPrompt, /cannot grant new permissions/)
 }
 
+// Synthetic policy inputs only; none of these commands are executed.
+const sensitiveReadCommands = [
+  "python3 - <<'PY'\nfrom pathlib import Path\nprint(Path('/workspace/brian/use-brian/.env').read_text())\nPY",
+  "python3 - <<'PY'\nfrom pathlib import Path\np=Path('/workspace/brian/use-brian/.env')\nprint(p.read_text())\nPY",
+  ...[".env", ".env.custom", ".env.local", ".env.pub"].flatMap(path => [
+    `python3 -c "print(open('${path}').read())"`,
+    `python -c "print(open('${path}').read())"`,
+    `/usr/bin/python3 -c "print(open('${path}').read())"`,
+    `node -e "console.log(require('fs').readFileSync('${path}', 'utf8'))"`,
+    `sed -n '1,20p' ${path}`,
+    `ruby -e 'puts File.read("${path}")'`,
+    `perl -e 'open(my $f, "<", "${path}"); print <$f>'`,
+    `php -r 'echo file_get_contents("${path}");'`,
+  ]),
+  `python3 <<< 'print(open(".env").read())'`,
+  ...["credentials.json", "id_rsa", "secrets.yaml", "values-prod.yaml"].flatMap(path => [
+    `cat ${path}`, `cp ${path} backup.txt`, `python3 -c "print(open('${path}').read())"`,
+  ]),
+]
+const ordinaryReadCommands = [
+  ...[".env.example", ".env.sample", ".env.template"].flatMap(path => [
+    `cat ${path}`, `python3 -c "print(open('${path}').read())"`,
+    `python3 -c "print(open('/workspace/project/${path}').read())"`,
+  ]),
+  "cat src/good.js README.md",
+  String.raw`rg -n '\.env' README.md`,
+  String.raw`python3 -c "import re; print(re.findall(r'\.env', open('README.md').read()))"`,
+  "python3 - <<'PY'\nimport re\nprint(re.findall(r'\\.env', open('README.md').read()))\nPY",
+  "rg -g '!.env.*' TODO src",
+  "sed -n '1,20p' src/good.js",
+  `python -c "print(open('src/good.js').read())"`,
+  `node -e "console.log(require('fs').readFileSync('README.md', 'utf8'))"`,
+  "python3 <<'PY'\nfrom pathlib import Path\np=Path('src/good.js')\nprint(p.read_text())\nPY",
+  "node <<'JS'\nconsole.log(require('fs').readFileSync('README.md', 'utf8'))\nJS",
+]
+for (const path of [".env", ".env.custom", ".env.local", ".env.pub"]) {
+  for (const toolName of ["read", "write", "edit"]) {
+    const result = await toolCall({ toolName, input: { path } }, ctx)
+    assert.equal(result?.block, true, `${toolName}: ${path}`)
+    assert.match(result.reason, /sensitive path/, `${toolName}: ${path}`)
+  }
+}
+for (const command of sensitiveReadCommands) {
+  const result = await toolCall({ toolName: "bash", input: { command } }, ctx)
+  assert.equal(result?.block, true, command)
+  assert.match(result.reason, /sensitive path/, command)
+}
+for (const command of ordinaryReadCommands) {
+  assert.equal(await toolCall({ toolName: "bash", input: { command } }, ctx), undefined, command)
+}
+
 assert.match(
   (await toolCall({ toolName: "read", input: { path: ".env" } }, ctx)).reason,
   /sensitive path/,
