@@ -74,8 +74,13 @@ mounted read-only, and cannot be replaced by Pi or project configuration.
 
 A Pi `bash` approval is approval of the submitted command string, not a command
 sandbox. The policy rejects listed immutable operations and inspects obvious
-nested `sh`/`bash` and interpreter `-c`/`-e` payloads, but shell parsing is
-necessarily heuristic: generated scripts, alternate interpreters, expansion,
+nested `sh`/`bash`, interpreter `-c`/`-e` payloads, heredoc bodies, and embedded
+literal paths. Core integration and final policy share the sensitive-path matcher:
+`.env` and `.env.*` (including custom suffixes) are denied before any approval,
+while `.env.example`, `.env.sample`, and `.env.template` remain usable. Literal
+secret references are checked independently of the executable name, including
+Python, Node, Ruby, Perl, and PHP. Shell parsing is nevertheless heuristic:
+generated scripts, alternate interpreters, expansion,
 obfuscation, subprocesses, and time-of-check/time-of-use changes can evade
 string inspection. Treat an approved shell call as arbitrary code execution
 inside Agentbox. The security boundary is the container and the credentials,
