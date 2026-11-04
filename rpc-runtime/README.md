@@ -347,11 +347,14 @@ after `agent_settled`, not a low-level `agent_end` that may still retry or conti
 The browser polls the lightweight session list every 1.5 seconds to update all
 sidebar rows, without opening an SSE stream or reading transcripts for each one.
 End & archive terminates the child and persistently hides its history, including
-across browser and runtime restarts. Native JSONL files are never deleted or
-rewritten: private `.archived-<native-uuid>` marker files live in the profile's
-session directory. Markers are written only after the child exits. An archive
-failure returns `archive_failed` and retains the stopped runtime slot for an
-explicit DELETE retry. Ephemeral profiles have no history to archive.
+across browser and runtime restarts. The web composer also accepts `/archive` as a
+frontend-only shortcut that opens the same confirmation and never prompts the
+model (distinct from Pi's `/skill:archive-conversation` host-uploader skill).
+Native JSONL files are never deleted or rewritten: private
+`.archived-<native-uuid>` marker files live in the profile's session directory.
+Markers are written only after the child exits. An archive failure returns
+`archive_failed` and retains the stopped runtime slot for an explicit DELETE
+retry. Ephemeral profiles have no history to archive.
 
 Session folder assignments are stored in the profile's `sessionDir/.session-folders/`
 as private, atomically replaced per-conversation sidecars, isolated by profile

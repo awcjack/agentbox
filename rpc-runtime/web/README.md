@@ -100,6 +100,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - End & archive with confirmation uses `DELETE /v1/sessions/:id` to stop the
   process and persistently hide saved history without deleting it. Delete-scope denial disables this
   control independently of write access. Successful empty `204` responses work.
+  Typing `/archive` in the composer (also listed in `/` suggestions) opens the same
+  confirmation and never sends a model prompt; it is distinct from Pi's host-uploader
+  skill `/skill:archive-conversation`.
 - **Archived conversations** in the sidebar lists saved archives for the selected
   profiles, including after logout/restart, ordered by creation date (newest first).
   Rows show that creation date, which does not change when a conversation is renamed

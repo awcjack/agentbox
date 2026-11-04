@@ -1066,6 +1066,11 @@ the session requires another explicit request. Codex support is intentionally
 deferred until its skill invocation can be bound to a native thread ID before
 the completion callback.
 
+This host-uploader path is separate from the Pi RPC web UI's `/archive` slash
+command and End & archive control, which only stop the supervised child and write
+a local `.archived-*` sidebar marker. Those actions do not create collector
+requests.
+
 Pi's extension resolves its intent on the next `agent_end` event using Pi's
 native session ID and JSONL session path.
 
