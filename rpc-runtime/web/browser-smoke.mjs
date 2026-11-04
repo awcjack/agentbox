@@ -803,6 +803,8 @@ try {
       }
       const promptCalls = () => calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length;
       const promptsBeforeCompletion = promptCalls();
+      await page.locator("#prompt").fill("/ar");
+      await until(() => page.locator(".command-option strong").evaluateAll((nodes) => nodes.some((node) => node.textContent === "/archive")), "local /archive suggestion");
       await page.locator("#prompt").fill("/aut");
       await until(() => page.locator(".command-option").count().then((count) => count === 4), "slash commands loaded");
       await page.locator("#prompt").press("ArrowDown"); await page.locator("#prompt").press("ArrowDown");
@@ -1049,6 +1051,13 @@ try {
       assert.equal(await page.locator("#prompt").inputValue(), "ambiguous acceptance");
       assert.equal(calls.filter((call) => call.id === session.id && call.command?.message === "ambiguous acceptance").length, 1);
 
+      const promptsBeforeArchive = calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length;
+      await page.locator("#prompt").fill("/archive"); await page.locator("#prompt").press("Enter");
+      await until(() => page.locator("#end-dialog").evaluate((dialog) => dialog.open), "/archive opens end dialog");
+      assert.equal(await page.locator("#prompt").inputValue(), "", "/archive consumes the draft");
+      assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length, promptsBeforeArchive, "/archive does not prompt Pi");
+      await page.locator("#cancel-end").click();
+      assert.ok(sessions.has(session.id), "cancelling /archive keeps process");
       await page.locator("#end-session").click(); await page.locator("#cancel-end").click();
       assert.ok(sessions.has(session.id), "cancelling confirmation keeps process");
       await page.locator("#end-session").click(); await page.locator("#end-form button[type=submit]").click();
