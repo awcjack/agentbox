@@ -607,7 +607,7 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
   }
 }
 
-/* Busy activity cue: larger glow-dot so working state is easier to spot. */
+/* Busy activity cue: larger glow-dot + soft text shimmer so working state is obvious. */
 .activity.busy {
   height: 34px;
   color: #d5cdc3;
@@ -626,6 +626,20 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
   font-size: 12px;
   font-weight: 500;
   letter-spacing: 0.2px;
+  background-image: linear-gradient(
+    100deg,
+    #9a9288 0%,
+    #9a9288 38%,
+    #f4ebe1 50%,
+    #9a9288 62%,
+    #9a9288 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: activity-shimmer 2.1s ease-in-out infinite;
 }
 .activity.busy #activity-text::before,
 .activity.busy #activity-text:before {
@@ -639,6 +653,10 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .compose-area.compact .activity.busy #activity-text {
   font-size: 11px;
 }
+@keyframes activity-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -120% 0; }
+}
 @keyframes activity-pulse {
   0%, 100% {
     opacity: 1;
@@ -650,6 +668,11 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .activity.busy #activity-text {
+    background-image: none;
+    color: #d5cdc3;
+    -webkit-text-fill-color: #d5cdc3;
+  }
   .activity.busy::before {
     opacity: 1;
     box-shadow: 0 0 0 3px #ed987a2e, 0 0 8px #ed987a55;
