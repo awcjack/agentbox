@@ -6,7 +6,7 @@ import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
 import { findFilePreview, isMarkdownPath, pathBreadcrumb } from "./context-pane.mjs";
-import { bangCommand, commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
+import { archiveCommand, bangCommand, commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments, initComposerFileDrop } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
@@ -1924,10 +1924,20 @@ $("show-subagent-cap").addEventListener("click", () => runSettingsCommand("agent
 $("composer").addEventListener("submit", async (event) => {
   event.preventDefault();
   const ctx = current;
-  if (!canWrite(ctx) || $("composer").hidden || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy) return;
+  if (!ctx || $("composer").hidden || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy) return;
   const draft = ctx.record.draft, text = draft.text.trim(), attachments = draft.images.slice(), version = draft.version, ownEpoch = epoch;
   const images = attachments.filter((file) => file.type !== "file");
   if (!text && !attachments.length) return;
+  if (archiveCommand(text)) {
+    if (attachments.length) { showNotice("Remove attachments before archiving. /archive never sends a model prompt.", true); return; }
+    if (!token || deleteDenied) { showNotice("This profile cannot archive sessions.", true); return; }
+    if (ctx.record.ending) return;
+    draft.text = ""; draft.images = []; draft.version++;
+    restoreDraft(); hideCommandSuggestions();
+    requestArchive(ctx.meta);
+    return;
+  }
+  if (!canWrite(ctx)) return;
   const bang = bangCommand(text);
   if (bang) {
     if (!bang.command) { showNotice("Type a shell command after ! (or !! to hide output from the model).", true); return; }

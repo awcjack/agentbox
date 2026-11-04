@@ -10,6 +10,12 @@ export function bangCommand(text) {
   };
 }
 
+// Frontend-only End & archive. Exact `/archive` never becomes a model prompt;
+// host collector upload remains `/skill:archive-conversation`.
+export function archiveCommand(text) {
+  return typeof text === "string" && /^\/archive\s*$/.test(text);
+}
+
 // Only complete an initial slash command, never prose, selected text, or a
 // command's ordinary arguments. Auto has explicit, discoverable mode arguments.
 export function commandQuery(text, start = text.length, end = start) {
@@ -23,6 +29,11 @@ export function commandSuggestions(text, commands) {
   if (commandQuery(text) === null) return [];
   const query = text.slice(1).toLowerCase();
   const known = new Map();
+  // Always advertise the local archive action; it is not a Pi catalog entry.
+  known.set("archive", {
+    name: "archive",
+    description: "End and archive this session (stops Pi; keeps history under Archived).",
+  });
   for (const command of Array.isArray(commands) ? commands.slice(0, 2000) : []) {
     if (!command || typeof command.name !== "string" || !/^[A-Za-z0-9_:/.-]{1,200}$/.test(command.name)) continue;
     if (!known.has(command.name)) known.set(command.name, {
