@@ -15,6 +15,103 @@ const TOKEN_HASH = createHash("sha256").update(TOKEN).digest("hex");
 const ALL_SCOPES = ["profiles:read", "sessions:create", "sessions:read", "sessions:write", "sessions:delete"];
 const RESUME_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
 
+test("sandbox schema defaults disabled and validates keys, types and paths", () => {
+  assert.deepEqual(normalizeConfig(config(), {}).sandbox, {
+    enable: false, executable: undefined, readOnlyPaths: [], readWritePaths: [],
+  });
+  const sandbox = { enable: true, executable: "/bin/bwrap", readOnlyPaths: ["/opt/tools"], readWritePaths: ["/var/cache/tool"] };
+  assert.deepEqual(normalizeConfig(config({ sandbox }), {}).sandbox, sandbox);
+  assert.equal(normalizeConfig(config({ sandbox: { enable: true } }), { PI_RPC_SANDBOX_EXECUTABLE: "/bin/bwrap" }).sandbox.executable, "/bin/bwrap");
+  for (const [value, pattern] of [
+    [null, /must be an object/],
+    [{ extra: true }, /unknown key extra/],
+    [{ enable: "true" }, /enable must be a boolean/],
+    [{ enable: true }, /executable must be an absolute path/],
+    [{ executable: 42 }, /executable must be an absolute path/],
+    [{ executable: "bwrap" }, /executable must be an absolute path/],
+    [{ readOnlyPaths: null }, /must be an array/],
+    [{ readWritePaths: "/tmp" }, /must be an array/],
+    [{ readOnlyPaths: [42] }, /must be an array/],
+    [{ readOnlyPaths: ["relative"] }, /normalized absolute paths/],
+    [{ readWritePaths: ["/tmp/../var"] }, /normalized absolute paths/],
+    [{ readWritePaths: ["/tmp/\u0000bad"] }, /normalized absolute paths/],
+  ]) assert.throws(() => normalizeConfig(config({ sandbox: value }), {}), pattern);
+  assert.throws(() => normalizeConfig(config({ sandbox, profiles: { default: { cwd: "/workspace" } } }), {}), /sessionDir must be a normalized absolute path when sandbox is enabled/);
+});
+
+test("sandbox accepts normalized session directories for explicit and discovered profiles", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-sandbox-discovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessions = join(root, "sessions");
+  await mkdir(join(workspace, "project"), { recursive: true });
+  await mkdir(sessions);
+  const normalized = normalizeConfig(config({
+    sandbox: { enable: true, executable: "/bin/bwrap" },
+    profiles: { default: { cwd: workspace, sessionDir: join(sessions, "default") } },
+    autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix: sessions },
+  }), {});
+  assert.deepEqual(normalized.discoveredProfiles, ["project"]);
+  assert.equal(normalized.profiles.get("project").sessionDir, join(sessions, "--project--"));
+  assert.equal(normalized.sandbox.enable, true);
+});
+
+test("sandbox executable must resolve to an immutable store path before any spawn", () => {
+  const cfg = config({ sandbox: { enable: true, executable: "/bin/bwrap" } });
+  let spawned = false;
+  for (const missing of [false, true]) {
+    assert.throws(() => createRuntime(cfg, {
+      spawn() { spawned = true; },
+      realpath(path) {
+        if (path === "/bin/pi") return "/nix/store/00000000000000000000000000000000-pi/bin/pi";
+        if (missing) throw new Error("missing sandbox");
+        return "/tmp/bwrap";
+      },
+    }), missing ? /sandbox.executable could not be resolved: missing sandbox/ : /sandbox.executable must resolve to an immutable Nix store path/);
+  }
+  assert.equal(spawned, false);
+});
+
+const SANDBOX_STORE_EXECUTABLE = "/nix/store/11111111111111111111111111111111-bubblewrap/bin/bwrap";
+const sandboxRealpath = (path) => path === "/bin/bwrap" ? SANDBOX_STORE_EXECUTABLE : "/nix/store/00000000000000000000000000000000-pi/bin/pi";
+
+test("enabled sandbox wraps Pi and creates session storage before launch", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-sandbox-runtime-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "project"), sessionDir = join(root, "history", "default");
+  await mkdir(cwd);
+  const { baseUrl, spawns } = await fixture(t, config({
+    sandbox: { enable: true, executable: "/bin/bwrap" },
+    profiles: { default: { cwd, sessionDir, args: ["--approve"] } },
+  }), { realpath: sandboxRealpath });
+  const id = await createSession(baseUrl, { profile: "default" });
+  assert.equal((await stat(sessionDir)).isDirectory(), true);
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].file, SANDBOX_STORE_EXECUTABLE);
+  assert.ok(spawns[0].args.includes("--ro-bind"));
+  assert.ok(spawns[0].args.includes(cwd));
+  assert.ok(spawns[0].args.includes(sessionDir));
+  const command = spawns[0].args.indexOf("/nix/store/00000000000000000000000000000000-pi/bin/pi");
+  assert.ok(command > 0);
+  assert.deepEqual(spawns[0].args.slice(command + 1), ["--mode", "rpc", "--session-dir", sessionDir, "--session-id", id, "--approve"]);
+});
+
+test("sandbox policy failures never spawn an unconfined Pi", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-sandbox-reject-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "project");
+  await mkdir(cwd);
+  const { baseUrl, spawns } = await fixture(t, config({
+    sandbox: { enable: true, executable: "/bin/bwrap" },
+    profiles: { default: { cwd, sessionDir: root } },
+  }), { realpath: sandboxRealpath });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await request(baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } });
+    assert.equal(result.response.status, 502);
+    assert.equal(result.body.error.code, "spawn_failed");
+    assert.equal(spawns.length, 0);
+  }
+});
+
 function config(overrides = {}) {
   const base = {
     piRpcApi: {

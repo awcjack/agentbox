@@ -1,6 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readdirSync, readFileSync, realpathSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { normalize as normalizePath } from "node:path";
 import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, rebaseHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
+import { buildSandboxLaunch } from "./sandbox.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
@@ -223,7 +224,34 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   const root = assertObject(runtimeConfig, "runtime config");
   assertKnownKeys(root, new Set(["version", "defaults", "servers", "piRpcApi"]), "runtime config");
   const raw = assertObject(root.piRpcApi, "piRpcApi");
-  assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "autoDiscoverProfiles", "limits"]), "piRpcApi");
+  assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "autoDiscoverProfiles", "limits", "sandbox"]), "piRpcApi");
+  const sandboxRaw = raw.sandbox === undefined ? {} : assertObject(raw.sandbox, "piRpcApi.sandbox");
+  assertKnownKeys(sandboxRaw, new Set(["enable", "executable", "readOnlyPaths", "readWritePaths"]), "piRpcApi.sandbox");
+  if (sandboxRaw.enable !== undefined && typeof sandboxRaw.enable !== "boolean") {
+    throw new Error("piRpcApi.sandbox.enable must be a boolean");
+  }
+  for (const key of ["readOnlyPaths", "readWritePaths"]) {
+    if (sandboxRaw[key] !== undefined && !Array.isArray(sandboxRaw[key])) {
+      throw new Error(`piRpcApi.sandbox.${key} must be an array of non-empty strings`);
+    }
+  }
+  const sandbox = {
+    enable: sandboxRaw.enable ?? false,
+    executable: sandboxRaw.executable ?? environment.PI_RPC_SANDBOX_EXECUTABLE,
+    readOnlyPaths: stringArray(sandboxRaw.readOnlyPaths, [], "piRpcApi.sandbox.readOnlyPaths"),
+    readWritePaths: stringArray(sandboxRaw.readWritePaths, [], "piRpcApi.sandbox.readWritePaths"),
+  };
+  if ((sandbox.enable || sandbox.executable !== undefined) &&
+      (typeof sandbox.executable !== "string" || !sandbox.executable.startsWith("/") || sandbox.executable.includes("\0"))) {
+    throw new Error("piRpcApi.sandbox.executable must be an absolute path");
+  }
+  for (const key of ["readOnlyPaths", "readWritePaths"]) {
+    for (const path of sandbox[key]) {
+      if (!path.startsWith("/") || path.includes("\0") || normalizePath(path) !== path) {
+        throw new Error(`piRpcApi.sandbox.${key} must contain normalized absolute paths`);
+      }
+    }
+  }
   const auth = assertObject(raw.auth, "piRpcApi.auth");
   assertKnownKeys(auth, new Set(["tokens"]), "piRpcApi.auth");
   if (!Array.isArray(auth.tokens) || auth.tokens.length === 0) {
@@ -467,6 +495,10 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   if (profiles.size === 0) throw new Error("piRpcApi.profiles must define at least one profile");
   const ownedSessionDirs = [];
   for (const [name, profile] of profiles) {
+    if (sandbox.enable && (typeof profile.sessionDir !== "string" || !profile.sessionDir.startsWith("/") ||
+        profile.sessionDir.includes("\0") || normalizePath(profile.sessionDir) !== profile.sessionDir)) {
+      throw new Error(`piRpcApi.profiles.${name}.sessionDir must be a normalized absolute path when sandbox is enabled`);
+    }
     if (profile.sessionDir === undefined) continue;
     for (const owner of ownedSessionDirs) {
       if (profile.sessionDir === owner.path || profile.sessionDir.startsWith(`${owner.path}/`) || owner.path.startsWith(`${profile.sessionDir}/`)) {
@@ -514,6 +546,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
     host,
     port,
     executable,
+    sandbox,
     tokens,
     profiles,
     discoveredProfiles,
@@ -675,7 +708,9 @@ class Session extends EventEmitter {
     else args.push("--session-id", this.nativeSessionId);
     if (name) args.push("--name", name);
     args.push(...profile.args);
-    this.child = spawnProcess(config.executable, args, {
+    if (config.sandbox.enable) mkdirSync(profile.sessionDir, { recursive: true, mode: 0o700 });
+    const launch = buildSandboxLaunch({ sandbox: config.sandbox, profile, executable: config.executable, args });
+    this.child = spawnProcess(launch.executable, launch.args, {
       cwd: profile.cwd,
       env: { ...SAFE_CHILD_ENV, ...profile.env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -1116,7 +1151,18 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   if (typeof executable !== "string" || !executable.startsWith("/nix/store/")) {
     throw new Error("piRpcApi.executable must resolve to an immutable Nix store path");
   }
-  const config = { ...normalizedConfig, executable };
+  const sandbox = { ...normalizedConfig.sandbox };
+  if (sandbox.enable) {
+    try {
+      sandbox.executable = resolveExecutable(sandbox.executable);
+    } catch (error) {
+      throw new Error(`piRpcApi.sandbox.executable could not be resolved: ${error.message}`);
+    }
+    if (typeof sandbox.executable !== "string" || !sandbox.executable.startsWith("/nix/store/")) {
+      throw new Error("piRpcApi.sandbox.executable must resolve to an immutable Nix store path");
+    }
+  }
+  const config = { ...normalizedConfig, executable, sandbox };
   const spawnProcess = dependencies.spawn;
   if (typeof spawnProcess !== "function") throw new Error("createRuntime requires dependencies.spawn");
   const now = dependencies.now ?? Date.now;

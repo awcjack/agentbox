@@ -5,6 +5,7 @@
   bash,
   coreutils,
   nodejs_22,
+  bubblewrap ? null,
   pi-coding-agent ? null,
 }:
 
@@ -20,17 +21,27 @@ stdenvNoCC.mkDerivation {
 
   checkPhase = ''
     runHook preCheck
-    TEST_BASH=${bash}/bin/bash ${nodejs_22}/bin/node --test
+    PI_RPC_SANDBOX_SHELL=${bash}/bin/bash PI_RPC_SANDBOX_COREUTILS=${coreutils}/bin TEST_BASH=${bash}/bin/bash ${
+      lib.optionalString (
+        stdenvNoCC.hostPlatform.isLinux && bubblewrap != null
+      ) "TEST_BWRAP=${bubblewrap}/bin/bwrap"
+    } ${nodejs_22}/bin/node --test
     runHook postCheck
   '';
 
   installPhase = ''
     runHook preInstall
     mkdir -p $out/libexec/agentbox-pi-rpc-runtime $out/bin
-    cp main.mjs runtime.mjs history.mjs folders.mjs discover-profiles.mjs package.json supervise.sh $out/libexec/agentbox-pi-rpc-runtime/
+    cp main.mjs runtime.mjs sandbox.mjs history.mjs folders.mjs discover-profiles.mjs package.json supervise.sh $out/libexec/agentbox-pi-rpc-runtime/
     cp -r web $out/libexec/agentbox-pi-rpc-runtime/web
     makeWrapper ${nodejs_22}/bin/node $out/bin/pi-rpc-runtime \
       --add-flags $out/libexec/agentbox-pi-rpc-runtime/main.mjs
+    ${lib.optionalString (stdenvNoCC.hostPlatform.isLinux && bubblewrap != null) ''
+      wrapProgram $out/bin/pi-rpc-runtime \
+        --set PI_RPC_SANDBOX_EXECUTABLE ${bubblewrap}/bin/bwrap \
+        --set PI_RPC_SANDBOX_SHELL ${bash}/bin/bash \
+        --set PI_RPC_SANDBOX_COREUTILS ${coreutils}/bin
+    ''}
     ${lib.optionalString (pi-coding-agent != null) ''
       wrapProgram $out/bin/pi-rpc-runtime \
         --prefix PATH : ${lib.makeBinPath [ pi-coding-agent ]}

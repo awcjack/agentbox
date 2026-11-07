@@ -233,6 +233,7 @@ in
       testSource = pkgs.runCommand "pi-rpc-runtime-test-source" { } ''
         mkdir -p $out/test
         cp ${./rpc-runtime/runtime.mjs} $out/runtime.mjs
+        cp ${./rpc-runtime/sandbox.mjs} $out/sandbox.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs
         cp ${./rpc-runtime/folders.mjs} $out/folders.mjs
         cp ${./rpc-runtime/discover-profiles.mjs} $out/discover-profiles.mjs
@@ -246,7 +247,7 @@ in
       for test in ${testSource}/web/*.test.mjs; do
         [ ! -f "$test" ] || tests+=("$test")
       done
-      TEST_BASH=${pkgs.bash}/bin/bash node --test "''${tests[@]}"
+      PI_RPC_SANDBOX_SHELL=${pkgs.bash}/bin/bash PI_RPC_SANDBOX_COREUTILS=${pkgs.coreutils}/bin TEST_BASH=${pkgs.bash}/bin/bash ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "TEST_BWRAP=${pkgs.bubblewrap}/bin/bwrap"} node --test "''${tests[@]}"
       touch $out
     '';
 
