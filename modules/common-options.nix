@@ -1547,6 +1547,30 @@ in
             `agentbox service stop pi-rpc` to manage it. Has no effect when enable is false.
           '';
         };
+        sandbox = {
+          enable = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = ''
+              Enforce Linux Bubblewrap filesystem isolation for every RPC session.
+              Only its canonical profile cwd and sessionDir are mounted writable,
+              alongside private temporary storage and read-only runtime files.
+              Fails closed when namespaces are unavailable; never falls back to
+              an unsandboxed launch. Networking is inherited. Does not sandbox
+              separately launched interactive Pi processes or external MCP services.
+            '';
+          };
+          readOnlyPaths = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            description = "Additional existing canonical paths exposed read-only to every RPC profile. Trusted administrator grants; broad/reserved paths are rejected.";
+          };
+          readWritePaths = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            description = "Additional existing canonical paths exposed read-write to every RPC profile. These explicitly widen the filesystem boundary.";
+          };
+        };
         bindAddress = lib.mkOption {
           type = lib.types.nullOr lib.types.str;
           default = null;
@@ -1680,8 +1704,10 @@ in
             description = ''
               At pi-rpc startup, scan autoDiscoverProfiles.root for immediate
               child directories and synthesize one profile per directory. This is
-              soft workspace selection only: processes still share the container
-              UID, credentials, and filesystem.
+              workspace selection. With piRpcApi.sandbox.enable, each session's
+              filesystem is restricted to the selected cwd, sessionDir, runtime
+              files, and explicit extra mounts. Otherwise profiles provide soft
+              selection only and share the container filesystem.
             '';
           };
           root = lib.mkOption {

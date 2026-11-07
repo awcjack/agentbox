@@ -213,6 +213,7 @@ let
         cfg.settings.piRpcApi.bindAddress;
     port = cfg.settings.piRpcApi.port;
     executable = "/bin/pi";
+    sandbox = cfg.settings.piRpcApi.sandbox;
     allowedOrigins = cfg.settings.piRpcApi.allowedOrigins;
     auth.tokens = map (
       token:
