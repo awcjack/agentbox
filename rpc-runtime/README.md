@@ -126,9 +126,54 @@ name conflicts. Discovery skips invalid profile names, excluded names,
 the root. It fails closed when the root is missing or discovery would exceed
 `maxProfiles`. Keep the explicit default `sessionDir` as a sibling path such as
 `.../sessions/--workspace--`, not the shared prefix directory itself, or overlap
-checks reject startup. Discovered profiles share the same Pi credentials home;
-this is soft project selection, not container isolation. Pi still loads each
-project's `AGENTS.md` / `CLAUDE.md` from that profile's cwd.
+checks reject startup. Pi still loads each project's `AGENTS.md` / `CLAUDE.md`
+from that profile's cwd. Filesystem isolation is controlled separately below.
+
+### Per-profile filesystem sandbox
+
+Agentbox's NixOS and nix-darwin container modules enable
+`settings.piRpcApi.sandbox.enable` by default. Each RPC Pi process starts through
+Linux Bubblewrap, with a fresh mount/PID/user namespace, dropped capabilities,
+private `/tmp`, `/run`, and agent home, and a minimal `/dev`. Only the selected
+profile's canonical `cwd` and `sessionDir` are bound read-write. Required system
+and managed runtime files are read-only; sibling projects and sibling session
+folders are absent. File tools, extensions, language servers, shell commands,
+and delegated children inherit this boundary. Selecting a subfolder narrows the
+project mount to that folder. Symlinked cwd/session paths are rejected rather
+than silently granting their targets. Profile roots must be distinct from their
+session storage and cannot be broad/reserved roots such as `/` or `/workspace`.
+Use canonical project-specific profiles; an ancestor project mount necessarily
+includes its descendants, so do not treat nested profile roots as isolated peers.
+
+Additional trusted grants are configured with
+`settings.piRpcApi.sandbox.readOnlyPaths` / `readWritePaths`. These expose the
+same paths to **every** profile and explicitly widen the boundary. Paths must
+exist and be canonical; broad, reserved, and overlapping mounts are rejected.
+Installed home-directory skills are not exposed automatically; explicitly grant
+read-only access to `/home/agent/.pi/agent/skills` if needed. Extra sockets, SSH
+keys, browser displays, Git configuration, and cloud credential files are not
+implicitly exposed. External MCP services retain their own permissions; this
+sandbox cannot restrict a remote tool's filesystem or database access.
+
+Authentication, settings, and models are seeded from the agent's existing files
+into **private writable copies**. Lock files and OAuth refreshes work within a
+session, but these changes disappear on exit; rotating refresh tokens can make
+the original credentials stale and require re-authentication. Credentials remain
+readable by the process. Networking is inherited, not filtered: this is not a
+credential-confidentiality or network-exfiltration boundary.
+
+Bubblewrap requires Linux user namespaces and compatible outer-container seccomp,
+AppArmor, and kernel settings. Unsupported environments fail closed: Pi is never
+launched directly as a fallback. Do not solve namespace failures with privileged
+containers or broadly disabling security policy. Validate the isolation integration
+test in the actual deployment environment before relying on the boundary.
+Disabling `sandbox.enable` explicitly restores the previous shared-filesystem
+behavior. Independently launched interactive Pi sessions are not covered.
+
+For standalone runtime JSON, opt in with `piRpcApi.sandbox.enable = true`;
+`executable` selects an absolute immutable Bubblewrap path, defaulting to the
+packaged `PI_RPC_SANDBOX_EXECUTABLE`. The package also supplies immutable bootstrap
+shell/coreutils paths. Standalone JSON without `sandbox` retains legacy behavior.
 
 When a previously discovered project's working directory is missing at startup,
 its `--name--` history folder is attached to the **default** profile as an extra

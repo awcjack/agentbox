@@ -83,7 +83,12 @@ Python, Node, Ruby, Perl, and PHP. Shell parsing is nevertheless heuristic:
 generated scripts, alternate interpreters, expansion,
 obfuscation, subprocesses, and time-of-check/time-of-use changes can evade
 string inspection. Treat an approved shell call as arbitrary code execution
-inside Agentbox. The security boundary is the container and the credentials,
+inside Agentbox. RPC sessions additionally use a per-profile Bubblewrap filesystem
+sandbox by default in the container modules; see
+[RPC filesystem sandbox](rpc-runtime/README.md#per-profile-filesystem-sandbox)
+for grants, authentication limitations, and Linux namespace prerequisites.
+Interactive Pi launches are not covered by that RPC sandbox.
+The outer security boundary is the container and the credentials,
 host mounts, network access, Docker access, and cloud permissions granted to it;
 scope each of those to the least privilege needed.
 
