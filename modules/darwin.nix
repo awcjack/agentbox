@@ -25,6 +25,12 @@
 
 let
   cfg = config.services.agentbox;
+  browserSeccomp = cfg.settings.hardening.seccompProfile == "browser";
+  seccompProfile =
+    if browserSeccomp then
+      pkgs.callPackage ../browser-seccomp.nix { }
+    else
+      cfg.settings.hardening.seccompProfile;
   validMcpServerName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9._-]{0,63}" name != null;
   validMcpHttpUrl =
     transport:
@@ -416,7 +422,8 @@ let
     # when a non-default profile is requested.
     lib.optional (
       cfg.settings.hardening.seccompProfile != "default"
-    ) "--security-opt seccomp=${cfg.settings.hardening.seccompProfile}"
+    ) "--security-opt ${lib.escapeShellArg "seccomp=${seccompProfile}"}"
+    ++ lib.optional (browserSeccomp && !net.enable) "--cap-drop=SYS_ADMIN"
     ++ lib.optional cfg.settings.hardening.noNewPrivileges "--security-opt no-new-privileges"
   );
 
@@ -1102,6 +1109,19 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion = !browserSeccomp || !cfg.settings.enableDocker;
+        message = "Agentbox browser seccomp requires unprivileged mode; settings.enableDocker must be false";
+      }
+      {
+        assertion =
+          !browserSeccomp
+          || builtins.elem pkgs.stdenv.hostPlatform.system [
+            "x86_64-darwin"
+            "aarch64-darwin"
+          ];
+        message = "Agentbox browser seccomp supports only x86_64/aarch64 Docker hosts";
+      }
       {
         assertion = !cfg.settings.historyArchive.enable || cfg.settings.historyArchive.hostId != "";
         message = "services.agentbox.settings.historyArchive.hostId must be set when archive requests are enabled";

@@ -367,17 +367,27 @@ in
         seccompProfile = lib.mkOption {
           type = lib.types.str;
           default = "default";
-          example = "unconfined";
+          example = "browser";
           description = ''
-            Seccomp profile for the agentbox container (maps to `docker run
-            --security-opt seccomp=`).
-              "default"    — Docker's built-in default profile (recommended).
-                             Blocks the ~44 most dangerous syscalls while still
-                             permitting normal dev work, sudo, and compilers.
-              "unconfined" — disable syscall filtering entirely. Widest kernel
-                             attack surface; only use if a specific tool needs a
-                             syscall the default profile blocks.
-              <path>       — path to a custom seccomp JSON profile on the host.
+            Seccomp profile for the agentbox container (maps to Docker's
+            --security-opt seccomp=). Changing it requires container recreation.
+              "default"    — Docker's built-in default profile (unchanged default).
+              "browser"    — pinned Moby default plus exact Chromium user/PID/net
+                             namespace clone flags and unshare(CLONE_NEWUSER).
+                             Opt-in, container-wide kernel exposure, not a
+                             per-browser exception. Keeps clone3 ENOSYS fallback,
+                             adds no setns permission, drops SYS_ADMIN and rejects
+                             privileged enableDocker mode and non-Docker
+                             backends. Does not change host
+                             sysctls, AppArmor, or Chromium sandbox flags.
+              "unconfined" — disable syscall filtering entirely (not recommended).
+              <path>       — complete custom Docker seccomp JSON file readable by
+                             the host Docker CLI, not a container path.
+            The browser preset supports x86_64/aarch64 Docker hosts and preserves
+            existing capability-conditional rules; do not add SYS_ADMIN. Enabling
+            browser tools alone never selects this profile. Host user namespace
+            support and live sandboxed acceptance are still required. It is not
+            a general bubblewrap/mount-namespace profile.
           '';
         };
 

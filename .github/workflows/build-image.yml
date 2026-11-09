@@ -11,6 +11,8 @@ on:
     paths:
       - "flake.nix"
       - "flake.lock"
+      - "browser-seccomp.nix"
+      - "security/**"
       - "image.nix"
       - "network-image.nix"
       - "packages.nix"
@@ -29,6 +31,8 @@ on:
       - ".github/workflows/build-image.yml"
   pull_request:
     paths:
+      - "browser-seccomp.nix"
+      - "security/**"
       - "flake.nix"
       - "image.nix"
       - "network-image.nix"
@@ -102,6 +106,9 @@ jobs:
             agentbox-pi-rpc-runtime; do
             nix build ".#packages.x86_64-linux.$test" --print-build-logs --no-update-lock-file
           done
+
+      - name: Test browser sandbox policy
+        run: nix build .#packages.x86_64-linux.browser-seccomp-test --no-link --print-build-logs --no-update-lock-file
 
       - name: Test RPC sandbox module wiring
         run: |

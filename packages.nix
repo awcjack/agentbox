@@ -21,6 +21,7 @@ let
   agentbox-neovim = pkgs.callPackage ./neovim.nix { };
   agent-browser = if isLinux then pkgs.callPackage ./agent-browser.nix { } else null;
   agentbox-browser = if isLinux then pkgs.callPackage ./browser.nix { } else null;
+  agentbox-browser-seccomp = pkgs.callPackage ./browser-seccomp.nix { };
   pi-post = pkgs.callPackage ./pi-post.nix { };
   pi-cursor = pkgs.callPackage ./pi-cursor.nix { };
   pi-agentsmd = pkgs.callPackage ./pi-agentsmd.nix { };
@@ -49,6 +50,7 @@ in
   inherit
     agent-browser
     agentbox-browser
+    agentbox-browser-seccomp
     agentbox-neovim
     agentbox-pi-goal-runtime
     agentbox-pi-rpc-runtime
@@ -58,6 +60,14 @@ in
     pi-post
     pi-cursor
     ;
+
+  browser-seccomp-test =
+    pkgs.runCommand "agentbox-browser-seccomp-test" { nativeBuildInputs = [ pkgs.python3 ]; }
+      ''
+        python3 ${./tests/browser-seccomp.py} \
+          ${./security/seccomp/vendor/moby-default-v0.2.3.json} ${agentbox-browser-seccomp}
+        touch $out
+      '';
 
   pi-codex-wrapper-test = import ./tests/pi-codex-wrapper.nix { inherit pkgs; };
 

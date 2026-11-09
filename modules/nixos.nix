@@ -28,6 +28,12 @@
 
 let
   cfg = config.services.agentbox;
+  browserSeccomp = cfg.settings.hardening.seccompProfile == "browser";
+  seccompProfile =
+    if browserSeccomp then
+      pkgs.callPackage ../browser-seccomp.nix { }
+    else
+      cfg.settings.hardening.seccompProfile;
   validMcpServerName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9._-]{0,63}" name != null;
   validMcpHttpUrl =
     transport:
@@ -437,6 +443,23 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
+        assertion = !browserSeccomp || cfg.backend == "docker";
+        message = "Agentbox browser seccomp preset requires the Docker backend.";
+      }
+      {
+        assertion = !browserSeccomp || !cfg.settings.enableDocker;
+        message = "Agentbox browser seccomp requires unprivileged mode; settings.enableDocker must be false";
+      }
+      {
+        assertion =
+          !browserSeccomp
+          || builtins.elem pkgs.stdenv.hostPlatform.system [
+            "x86_64-linux"
+            "aarch64-linux"
+          ];
+        message = "Agentbox browser seccomp supports only x86_64/aarch64 Docker hosts";
+      }
+      {
         assertion = !net.enable || cfg.backend == "docker";
         message = "Agentbox network policies currently require the Docker backend.";
       }
@@ -641,11 +664,13 @@ in
         "--cap-drop=NET_RAW"
         "--cap-drop=SYS_ADMIN"
       ]
-      # Container hardening (shared options). "default" => omit the flag so
-      # Docker applies its built-in default seccomp profile.
+      # The browser preset must not activate Moby's broad SYS_ADMIN branch.
+      ++ lib.optional (browserSeccomp && !net.enable) "--cap-drop=SYS_ADMIN"
+      # "default" keeps Docker's own profile; "browser" resolves to immutable
+      # generated JSON on the host. Neither is selected implicitly by the image.
       ++ lib.optional (
         cfg.settings.hardening.seccompProfile != "default"
-      ) "--security-opt=seccomp=${cfg.settings.hardening.seccompProfile}"
+      ) "--security-opt=seccomp=${seccompProfile}"
       ++ lib.optional cfg.settings.hardening.noNewPrivileges "--security-opt=no-new-privileges"
       ++ lib.optionals cfg.settings.enableDocker [
         "--privileged"
