@@ -683,6 +683,30 @@ This is not a sandbox and does not provide a security guarantee equivalent to
 Claude mode. MCP retains its independent per-server approval checks even when
 the Pi policy classifier allows a call.
 
+### Managed Pi browser
+
+Enable `services.agentbox.settings.browser.enable` for the direct managed Pi
+`browser` tool, independently of the desktop/noVNC. Delegated agents can share
+cooperative tabs and cookies within a conversation, or use isolated browsers;
+separate conversations are isolated. A domain allowlist forces isolated mode.
+Screenshots render inline in chat. The RPC **Browser** pane adds bounded main-tab
+preview and explicit, expiring human takeover; it never starts an unopened browser.
+Viewing requires `browser:read`; takeover also requires `browser:control`, alongside
+session scopes and profile permissions. There are no public CDP/stream/download
+endpoints.
+
+See [Managed Pi browser](docs/browser.md) for all settings, mandatory namespace
+sandbox prerequisites, session/authentication limits, the versioned result
+contract and the Phase 2 preview/control boundary. If Docker's default seccomp
+policy blocks namespace creation, explicitly opt in to
+`settings.hardening.seccompProfile = "browser"`; this adds narrowly filtered
+namespace permissions container-wide, without disabling Chromium's sandbox.
+It is not selected automatically and requires container recreation after an
+authorized rollout. Managed browser executables are packaged, with no runtime
+downloads or automatic streaming. Consumers must update
+their pinned Agentbox input, rebuild and recreate the container/Pi processes;
+local tests neither deploy the host nor prove a live browser smoke test passed.
+
 ### Pi chat UI and RPC API
 
 The optional `settings.piRpcApi` service exposes authenticated HTTP/SSE
@@ -1204,16 +1228,21 @@ only the unavailable Nix-store setuid-helper fallback, not Chromium's namespace
 or seccomp-BPF sandbox. Check `unshare -Ur true` as the agent user in the actual
 container. If the host kernel, Docker seccomp profile, or other security policy
 denies namespace creation, Chromium will fail with `No usable sandbox!`.
-This option does not relax those policies, add privileged mode, or pass
-`--no-sandbox`. Review a narrowly scoped browser-compatible policy on your host,
-or use a separate sandbox-capable browser container. The bundled desktop tools
+Enabling the desktop/browser does not implicitly relax those policies, add
+privileged mode, or pass `--no-sandbox`. The opt-in
+`settings.hardening.seccompProfile = "browser"` supplies a pinned, narrowly
+filtered Chromium namespace policy; review its container-wide exposure and
+[rollout requirements](docs/browser.md#opt-in-docker-seccomp-profile), or use a
+separate sandbox-capable browser container. The bundled desktop tools
 can still operate without Chromium.
 
-noVNC is a human viewer, not an LLM tool integration. Agents can run browser
-scripts or the bundled screenshot/input commands; structured browser MCP or
-pixel-based computer-use tools must be configured separately. Browsing untrusted
-sites in a container that also holds agent credentials is less isolated than a
-dedicated browser container.
+noVNC is a human viewer, not an LLM tool integration. The opt-in
+[managed Pi browser](docs/browser.md) provides structured browser actions and
+inline screenshots separately from noVNC; it does not provide a live viewer.
+Agents can also run browser scripts or the bundled screenshot/input commands;
+other browser MCP or pixel-based computer-use tools require separate configuration.
+Browsing untrusted sites in a container that also holds agent credentials is less
+isolated than a dedicated browser container.
 
 Runtime verification (the desktop smoke test needs an unused display `:10`):
 

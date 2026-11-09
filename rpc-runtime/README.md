@@ -301,8 +301,35 @@ per-cwd directories are not automatically imported.
 
 The static UI shell/assets and the two health routes are public; session data
 and all `/v1` routes require `Authorization: Bearer <token>` and the listed scope.
-An Origin header is optional for non-browser callers; when
-present, it must exactly match `allowedOrigins`.
+An Origin header is optional for non-browser callers except browser control
+POSTs; when present, it must exactly match `allowedOrigins`.
+
+### Managed browser preview and control
+
+With a browser-enabled image/configuration, the **Browser** pane previews the
+selected live conversation's main tab. It uses the existing HTTP listener and a
+private inherited fd to Pi, not public CDP or WebSockets. Preview never starts a
+browser. Routes require `X-Pi-Session-Id`, the current running/unlocked session,
+and profile `get_state` permission:
+
+- `GET /v1/sessions/:id/browser` — status; `sessions:read` + `browser:read`.
+- `GET /v1/sessions/:id/browser/frame` — bounded JPEG/ref frame; same scopes.
+- `POST /v1/sessions/:id/browser/control` — acquire/renew/release/ref-based input;
+  additionally `sessions:write` + `browser:control`, profile `prompt`, and Origin.
+
+Wildcard tokens retain full authority. Tokens are operator-wide capabilities,
+not per-user ownership. All responses are no-store; frames and leases never enter
+Pi stdout, history or SSE replay. Takeover leases expire after 30 seconds, bind to
+the principal/native session/browser incarnation and pause structured browser
+operations across the delegated family. No mutation retries. A failed/expired
+browser requires explicit agent recovery; a permanently closed private bridge
+returns `browser_bridge_closed` and requires restarting the conversation process.
+
+See [the browser guide](../docs/browser.md) and
+[wire/arbitration contract](../docs/browser-phase2-contract.md) for limits,
+security boundaries and remaining live acceptance requirements.
+
+### Route reference
 
 | Method and path | Scope | Result |
 |---|---|---|
