@@ -1,0 +1,14 @@
+diff --git a/cli/src/native/actions.rs b/cli/src/native/actions.rs
+--- a/cli/src/native/actions.rs
++++ b/cli/src/native/actions.rs
+@@ -2899,6 +2899,10 @@ fn policy_actions_for_command(
+         }
+         append_launch_policy_actions(&mut actions, &launch, &plugins);
+     } else if !skip_launch_action(action) && needs_implicit_launch {
++        // Agentbox: deny-launch policies must also cover implicit startup and
++        // CDP reattachment, not only an explicit launch command. Check before
++        // any target/provider early return or browser side effect.
++        actions.push("launch".to_string());
+         let plugins = plugins_from_command_or_env(cmd);
+         if let Some((field, value)) = settings_launch_target(settings) {
+             append_launch_policy_actions(&mut actions, &json!({ field: value }), &plugins);

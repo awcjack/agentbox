@@ -1,0 +1,52 @@
+--- a/cli/src/native/cdp/chrome.rs
++++ b/cli/src/native/cdp/chrome.rs
+@@ -1618,44 +1618,11 @@
+     Ok(())
+ }
+ 
+-/// Returns true if Chrome's sandbox should be disabled because the environment
+-/// doesn't support it (containers, VMs, CI runners, running as root).
+-fn should_disable_sandbox(existing_args: &[String]) -> bool {
+-    if existing_args.iter().any(|a| a == "--no-sandbox") {
+-        return false; // already set by user
+-    }
+-
+-    // CI environments (GitHub Actions, GitLab CI, etc.) often lack user namespace
+-    // support due to AppArmor or kernel restrictions.
+-    if std::env::var("CI").is_ok() {
+-        return true;
+-    }
+-
+-    #[cfg(unix)]
+-    {
+-        // Root user -- standard container default, Chrome sandbox requires non-root
+-        if unsafe { libc::geteuid() } == 0 {
+-            return true;
+-        }
+-
+-        // Docker container
+-        if Path::new("/.dockerenv").exists() {
+-            return true;
+-        }
+-
+-        // Podman container
+-        if Path::new("/run/.containerenv").exists() {
+-            return true;
+-        }
+-
+-        // Generic container detection: cgroup contains docker/kubepods/lxc
+-        if let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") {
+-            if cgroup.contains("docker") || cgroup.contains("kubepods") || cgroup.contains("lxc") {
+-                return true;
+-            }
+-        }
+-    }
+-
++/// Agentbox requires Chromium's namespace sandbox even in containers and CI.
++/// Fail closed when the host cannot provide it; never infer --no-sandbox from
++/// root, CI, Docker, Podman, or cgroup detection. The managed launcher also
++/// rejects explicit sandbox-disabling arguments.
++fn should_disable_sandbox(_existing_args: &[String]) -> bool {
+     false
+ }
+ 

@@ -19,6 +19,8 @@ let
 
   # Pre-configured neovim baked into the image; also exposed on its own.
   agentbox-neovim = pkgs.callPackage ./neovim.nix { };
+  agent-browser = if isLinux then pkgs.callPackage ./agent-browser.nix { } else null;
+  agentbox-browser = if isLinux then pkgs.callPackage ./browser.nix { } else null;
   pi-post = pkgs.callPackage ./pi-post.nix { };
   pi-cursor = pkgs.callPackage ./pi-cursor.nix { };
   pi-agentsmd = pkgs.callPackage ./pi-agentsmd.nix { };
@@ -45,6 +47,8 @@ in
       '';
 
   inherit
+    agent-browser
+    agentbox-browser
     agentbox-neovim
     agentbox-pi-goal-runtime
     agentbox-pi-rpc-runtime

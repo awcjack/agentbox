@@ -1,0 +1,2 @@
+# Unified-diff context for an empty source line is a single space, including EOF.
+agent-browser-*.patch whitespace=-blank-at-eol,-blank-at-eof
