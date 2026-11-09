@@ -75,8 +75,9 @@ function restricted(path, label) {
  * As with all pathname-based mounts, trusted host administrators must not rename
  * or replace these directories between validation and exec (TOCTOU).
  */
-export function buildSandboxLaunch({ executable, args, profile, sandbox }) {
+export function buildSandboxLaunch({ executable, args, profile, sandbox, browserRpcFd }) {
   // Never accept arbitrary descriptor ranges: fd 3 is the sole private bridge.
+  if (browserRpcFd !== undefined && browserRpcFd !== 3) throw new Error("sandbox browserRpcFd must be 3");
   if (!sandbox?.enable) return { executable, args };
   if (process.platform !== "linux") throw new Error("Pi RPC sandbox requires Linux bubblewrap");
   absolute(sandbox.executable, "executable");
@@ -118,6 +119,7 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox }) {
     "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home/agent",
     "--proc", "/proc", "--dev", "/dev",
   ];
+  if (browserRpcFd === 3) launchArgs.push("--preserve-fds", "1");
   const bound = new Set();
   const aliases = [];
   for (const path of optionalReadOnly) {

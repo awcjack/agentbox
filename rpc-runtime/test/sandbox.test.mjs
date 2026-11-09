@@ -187,6 +187,12 @@ for name in auth.json settings.json models.json; do printf changed > "$agent/$na
     const result = spawnSync(...launchTuple(input), { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   }
+  input.browserRpcFd = 3;
+  input.args = ["-peu", "-c", "printf private-bridge >&3; test ! -e /proc/self/fd/4"];
+  const inherited = spawnSync(...launchTuple(input), { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] });
+  assert.equal(inherited.status, 0, inherited.stderr || inherited.error?.message);
+  assert.equal(inherited.output[3], "private-bridge");
+  assert.equal(inherited.output[4], "");
   assert.equal(readFileSync(join(input.profile.cwd, "written"), "utf8"), "project");
   assert.equal(readFileSync(join(input.profile.sessionDir, "written"), "utf8"), "session");
   assert.equal(readFileSync(join(readonly, "marker"), "utf8"), "unchanged");
@@ -210,3 +216,12 @@ function launchTuple(input) {
   }
   return [launch.executable, [...args, ...launch.args.slice(split)]];
 }
+
+enabledTest("preserves exactly fd3 only for the private browser bridge", (t) => {
+  const input = fixture(t);
+  assert.equal(buildSandboxLaunch(input).args.includes("--preserve-fds"), false);
+  const { args } = buildSandboxLaunch({ ...input, browserRpcFd: 3 });
+  assert.equal(args.filter((arg) => arg === "--preserve-fds").length, 1);
+  assert.equal(args[args.indexOf("--preserve-fds") + 1], "1");
+  for (const fd of [0, 1, 2, 4, "3", [3], null]) assert.throws(() => buildSandboxLaunch({ ...input, browserRpcFd: fd }), /must be 3/);
+});

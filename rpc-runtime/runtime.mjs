@@ -10,6 +10,7 @@ import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, lis
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
 import { buildSandboxLaunch } from "./sandbox.mjs";
+import { createBrowserClient } from "./browser-channel.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
@@ -134,6 +135,8 @@ const SCOPES = new Set([
   "sessions:read",
   "sessions:write",
   "sessions:delete",
+  "browser:read",
+  "browser:control",
 ]);
 
 const DIALOG_METHODS = new Set(["confirm", "editor", "input", "select"]);
@@ -222,7 +225,8 @@ function normalizeCommands(value, fallback, label) {
 
 export function normalizeConfig(runtimeConfig, environment = process.env, dependencies = {}) {
   const root = assertObject(runtimeConfig, "runtime config");
-  assertKnownKeys(root, new Set(["version", "defaults", "servers", "piRpcApi"]), "runtime config");
+  // The managed browser extension owns validation of the browser section.
+  assertKnownKeys(root, new Set(["version", "defaults", "servers", "piRpcApi", "browser"]), "runtime config");
   const raw = assertObject(root.piRpcApi, "piRpcApi");
   assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "autoDiscoverProfiles", "limits", "sandbox"]), "piRpcApi");
   const sandboxRaw = raw.sandbox === undefined ? {} : assertObject(raw.sandbox, "piRpcApi.sandbox");
@@ -547,6 +551,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
     port,
     executable,
     sandbox,
+    browserEnabled: root.browser?.enable === true,
     tokens,
     profiles,
     discoveredProfiles,
@@ -709,14 +714,22 @@ class Session extends EventEmitter {
     if (name) args.push("--name", name);
     args.push(...profile.args);
     if (config.sandbox.enable) mkdirSync(profile.sessionDir, { recursive: true, mode: 0o700 });
-    const launch = buildSandboxLaunch({ sandbox: config.sandbox, profile, executable: config.executable, args });
+    const browserRpcFd = config.browserEnabled ? 3 : undefined;
+    const launch = buildSandboxLaunch({ sandbox: config.sandbox, profile, executable: config.executable, args, browserRpcFd });
+    const env = { ...SAFE_CHILD_ENV, ...profile.env };
+    delete env.PI_BROWSER_RPC_FD;
+    if (browserRpcFd === 3) env.PI_BROWSER_RPC_FD = "3";
     this.child = spawnProcess(launch.executable, launch.args, {
       cwd: profile.cwd,
-      env: { ...SAFE_CHILD_ENV, ...profile.env },
-      stdio: ["pipe", "pipe", "pipe"],
+      env,
+      stdio: browserRpcFd === 3 ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,
     });
+
+    this.browserChannel = browserRpcFd === 3 && this.child.stdio?.[3]
+      ? createBrowserClient(this.child.stdio[3]) : null;
+    this.browserPending = 0;
 
     this.child.stderr.on("data", (chunk) => {
       this.lastActivityAt = this.now();
@@ -907,6 +920,7 @@ class Session extends EventEmitter {
 
   protocolFailure(error) {
     if (this.status === "exited") return;
+    this.browserChannel?.close();
     this.status = "failed";
     this.publish({ type: "supervisor", event: "protocol_error", error: error.message });
     this.signal("SIGKILL");
@@ -924,6 +938,7 @@ class Session extends EventEmitter {
 
   onExit(code, signal, error) {
     if (this.exit) return;
+    this.browserChannel?.close();
     this.status = this.status === "failed" || error || (code !== 0 && code !== null) ? "failed" : "exited";
     this.exit = { code, signal, error: error?.message ?? null };
     this.publish({ type: "supervisor", event: this.conversationReplacing ? "conversation_source_exited" : "child_exit", ...this.exit });
@@ -1057,6 +1072,7 @@ class Session extends EventEmitter {
     this.stopping = new Promise((resolve) => {
       if (this.exit) return resolve();
       this.status = "stopping";
+      this.browserChannel?.close();
       try {
         safeWrite(this.child.stdin, { type: "abort" });
         this.child.stdin.end();
@@ -1126,6 +1142,7 @@ function authenticate(request, config, requiredScope) {
   if (!matched.scopes.has("*") && !matched.scopes.has(requiredScope)) {
     throw new HttpError(403, "insufficient_scope", `scope ${requiredScope} is required`);
   }
+  return matched;
 }
 
 function parseAfterId(request, url) {
@@ -1134,6 +1151,85 @@ function parseAfterId(request, url) {
   const value = Number(raw);
   if (!Number.isSafeInteger(value)) throw new HttpError(400, "invalid_event_id", "event cursor is too large");
   return value;
+}
+
+// Browser HTTP is an explicit, narrow API, not a generic bridge proxy. These
+// validators are intentionally independent of transcript/tool metadata.
+const browserObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const browserId = (value) => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const browserRef = (value) => typeof value === "string" && /^@e[1-9][0-9]{0,8}$/.test(value);
+const browserTime = (value) => Number.isSafeInteger(value) && value >= 0;
+function browserRequest(body) {
+  const invalid = () => { throw new HttpError(400, "invalid_browser_request", "Invalid browser request"); };
+  if (!browserObject(body) || !["acquire", "renew", "release", "input"].includes(body.operation) || !browserId(body.browserSessionId)) invalid();
+  const fields = ["operation", "browserSessionId"];
+  if (body.operation !== "acquire") {
+    fields.push("leaseId");
+    if (!browserId(body.leaseId)) invalid();
+  }
+  if (body.operation === "input") {
+    fields.push("frameId", "request");
+    if (!browserId(body.frameId) || !browserObject(body.request)) invalid();
+    const p = body.request;
+    const actions = { open: ["url"], click: ["ref"], fill: ["ref", "text"], press: ["key"], scroll: ["direction", "amount"], back: [], forward: [], reload: [] };
+    if (!Object.hasOwn(actions, p.action) || Object.keys(p).some((key) => key !== "action" && !actions[p.action].includes(key))) invalid();
+    if (["click", "fill"].includes(p.action) && !browserRef(p.ref)) invalid();
+    if (p.action === "fill" && (typeof p.text !== "string" || p.text.length > 10000 || p.text.includes("\0"))) invalid();
+    if (p.action === "press" && (typeof p.key !== "string" || !/^[A-Za-z0-9+ _]{1,64}$/.test(p.key))) invalid();
+    if (p.action === "scroll" && ((p.direction !== undefined && !["up", "down", "left", "right"].includes(p.direction))
+      || (p.amount !== undefined && (!Number.isInteger(p.amount) || p.amount < 1 || p.amount > 2000)))) invalid();
+    if (p.action === "open") {
+      if (typeof p.url !== "string" || p.url.length > 4096) invalid();
+      let url;
+      try { url = new URL(p.url); } catch { invalid(); }
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) invalid();
+    }
+  }
+  if (Object.keys(body).length !== fields.length || Object.keys(body).some((key) => !fields.includes(key))) invalid();
+  const { operation, ...payload } = body;
+  return { operation, payload };
+}
+
+function browserResult(data, operation, nativeSessionId, payload, canControl) {
+  const invalid = () => { throw new HttpError(502, "browser_failed", "Browser operation failed"); };
+  if (!browserObject(data) || data.version !== 1 || data.nativeSessionId !== nativeSessionId || !browserId(data.browserSessionId)
+    || (payload.browserSessionId !== undefined && data.browserSessionId !== payload.browserSessionId)) invalid();
+  const base = { version: 1, nativeSessionId, browserSessionId: data.browserSessionId };
+  const control = () => {
+    if (!browserObject(data.control) || !["agent", "human"].includes(data.control.mode)) invalid();
+    if (data.control.mode === "human" && !browserTime(data.control.expiresAt)) invalid();
+    return data.control.mode === "agent" ? { mode: "agent" } : { mode: "human", expiresAt: data.control.expiresAt };
+  };
+  if (operation === "status") {
+    if (data.available !== true || typeof data.ready !== "boolean" || !["tab", "browser"].includes(data.ownership)
+      || data.capabilities?.liveView !== true || data.capabilities?.takeover !== true) invalid();
+    return { ...base, available: true, ready: data.ready, ownership: data.ownership,
+      capabilities: { liveView: true, takeover: true }, control: control(), permissions: { view: true, control: canControl } };
+  }
+  if (operation === "frame") {
+    if (!browserId(data.frameId) || !browserTime(data.createdAt) || data.width !== 1280 || data.height !== 720 || data.mimeType !== "image/jpeg"
+      || typeof data.data !== "string" || data.data.length > 819200 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data.data)) invalid();
+    const jpeg = Buffer.from(data.data, "base64");
+    if (jpeg.length > 600 * 1024 || jpeg.length < 4 || jpeg.toString("base64") !== data.data
+      || jpeg[0] !== 0xff || jpeg[1] !== 0xd8 || jpeg[2] !== 0xff) invalid();
+    if (!Array.isArray(data.refs) || data.refs.length > 100) invalid();
+    const seen = new Set();
+    const refs = data.refs.map((ref) => {
+      if (!browserObject(ref) || !browserRef(ref.ref) || seen.has(ref.ref)
+        || typeof ref.role !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(ref.role)
+        || typeof ref.name !== "string" || ref.name.length > 512 || ref.name.includes("\0")) invalid();
+      seen.add(ref.ref);
+      return { ref: ref.ref, role: ref.role, name: ref.name };
+    });
+    return { ...base, frameId: data.frameId, createdAt: data.createdAt, width: 1280, height: 720,
+      mimeType: "image/jpeg", data: data.data, refs, control: control() };
+  }
+  if (["acquire", "renew"].includes(operation)) {
+    if (!browserId(data.leaseId) || !browserTime(data.expiresAt)) invalid();
+    return { ...base, leaseId: data.leaseId, expiresAt: data.expiresAt };
+  }
+  if (data.accepted !== true) invalid();
+  return { ...base, accepted: true };
 }
 
 export function createRuntime(runtimeConfig, dependencies = {}) {
@@ -1461,11 +1557,68 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads|browser(?:\/frame|\/control)?))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
       const action = match[2];
+      if (["browser", "browser/frame", "browser/control"].includes(action)) {
+        const token = authenticate(request, config, "sessions:read");
+        authenticate(request, config, "browser:read");
+        const control = action === "browser/control";
+        if (request.method !== (control ? "POST" : "GET")) throw new HttpError(405, "method_not_allowed", "method not allowed");
+        const hasScope = (scope) => token.scopes.has("*") || token.scopes.has(scope);
+        const canControl = hasScope("sessions:write") && hasScope("browser:control") && session.profile.allowedCommands.has("prompt");
+        if (control) {
+          authenticate(request, config, "sessions:write");
+          authenticate(request, config, "browser:control");
+          if (request.headers.origin === undefined) throw new HttpError(403, "origin_required", "Origin is required for browser control");
+          if (!session.profile.allowedCommands.has("prompt")) throw new HttpError(403, "command_forbidden", "browser control requires allowed command prompt");
+        }
+        if (!session.profile.allowedCommands.has("get_state")) throw new HttpError(403, "command_forbidden", "browser reads require allowed command get_state");
+        const child = session.child, nativeSessionId = session.nativeSessionId, channel = session.browserChannel;
+        const validate = () => {
+          if (!request.headers["x-pi-session-id"]) throw new HttpError(400, "invalid_session_precondition", "X-Pi-Session-Id is required for browser requests");
+          if (sessions.get(session.id) !== session || session.child !== child || session.nativeSessionId !== nativeSessionId) {
+            channel?.close();
+            throw new HttpError(409, "browser_session_changed", "Browser session changed");
+          }
+          checkNativePrecondition(request, session, sessions.get(session.id));
+          if (session.status !== "running") throw new HttpError(409, "session_not_running", "session is not running");
+          if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
+          if (!channel || session.browserChannel !== channel) throw new HttpError(503, "browser_unavailable", "Browser bridge is unavailable");
+          if (channel.closed) throw new HttpError(503, "browser_bridge_closed", "Browser bridge closed after a timeout or protocol failure. Restart the conversation process to reconnect.");
+        };
+        validate();
+        if (session.browserPending >= 4) throw new HttpError(429, "browser_busy", "Browser is busy");
+        session.browserPending++;
+        session.touch();
+        try {
+          let operation = action === "browser" ? "status" : "frame", payload = {};
+          if (control) {
+            const body = await readJson(request, Math.min(config.limits.maxBodyBytes, 64 * 1024));
+            validate();
+            ({ operation, payload } = browserRequest(body));
+          }
+          const principal = createHash("sha256").update("pi-browser-principal-v1\0").update(token.digest).digest("hex");
+          let data;
+          try { data = await channel.request(nativeSessionId, operation, payload, principal); }
+          catch (error) {
+            validate();
+            const statuses = { browser_unavailable: 503, browser_busy: 429, browser_control_held: 409, browser_lease_invalid: 409,
+              browser_frame_stale: 409, invalid_browser_request: 400, browser_session_changed: 409, browser_failed: 502 };
+            const code = Object.hasOwn(statuses, error?.code) ? error.code : "browser_failed";
+            // Even a replacement transport implementation cannot leak its message.
+            throw new HttpError(statuses[code], code, "Browser request could not be completed");
+          }
+          validate();
+          let result;
+          try { result = browserResult(data, operation, nativeSessionId, payload, canControl); }
+          catch (error) { channel.close(); throw error; }
+          return json(response, 200, result);
+        } finally { session.browserPending--; session.touch(); }
+      }
+
       if ((action === "conversation" && ["GET", "POST"].includes(request.method)) || (action === "export" && request.method === "GET")) {
         authenticate(request, config, "sessions:read");
         const mutate = request.method === "POST";
@@ -1489,7 +1642,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         if (mutate && !session.profile.sessionDir) throw new HttpError(409, "history_unavailable", "conversation changes require a profile-owned session directory");
         if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
         if (session.status !== "running" || sessions.get(session.id) !== session) throw new HttpError(409, "session_not_running", "session is not running");
-        if (session.pending.size || session.lateReads.size || session.pendingUi.size || session.uncertainWrite || session.agentBusy) {
+        if (session.browserPending || session.pending.size || session.lateReads.size || session.pendingUi.size || session.uncertainWrite || session.agentBusy) {
           throw new HttpError(409, "conversation_busy", "wait for Pi to settle and resolve pending commands or dialogs; uncertain writes require restarting the session");
         }
         session.conversationLocked = true;
@@ -1760,7 +1913,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       // approval may remain quiet after the browser disconnects. RPC responses
       // acknowledge commands before the agent finishes, so pending is not enough.
       const activeWork = session.status === "running"
-        && (session.agentBusy || session.agentCompacting || session.pendingUi.size > 0);
+        && (session.agentBusy || session.agentCompacting || session.pendingUi.size > 0 || session.browserPending > 0);
       if (!activeWork && !session.conversationLocked && session.clients.size === 0 && session.pending.size === 0 && session.lastActivityAt < cutoff) {
         session.stop().then(() => {
           if (session.exit && sessions.get(id) === session && !session.conversationLocked) sessions.delete(id);

@@ -4,28 +4,38 @@ let
   pi-cursor = pkgs.callPackage ../pi-cursor.nix { };
   pi-agentsmd = pkgs.callPackage ../pi-agentsmd.nix { };
   fakePi = pkgs.writeShellScriptBin "pi" ''
+    if [ "''${!#}" = --test-browser-env ]; then
+      printf '%s\n' "''${PI_BROWSER_EXECUTABLE-unset}" "''${PI_BROWSER_CHROMIUM-unset}" "$PI_AGENTBOX_RUNTIME_CONFIG" "''${PI_BROWSER_FLOCK-unset}"
+      exit 0
+    fi
     printf '%s\n' "$@"
   '';
   expression = import ../image.nix;
   # Evaluate/build only the actual image wrapper and its immutable extensions.
-  image = expression (
-    lib.mapAttrs (_: _: "/unused") (
-      lib.filterAttrs (_: default: !default) (builtins.functionArgs expression)
-    )
-    // {
-      inherit lib;
-      inherit (pkgs) coreutils runCommand;
-      pi-coding-agent = fakePi;
-      pi-post = pkgs.callPackage ../pi-post.nix { };
-      inherit pi-cursor pi-agentsmd;
-      agentbox-pi-goal-runtime = pkgs.callPackage ../goal-runtime { };
-      dockerTools.buildLayeredImageWithNixDb = args: args;
-      buildEnv = args: lib.findFirst (path: lib.isDerivation path && path.name == "pi") null args.paths;
-      writeShellScriptBin =
-        name: text: if name == "pi" then pkgs.writeShellScriptBin name text else "/unused";
-    }
-  );
-  wrapper = builtins.head image.contents;
+  imageFor =
+    withBrowser:
+    expression (
+      lib.mapAttrs (_: _: "/unused") (
+        lib.filterAttrs (_: default: !default) (builtins.functionArgs expression)
+      )
+      // {
+        inherit lib withBrowser;
+        agent-browser = "/packaged-agent-browser";
+        agentbox-browser = "/packaged-chromium";
+        util-linux = "/packaged-flock";
+        inherit (pkgs) coreutils runCommand;
+        pi-coding-agent = fakePi;
+        pi-post = pkgs.callPackage ../pi-post.nix { };
+        inherit pi-cursor pi-agentsmd;
+        agentbox-pi-goal-runtime = pkgs.callPackage ../goal-runtime { };
+        dockerTools.buildLayeredImageWithNixDb = args: args;
+        buildEnv = args: lib.findFirst (path: lib.isDerivation path && path.name == "pi") null args.paths;
+        writeShellScriptBin =
+          name: text: if name == "pi" then pkgs.writeShellScriptBin name text else "/unused";
+      }
+    );
+  wrapper = builtins.head (imageFor false).contents;
+  browserWrapper = builtins.head (imageFor true).contents;
 in
 pkgs.runCommand "pi-codex-wrapper-test" { } ''
   unset PI_WORKFLOW_CHILD PI_WORKFLOW_APPROVAL_VERSION
@@ -74,5 +84,35 @@ pkgs.runCommand "pi-codex-wrapper-test" { } ''
     test "$status" = 2
   done
   test "$(${wrapper}/bin/pi auth)" = auth
+  # Browser tools precede policy in parent and delegated/RPC entrypoints.
+  mapfile -t browserArgs < <(${browserWrapper}/bin/pi --mode rpc)
+  test "''${browserArgs[19]}" = -e
+  test "''${browserArgs[20]##*/}" = pi-browser.ts
+  test -f "''${browserArgs[20]}"
+  test "''${browserArgs[21]}" = -e
+  test "''${browserArgs[22]##*/}" = pi-policy.ts
+  test "''${browserArgs[23]}" = --mode
+  for childEnv in PI_WORKFLOW_CHILD=1 PI_WORKFLOW_APPROVAL_VERSION=1; do
+    mapfile -t browserChildArgs < <(env "$childEnv" ${browserWrapper}/bin/pi --mode rpc)
+    test "''${browserChildArgs[18]##*/}" = pi-browser.ts
+    test "''${browserChildArgs[20]##*/}" = pi-policy.ts
+    test "''${browserChildArgs[21]}" = --mode
+  done
+  # Reassert trusted paths after RPC sanitizing or inherited overrides.
+  for envMode in clean inherited; do
+    envArgs=(-i)
+    if [ "$envMode" = inherited ]; then
+      envArgs=(PI_BROWSER_EXECUTABLE=/untrusted PI_BROWSER_CHROMIUM=/untrusted PI_BROWSER_FLOCK=/untrusted PI_AGENTBOX_RUNTIME_CONFIG=/untrusted)
+    fi
+    mapfile -t browserEnv < <(env "''${envArgs[@]}" ${browserWrapper}/bin/pi --test-browser-env)
+    test "''${browserEnv[0]}" = /packaged-agent-browser/bin/agent-browser
+    test "''${browserEnv[1]}" = /packaged-chromium/bin/agentbox-browser-chromium
+    test "''${browserEnv[2]}" = /etc/agentbox/pi-runtime.json
+    test "''${browserEnv[3]}" = /packaged-flock/bin/flock
+    mapfile -t baseEnv < <(env "''${envArgs[@]}" ${wrapper}/bin/pi --test-browser-env)
+    test "''${baseEnv[0]}" = unset
+    test "''${baseEnv[1]}" = unset
+    test "''${baseEnv[3]}" = unset
+  done
   touch $out
 ''

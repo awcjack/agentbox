@@ -612,6 +612,45 @@ try {
   else process.env.PI_WORKFLOW_FAST_MODE = previousFastEnv
 }
 
+// Browser ownership comes only from the live managed extension, not shell env.
+const previousBrowserRoot = process.env.PI_BROWSER_ROOT
+const previousBrowserRpcFd = process.env.PI_BROWSER_RPC_FD
+process.env.PI_BROWSER_ROOT = "/tmp/stale-unrelated-browser"
+process.env.PI_BROWSER_RPC_FD = "3"
+try {
+  const delegated = harness({ readFile: async () => config, spawn: successfulSpawn,
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }) })
+  const invoke = (params: any) => delegated.tools.get("task").execute("browser-delegation", params, undefined, undefined, context())
+  await invoke({ role: "scout", prompt: "no browser extension" })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_ROOT, undefined)
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_RPC_FD, undefined)
+  let root = "/tmp/agentbox-browser-parent"
+  delegated.events.on("agentbox:browser-delegation", ({ reply }) => reply({ PI_BROWSER_ROOT: root, PI_BROWSER_PARENT_TASK_ID: "parent-task", PI_BROWSER_RPC_FD: "3", UNTRUSTED_EXTRA: "ignored" }))
+  const cleanedTasks: string[] = []
+  delegated.events.on("agentbox:browser-child-exit", ({ taskId, reply }) => reply(Promise.resolve().then(() => { cleanedTasks.push(taskId) })))
+  const result = await invoke({ role: "scout", prompt: "shared browser root" })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_ROOT, root)
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_TASK_ID, result.details.results[0].taskId)
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_PARENT_TASK_ID, "parent-task")
+  assert.deepEqual(cleanedTasks, [result.details.results[0].taskId])
+  assert.equal(spawnCalls.at(-1)!.options.env.UNTRUSTED_EXTRA, undefined)
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_RPC_FD, undefined)
+  root = "/tmp/agentbox-browser-new"
+  await invoke({ role: "scout", prompt: "resumed child in current runtime", resume: result.details.results[0].taskId })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_ROOT, root)
+  delegated.events.removeAllListeners("agentbox:browser-delegation")
+  delegated.events.on("agentbox:browser-delegation", () => { throw new Error("browser delegation failed") })
+  const before = spawnCalls.length
+  const failed = await invoke({ role: "scout", prompt: "fail closed" })
+  assert.equal(spawnCalls.length, before)
+  assert.equal(failed.details.results[0].status, "failed")
+} finally {
+  if (previousBrowserRoot === undefined) delete process.env.PI_BROWSER_ROOT
+  else process.env.PI_BROWSER_ROOT = previousBrowserRoot
+  if (previousBrowserRpcFd === undefined) delete process.env.PI_BROWSER_RPC_FD
+  else process.env.PI_BROWSER_RPC_FD = previousBrowserRpcFd
+}
+
 // Real files, with the same metadata shape supplied by Pi's discovered commands.
 const skillDir = await mkdtemp(join(tmpdir(), "pi-workflow-skill-"))
 try {

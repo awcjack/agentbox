@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { Duplex, PassThrough } from "node:stream";
+import { serveBrowserChannel } from "../browser-channel.mjs";
 import test from "node:test";
 import { createRuntime, internals, normalizeConfig } from "../runtime.mjs";
 
@@ -158,12 +159,26 @@ function config(overrides = {}) {
   return base;
 }
 
+function browserDuplexPair() {
+  let a, b;
+  const endpoint = (peer) => new Duplex({
+    read() {},
+    write(chunk, encoding, done) { peer().push(Buffer.from(chunk)); done(); },
+    final(done) { peer().push(null); done(); },
+    destroy(error, done) { if (!peer().destroyed) peer().destroy(); done(error); },
+  });
+  a = endpoint(() => b); b = endpoint(() => a);
+  return [a, b];
+}
+
 class FakeChild extends EventEmitter {
-  constructor() {
+  constructor(browser = false) {
     super();
     this.stdin = new PassThrough();
     this.stdout = new PassThrough();
     this.stderr = new PassThrough();
+    this.stdio = [this.stdin, this.stdout, this.stderr];
+    if (browser) [this.stdio[3], this.browserPeer] = browserDuplexPair();
     this.input = "";
     this.signals = [];
     this.exited = false;
@@ -188,7 +203,8 @@ async function fixture(t, customConfig = config(), options = {}) {
   const children = [];
   const spawns = [];
   const spawn = (file, args, spawnOptions) => {
-    const child = new FakeChild();
+    const child = new FakeChild(spawnOptions.stdio.length === 4);
+    if (child.browserPeer && options.browserHandler) serveBrowserChannel(child.browserPeer, options.browserHandler);
     children.push(child);
     spawns.push({ file, args, options: spawnOptions });
     options.onSpawn?.(child, args);
@@ -1967,4 +1983,198 @@ test("history move relocates JSONL across profiles and rejects active sessions",
   assert.deepEqual((await request(second.baseUrl, "/v1/session-folders?profile=agentbox")).body.folders, [
     { id: RESUME_ID, folder: "" },
   ]);
+});
+
+const BROWSER_SCOPES = [...ALL_SCOPES, "browser:read", "browser:control"];
+function browserConfig(overrides = {}, enabled = true) {
+  return { ...config({ auth: { tokens: [{ sha256: TOKEN_HASH, scopes: BROWSER_SCOPES }] }, ...overrides }), browser: { enable: enabled } };
+}
+const browserBase = (nativeSessionId) => ({ version: 1, nativeSessionId, browserSessionId: "browser-incarnation" });
+const browserStatus = (nativeSessionId) => ({ ...browserBase(nativeSessionId), available: true, ready: false, ownership: "tab",
+  capabilities: { liveView: true, takeover: true }, control: { mode: "agent" } });
+const browserFrame = (nativeSessionId) => ({ ...browserBase(nativeSessionId), frameId: "frame-one", createdAt: Date.now(),
+  width: 1280, height: 720, mimeType: "image/jpeg", data: Buffer.from([255, 216, 255, 217]).toString("base64"),
+  refs: [{ ref: "@e1", role: "textbox", name: "<img onerror=alert(1)>" }], control: { mode: "agent" } });
+const browserHeaders = (id, control = false) => ({ "X-Pi-Session-Id": id, ...(control ? { Origin: "https://client.example" } : {}) });
+
+for (const enabled of [false, true]) test(`browser fd is exclusively supervisor-owned (enabled=${enabled})`, async (t) => {
+  const cfg = browserConfig({ profiles: { default: { cwd: "/workspace", sessionDir: "/sessions", env: { PI_BROWSER_RPC_FD: "9" } } } }, enabled);
+  const f = await fixture(t, cfg, { browserHandler: ({ nativeSessionId }) => browserStatus(nativeSessionId) });
+  const id = await createSession(f.baseUrl);
+  assert.deepEqual(f.spawns[0].options.stdio, enabled ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"]);
+  assert.equal(f.spawns[0].options.env.PI_BROWSER_RPC_FD, enabled ? "3" : undefined);
+  const result = await request(f.baseUrl, `/v1/sessions/${id}/browser`, { headers: browserHeaders(id) });
+  assert.equal(result.response.status, enabled ? 200 : 503);
+  if (enabled) {
+    assert.deepEqual(result.body.permissions, { view: true, control: true });
+    f.children[0].emit("exit", 0, null);
+    assert.equal(f.children[0].stdio[3].destroyed, true);
+  } else assert.equal(result.body.error.code, "browser_unavailable");
+});
+
+test("sandbox browser launch preserves only the intended fd", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-browser-fd-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "project"); await mkdir(cwd);
+  const f = await fixture(t, browserConfig({ sandbox: { enable: true, executable: "/bin/bwrap" },
+    profiles: { default: { cwd, sessionDir: join(root, "history") } } }), { realpath: sandboxRealpath });
+  await createSession(f.baseUrl);
+  const args = f.spawns[0].args;
+  assert.equal(args[args.indexOf("--preserve-fds") + 1], "1");
+  assert.equal(f.spawns[0].options.stdio.length, 4);
+});
+
+test("browser routes require explicit scopes, profile rights, native binding and control Origin", async (t) => {
+  let calls = 0;
+  const f = await fixture(t, browserConfig(), { browserHandler: ({ nativeSessionId }) => { calls++; return browserStatus(nativeSessionId); } });
+  const id = await createSession(f.baseUrl);
+  const path = `/v1/sessions/${id}/browser`;
+  for (const [options, status, code] of [
+    [{ auth: false }, 401, "unauthorized"],
+    [{}, 400, "invalid_session_precondition"],
+    [{ headers: browserHeaders("bad") }, 400, "invalid_session_precondition"],
+    [{ headers: browserHeaders(RESUME_ID) }, 409, "conversation_stale"],
+    [{ headers: { ...browserHeaders(id), Origin: "https://evil.example" } }, 403, "origin_forbidden"],
+    [{ method: "POST", headers: browserHeaders(id), body: { operation: "acquire", browserSessionId: "browser-incarnation" } }, 403, "origin_required"],
+  ]) {
+    const result = await request(f.baseUrl, options.method ? `${path}/control` : path, options);
+    assert.equal(result.response.status, status);
+    assert.equal(result.body.error.code, code);
+  }
+  assert.equal(calls, 0);
+  for (const missing of ["sessions:read", "browser:read", "sessions:write", "browser:control"]) {
+    const scopes = BROWSER_SCOPES.filter((scope) => scope !== missing);
+    f.runtime.config.tokens[0].scopes = new Set(scopes);
+    const control = missing.endsWith("write") || missing.endsWith("control");
+    const result = await request(f.baseUrl, control ? `${path}/control` : path, {
+      method: control ? "POST" : "GET", headers: browserHeaders(id, control),
+      ...(control ? { body: { operation: "acquire", browserSessionId: "browser-incarnation" } } : {}),
+    });
+    assert.equal(result.response.status, 403, missing);
+    assert.equal(result.body.error.code, "insufficient_scope");
+    if (control) {
+      const read = await request(f.baseUrl, path, { headers: browserHeaders(id) });
+      assert.deepEqual(read.body.permissions, { view: true, control: false });
+    }
+  }
+  f.runtime.config.tokens[0].scopes = new Set(["*"]);
+  const session = f.runtime.sessions.get(id);
+  session.profile.allowedCommands.delete("prompt");
+  let result = await request(f.baseUrl, `${path}/control`, { method: "POST", headers: browserHeaders(id, true), body: { operation: "acquire", browserSessionId: "browser-incarnation" } });
+  assert.equal(result.body.error.code, "command_forbidden");
+  session.profile.allowedCommands.delete("get_state");
+  result = await request(f.baseUrl, path, { headers: browserHeaders(id) });
+  assert.equal(result.body.error.code, "command_forbidden");
+});
+
+test("control is narrow, principal is injected, responses are projected and never enter history", async (t) => {
+  const seen = [];
+  const f = await fixture(t, browserConfig(), { browserHandler: (req) => {
+    seen.push(req);
+    if (req.operation === "status") return { ...browserStatus(req.nativeSessionId), principal: "secret", leaseId: "secret", permissions: { control: false } };
+    if (req.operation === "frame") return { ...browserFrame(req.nativeSessionId), principal: "secret", leaseId: "secret" };
+    return { ...browserBase(req.nativeSessionId), leaseId: "lease-one", expiresAt: Date.now() + 30000, accepted: true, principal: "secret" };
+  } });
+  const id = await createSession(f.baseUrl), path = `/v1/sessions/${id}/browser`;
+  const session = f.runtime.sessions.get(id), eventCount = session.events.records.length;
+  for (const suffix of ["", "/frame"]) {
+    const result = await request(f.baseUrl, path + suffix, { headers: browserHeaders(id) });
+    assert.equal(result.response.status, 200, JSON.stringify(result.body));
+    assert.equal(result.response.headers.get("cache-control"), "no-store");
+    assert.equal(result.body.principal, undefined);
+    assert.equal(result.body.leaseId, undefined);
+  }
+  for (const operation of ["acquire", "renew", "release", "input"]) {
+    const body = { operation, browserSessionId: "browser-incarnation", ...(operation === "acquire" ? {} : { leaseId: "lease-one" }),
+      ...(operation === "input" ? { frameId: "frame-one", request: { action: "click", ref: "@e1" } } : {}) };
+    const result = await request(f.baseUrl, `${path}/control`, { method: "POST", headers: browserHeaders(id, true), body });
+    assert.equal(result.response.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.principal, undefined);
+    assert.equal(result.body.leaseId, ["acquire", "renew"].includes(operation) ? "lease-one" : undefined);
+  }
+  assert.equal(seen.length, 6);
+  assert.match(seen[0].principal, /^[0-9a-f]{64}$/);
+  assert.notEqual(seen[0].principal, TOKEN_HASH);
+  assert.ok(seen.every((req) => req.principal === seen[0].principal && req.nativeSessionId === id));
+  assert.equal(session.events.records.length, eventCount);
+  assert.equal(f.children[0].input, "");
+  for (const body of [
+    { operation: "acquire", browserSessionId: "browser-incarnation", principal: "attacker" },
+    { operation: "cdp", browserSessionId: "browser-incarnation" },
+    ...[{ action: "open", url: "file:///tmp/private" }, { action: "open", url: "https://user:pass@example.com" },
+      { action: "evaluate", script: "1" }, { action: "click", ref: "#selector" }, { action: "scroll", amount: 2001 },
+      { action: "press", key: "--flag" }, { action: "reload", path: "/tmp" }].map((request) => ({ operation: "input", browserSessionId: "browser-incarnation", leaseId: "lease-one", frameId: "frame-one", request })),
+  ]) {
+    const result = await request(f.baseUrl, `${path}/control`, { method: "POST", headers: browserHeaders(id, true), body });
+    assert.equal(result.response.status, 400, JSON.stringify(body));
+    assert.equal(result.body.error.code, "invalid_browser_request");
+  }
+  assert.equal(seen.length, 6);
+});
+
+for (const mutate of [
+  (data) => ({ ...data, data: "not-base64" }),
+  (data) => ({ ...data, data: Buffer.from("not-jpeg").toString("base64") }),
+  (data) => ({ ...data, data: Buffer.alloc(600 * 1024 + 1, 255).toString("base64") }),
+  (data) => ({ ...data, width: 999999 }),
+  (data) => ({ ...data, refs: [{ ref: "@e1", role: "textbox", name: "x".repeat(513) }] }),
+  (data) => ({ ...data, refs: Array.from({ length: 101 }, (_, i) => ({ ref: `@e${i + 1}`, role: "button", name: "" })) }),
+  (data) => ({ ...data, nativeSessionId: RESUME_ID }),
+]) test("malformed bridge frame fails closed without exposing payload", async (t) => {
+  const f = await fixture(t, browserConfig(), { browserHandler: ({ nativeSessionId }) => mutate(browserFrame(nativeSessionId)) });
+  const id = await createSession(f.baseUrl);
+  const result = await request(f.baseUrl, `/v1/sessions/${id}/browser/frame`, { headers: browserHeaders(id) });
+  assert.equal(result.response.status, 502);
+  assert.deepEqual(result.body, { error: { code: "browser_failed", message: "Browser operation failed" } });
+  assert.equal(f.children[0].stdio[3].destroyed, true);
+});
+
+for (const race of ["replace", "native", "exit", "lock"]) test(`browser result cannot cross ${race} race`, async (t) => {
+  let resolve, started;
+  const arrived = new Promise((r) => { started = r; });
+  const f = await fixture(t, browserConfig(), { browserHandler: ({ nativeSessionId }) => {
+    started(); return new Promise((r) => { resolve = () => r(browserStatus(nativeSessionId)); });
+  } });
+  const id = await createSession(f.baseUrl), session = f.runtime.sessions.get(id);
+  const pending = request(f.baseUrl, `/v1/sessions/${id}/browser`, { headers: browserHeaders(id) });
+  await arrived;
+  if (race === "replace") f.runtime.sessions.set(id, { ...session });
+  if (race === "native") session.nativeSessionId = RESUME_ID;
+  if (race === "exit") f.children[0].emit("exit", 0, null);
+  if (race === "lock") session.conversationLocked = true;
+  resolve();
+  const result = await pending;
+  assert.equal(result.response.status, 409, JSON.stringify(result.body));
+  assert.equal(result.body.ready, undefined);
+  f.runtime.sessions.set(id, session);
+  session.conversationLocked = false;
+});
+
+test("permanently closed browser bridge has a distinct restart-required error", async (t) => {
+  const f = await fixture(t, browserConfig(), { browserHandler: ({ nativeSessionId }) => browserStatus(nativeSessionId) });
+  const id = await createSession(f.baseUrl);
+  f.runtime.sessions.get(id).browserChannel.close();
+  const result = await request(f.baseUrl, `/v1/sessions/${id}/browser`, { headers: browserHeaders(id) });
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.error.code, "browser_bridge_closed");
+  assert.match(result.body.error.message, /Restart the conversation process/);
+});
+
+test("pending browser work blocks idle cleanup", async (t) => {
+  let now = Date.now(), resolve, started;
+  const arrived = new Promise((r) => { started = r; });
+  const f = await fixture(t, browserConfig({ limits: { idleTimeoutMs: 100, cleanupIntervalMs: 100 } }), {
+    now: () => now,
+    browserHandler: ({ nativeSessionId }) => { started(); return new Promise((r) => { resolve = () => r(browserStatus(nativeSessionId)); }); },
+  });
+  const id = await createSession(f.baseUrl);
+  const pending = request(f.baseUrl, `/v1/sessions/${id}/browser`, { headers: browserHeaders(id) });
+  await arrived;
+  now += 10000;
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(f.children[0].signals.length, 0);
+  assert.equal(f.runtime.sessions.get(id).browserPending, 1);
+  resolve();
+  assert.equal((await pending).response.status, 200);
+  assert.equal(f.runtime.sessions.get(id).browserPending, 0);
 });

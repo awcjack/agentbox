@@ -163,6 +163,10 @@
   withNix ? true,
   # Optional on-demand X11 desktop, browser, and automation tools.
   withDesktop ? false,
+  # Managed headless Pi browser tools, independent of the X11 desktop.
+  withBrowser ? false,
+  agent-browser ? callPackage ./agent-browser.nix { },
+  agentbox-browser ? callPackage ./browser.nix { },
 }:
 
 let
@@ -707,6 +711,10 @@ let
     cp ${./extensions/pi-approval.ts} $out/pi-approval.ts
     cp ${./extensions/pi-codex-accounts.ts} $out/pi-codex-accounts.ts
     cp ${./extensions/pi-openai-fast.ts} $out/pi-openai-fast.ts
+    ${lib.optionalString withBrowser ''
+      cp ${./extensions/pi-browser.ts} $out/pi-browser.ts
+      cp ${./rpc-runtime/browser-channel.mjs} $out/browser-channel.mjs
+    ''}
   '';
   piWorkflowExtension = "${piAgentboxExtensions}/pi-workflow.ts";
   piPolicyExtension = "${piAgentboxExtensions}/pi-policy.ts";
@@ -734,6 +742,20 @@ let
     export PI_WORKFLOW_CONFIG=/etc/agentbox/pi-workflow.json
     export PI_AGENTBOX_RUNTIME_CONFIG=/etc/agentbox/pi-runtime.json
     export PI_POLICY_CONFIG=/etc/pi/agentbox-policy.json
+    # Reassert immutable paths here, including after RPC environment sanitizing.
+    # Never trust inherited executable overrides, even on browser-free images.
+    ${
+      if withBrowser then
+        ''
+          export PI_BROWSER_EXECUTABLE=${agent-browser}/bin/agent-browser
+          export PI_BROWSER_CHROMIUM=${agentbox-browser}/bin/agentbox-browser-chromium
+          export PI_BROWSER_FLOCK=${util-linux}/bin/flock
+        ''
+      else
+        ''
+          unset PI_BROWSER_EXECUTABLE PI_BROWSER_CHROMIUM PI_BROWSER_FLOCK
+        ''
+    }
     # Goal is a parent-session workflow, never a delegated child's loop. Keep
     # child role tools, step limits and approval transport solely workflow-owned.
     goalArgs=()
@@ -751,6 +773,7 @@ let
       -e ${pi-cursor.extension} \
       -e ${pi-agentsmd.extension} \
       "''${goalArgs[@]}" \
+      ${lib.optionalString withBrowser "-e ${piAgentboxExtensions}/pi-browser.ts"} \
       -e ${piPolicyExtension} \
       "$@"
   '';
@@ -1390,6 +1413,10 @@ let
     nix
   ]
   ++ lib.optionals withDesktop [ (callPackage ./desktop.nix { }) ]
+  ++ lib.optionals withBrowser [
+    agent-browser
+    agentbox-browser
+  ]
   ++ lib.optionals withCloudTools [
     awscli2
     kubectl

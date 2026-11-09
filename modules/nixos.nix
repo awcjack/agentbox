@@ -265,6 +265,16 @@ let
         version = 1;
         defaults = cfg.settings.piConfig.mcpLimits;
         servers = piMcpServers;
+        browser = {
+          inherit (cfg.settings.browser)
+            enable
+            delegation
+            allowedDomains
+            maxOutputChars
+            commandTimeoutMs
+            idleTimeoutMs
+            ;
+        };
       }
       // lib.optionalAttrs cfg.settings.piRpcApi.enable { piRpcApi = piRpcConfig; }
     )
@@ -532,6 +542,7 @@ in
         (lib.optionalAttrs cfg.settings.enableCloudTools { withCloudTools = true; })
         // (lib.optionalAttrs (!cfg.settings.enableNix) { withNix = false; })
         // (lib.optionalAttrs cfg.settings.desktop.enable { withDesktop = true; })
+        // (lib.optionalAttrs cfg.settings.browser.enable { withBrowser = true; })
       )
     );
 
@@ -654,7 +665,11 @@ in
         "--memory=${cfg.settings.memoryLimits}"
         "--pids-limit=${toString cfg.settings.pidsLimit}"
       ]
-      ++ lib.optional cfg.settings.desktop.enable "--shm-size=${cfg.settings.desktop.shmSize}"
+      ++
+        lib.optional (cfg.settings.desktop.enable || cfg.settings.browser.enable)
+          "--shm-size=${
+            if cfg.settings.desktop.enable then cfg.settings.desktop.shmSize else cfg.settings.browser.shmSize
+          }"
       # Container hardening (shared options). "default" keeps Docker's profile.
       ++ lib.optionals (!net.enable) [ "--hostname=agentbox" ]
       # Even sudo inside the agent cannot edit the companion's firewall, send

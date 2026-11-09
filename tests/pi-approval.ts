@@ -213,6 +213,7 @@ createPiWorkflowExtension({
   readFile: async () => JSON.stringify({ roles: { scout: {} } }),
   getPiInvocation: (args) => ({ command: "bash", args: ["-c", 'exec "$@"', "approval-wrapper", process.execPath, "--experimental-strip-types", fixture, ...args] }),
 })({ events: { emit: (name: string, payload: any) => {
+  if (name === "agentbox:browser-delegation" || name === "agentbox:browser-child-exit") return
   assert.equal(name, "agentbox:auto-query")
   payload.reply(autoEnabled)
 } }, on: () => {}, registerCommand: () => {}, registerTool: (tool: any) => tools.set(tool.name, tool), appendEntry: () => {} } as any)

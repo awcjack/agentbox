@@ -196,6 +196,62 @@ in
     };
 
     settings = {
+      browser = {
+        enable = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Enable the managed Pi browser tools, independently of the desktop.
+            NixOS builds the default image with withBrowser = true. Darwin
+            requires a prebuilt Linux image built with withBrowser = true;
+            enabling this option does not rebuild the image on macOS.
+          '';
+        };
+
+        delegation = lib.mkOption {
+          type = lib.types.enum [
+            "tabs"
+            "isolated"
+          ];
+          default = "tabs";
+          description = "Delegated browser strategy. A nonempty allowedDomains list forces isolated browsers for delegated tasks because upstream CDP attach cannot enforce an allowlist.";
+        };
+
+        allowedDomains = lib.mkOption {
+          type = lib.types.addCheck (lib.types.listOf (
+            lib.types.addCheck (lib.types.strMatching "(\\*\\.)?[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?") (
+              domain: builtins.stringLength domain <= 253
+            )
+          )) (domains: builtins.length domains <= 128);
+          default = [ ];
+          description = "Browser domain allowlist (up to 128 hostnames, optionally prefixed *.); empty permits all domains. This is not a replacement for container network policy.";
+        };
+
+        maxOutputChars = lib.mkOption {
+          type = lib.types.ints.between 1000 50000;
+          default = 16000;
+          description = "Maximum characters returned by a browser tool call.";
+        };
+
+        commandTimeoutMs = lib.mkOption {
+          type = lib.types.ints.between 1000 120000;
+          default = 30000;
+          description = "Browser command timeout in milliseconds.";
+        };
+
+        idleTimeoutMs = lib.mkOption {
+          type = lib.types.ints.between 10000 3600000;
+          default = 300000;
+          description = "Idle browser cleanup timeout in milliseconds.";
+        };
+
+        shmSize = lib.mkOption {
+          type = lib.types.strMatching "[1-9][0-9]*[kmg]?";
+          default = "1g";
+          description = "Private container /dev/shm size (Docker --shm-size). When desktop is also enabled, desktop.shmSize takes precedence.";
+        };
+      };
+
       desktop = {
         enable = lib.mkEnableOption "the on-demand virtual desktop (Chromium, Xvfb, Openbox, and noVNC)";
 
@@ -1623,6 +1679,8 @@ in
                         "profiles:read"
                         "sessions:create"
                         "sessions:read"
+                        "browser:read"
+                        "browser:control"
                         "sessions:write"
                         "sessions:delete"
                       ]
@@ -1738,7 +1796,10 @@ in
           exclude = lib.mkOption {
             type = lib.types.listOf lib.types.str;
             default = [ ];
-            example = [ ".pnpm-store" "node_modules" ];
+            example = [
+              ".pnpm-store"
+              "node_modules"
+            ];
             description = "Exact child directory names to ignore.";
           };
           excludePrefixes = lib.mkOption {

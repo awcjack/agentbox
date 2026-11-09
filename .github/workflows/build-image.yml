@@ -15,6 +15,9 @@ on:
       - "security/**"
       - "image.nix"
       - "network-image.nix"
+      - "agent-browser.nix"
+      - "browser.nix"
+      - "patches/**"
       - "packages.nix"
       - "pi-cursor.nix"
       - "pi-agentsmd.nix"
@@ -36,6 +39,9 @@ on:
       - "flake.nix"
       - "image.nix"
       - "network-image.nix"
+      - "agent-browser.nix"
+      - "browser.nix"
+      - "patches/**"
       - "packages.nix"
       - "pi-cursor.nix"
       - "pi-agentsmd.nix"
@@ -93,6 +99,7 @@ jobs:
           for test in \
             agent-archive-request-test \
             pi-agentbox-extension-test \
+            pi-browser-extension-test \
             pi-workflow-extension-test \
             pi-policy-extension-test \
             pi-goal-extension-test \
@@ -107,8 +114,17 @@ jobs:
             nix build ".#packages.x86_64-linux.$test" --print-build-logs --no-update-lock-file
           done
 
-      - name: Test browser sandbox policy
-        run: nix build .#packages.x86_64-linux.browser-seccomp-test --no-link --print-build-logs --no-update-lock-file
+      # Browser binaries/Chromium are Linux-only; the extension and module
+      # assertions exercise portable logic, including Darwin's prebuilt image.
+      - name: Test browser integration
+        run: |
+          nixpkgs_path="$(nix eval --impure --raw --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs.outPath')"
+          nix-instantiate --eval --strict --json tests/browser-module.nix --arg nixpkgs "$nixpkgs_path"
+          nix build .#packages.x86_64-linux.agent-browser.tests.safety \
+            .#packages.x86_64-linux.pi-browser-native-test \
+            .#packages.x86_64-linux.agentbox-browser.tests.wrapper \
+            .#packages.x86_64-linux.browser-seccomp-test \
+            --no-link --print-build-logs --no-update-lock-file
 
       - name: Test RPC sandbox module wiring
         run: |

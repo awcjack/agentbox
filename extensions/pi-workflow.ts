@@ -709,7 +709,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
             }
           }
 
-          const finish = (exitCode: number | null, spawnError?: Error) => {
+          const finish = async (exitCode: number | null, spawnError?: Error) => {
             if (settled) return
             settled = true
             closeApprovals()
@@ -733,6 +733,15 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               stderrText = stderrText.split(/\r?\n/).filter((line) => line !== createdNotice).join("\n").trim()
             }
             const output = spawnError?.message || parserFailure || assistantOutput || stdoutText || stderrText || "(no output)"
+            // A step-limited/killed child cannot run session_shutdown. Let the
+            // parent-owned browser registry reclaim only this task's resources.
+            let cleanup = Promise.resolve()
+            let cleanupTimer: ReturnType<typeof setTimeout> | undefined
+            try {
+              pi.events.emit("agentbox:browser-child-exit", { taskId, reply: (pending: Promise<void>) => { cleanup = Promise.resolve(pending) } })
+              await Promise.race([cleanup, new Promise<void>(done => { cleanupTimer = setTimeout(done, 6000) })])
+            } catch { /* Browser idle timeout remains the fallback; never lose the task result. */ }
+            finally { if (cleanupTimer) clearTimeout(cleanupTimer) }
             resolve({
               taskId,
               role: job.role,
@@ -754,9 +763,25 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
             try {
               pi.events.emit("agentbox:fast-query", { reply: (value: boolean) => { fastMode = value === true } })
             } catch { fastMode = false }
+            // Only the current managed browser extension can delegate its root.
+            // Never let a stale shell/inherited variable join unrelated sessions.
+            const childEnv: NodeJS.ProcessEnv = { ...process.env, PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_FAST_MODE: fastMode ? "on" : "off", [APPROVAL_ENV]: APPROVAL_VERSION }
+            delete childEnv.PI_BROWSER_ROOT
+            delete childEnv.PI_BROWSER_RPC_FD // Parent-only supervisor channel; fd3 may carry child approvals.
+            delete childEnv.PI_BROWSER_TASK_ID
+            delete childEnv.PI_BROWSER_PARENT_TASK_ID
+            pi.events.emit("agentbox:browser-delegation", {
+              reply: (value: Record<string, string>) => {
+                if (typeof value?.PI_BROWSER_ROOT === "string" && value.PI_BROWSER_ROOT) {
+                  childEnv.PI_BROWSER_ROOT = value.PI_BROWSER_ROOT
+                  childEnv.PI_BROWSER_TASK_ID = taskId
+                  if (typeof value.PI_BROWSER_PARENT_TASK_ID === "string") childEnv.PI_BROWSER_PARENT_TASK_ID = value.PI_BROWSER_PARENT_TASK_ID
+                }
+              },
+            })
             proc = spawn(invocation.command, invocation.args, {
               cwd,
-              env: { ...process.env, PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_FAST_MODE: fastMode ? "on" : "off", [APPROVAL_ENV]: APPROVAL_VERSION },
+              env: childEnv,
               shell: false,
               stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
             })

@@ -142,7 +142,8 @@ export function parseConfig(raw, path = DEFAULT_CONFIG_PATH) {
     throw new Error(`invalid JSON in ${path}: ${error instanceof Error ? error.message : String(error)}`)
   }
   if (!isObject(value)) throw new Error(`${path} must contain an object`)
-  assertOnlyKeys(value, new Set(["version", "defaults", "servers", "piRpcApi"]), "config")
+  // The managed browser extension owns validation of the browser section.
+  assertOnlyKeys(value, new Set(["version", "defaults", "servers", "piRpcApi", "browser"]), "config")
   if (value.version !== 1) throw new Error(`${path} version must be 1`)
   if (!isObject(value.servers)) throw new Error(`${path} must contain a servers object`)
   if (Object.keys(value.servers).length > 64) throw new Error(`${path} may define at most 64 servers`)

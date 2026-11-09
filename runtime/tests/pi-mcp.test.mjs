@@ -398,6 +398,19 @@ test("enforces a deadline when a client ignores cancellation", async () => {
   assert.match(afterTimeout.content[0].text, /unavailable/)
 })
 
+test("tolerates extension-owned browser config without changing MCP parsing", () => {
+  const base = { version: 1, defaults: {}, servers: { docs: stdio() }, piRpcApi: { managed: true } }
+  const expected = parseConfig(JSON.stringify(base))
+  for (const browser of [
+    { enable: false },
+    { enable: true, delegation: "tabs", allowedDomains: [], maxOutputChars: 16000, commandTimeoutMs: 30000, idleTimeoutMs: 300000 },
+    { enable: true, delegation: "isolated", allowedDomains: ["example.test"] },
+    null, // Validation belongs to the browser extension, not the MCP parser.
+  ]) assert.deepEqual(parseConfig(JSON.stringify({ ...base, browser })), expected)
+  assert.throws(() => parseConfig(JSON.stringify({ ...base, browsers: {} })), /config.browsers is not supported/)
+  assert.throws(() => parseConfig(JSON.stringify({ ...base, browser: {}, defaults: { browser: {} } })), /defaults.browser is not supported/)
+})
+
 test("validates config version, environment identifiers, and HTTP URL policy", () => {
   assert.throws(() => parseConfig(JSON.stringify({ version: 2, servers: {} }), "/test.json"), /version must be 1/)
   assert.equal(parseConfig(JSON.stringify({ version: 1, servers: {}, piRpcApi: { managed: true } })).servers.length, 0)

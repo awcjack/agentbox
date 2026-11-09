@@ -262,6 +262,16 @@ let
         version = 1;
         defaults = cfg.settings.piConfig.mcpLimits;
         servers = piMcpServers;
+        browser = {
+          inherit (cfg.settings.browser)
+            enable
+            delegation
+            allowedDomains
+            maxOutputChars
+            commandTimeoutMs
+            idleTimeoutMs
+            ;
+        };
       }
       // lib.optionalAttrs cfg.settings.piRpcApi.enable { piRpcApi = piRpcConfig; }
     )
@@ -622,7 +632,11 @@ let
         --cpus=${toString cfg.settings.cpuLimits}
         --memory=${cfg.settings.memoryLimits}
         --pids-limit=${toString cfg.settings.pidsLimit}
-        ${lib.optionalString cfg.settings.desktop.enable "--shm-size=${cfg.settings.desktop.shmSize}"}
+        ${lib.optionalString (cfg.settings.desktop.enable || cfg.settings.browser.enable)
+          "--shm-size=${
+            if cfg.settings.desktop.enable then cfg.settings.desktop.shmSize else cfg.settings.browser.shmSize
+          }"
+        }
         ${containerEnvArgs}
         ${volumeArgs}
         --health-cmd ${lib.escapeShellArg healthCommand}

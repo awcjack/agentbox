@@ -121,6 +121,8 @@ in
     if isLinux then
       pkgs.callPackage ./image.nix {
         inherit
+          agent-browser
+          agentbox-browser
           agentbox-neovim
           agentbox-pi-goal-runtime
           agentbox-pi-rpc-runtime
@@ -171,6 +173,40 @@ in
         node --experimental-strip-types ${testSource}/tests/pi-agentbox.ts
         touch $out
       '';
+
+  pi-browser-extension-test =
+    let
+      testSource = pkgs.runCommand "pi-browser-extension-test-source" { } ''
+        mkdir -p $out/tests $out/extensions
+        cp ${./tests/pi-browser.ts} $out/tests/pi-browser.ts
+        cp ${./tests/browser-smoke-helpers.ts} $out/tests/browser-smoke-helpers.ts
+        cp ${./tests/pi-browser-loader.mjs} $out/tests/pi-browser-loader.mjs
+        cp ${./extensions/pi-browser.ts} $out/extensions/pi-browser.ts
+        cp ${./rpc-runtime/browser-channel.mjs} $out/extensions/browser-channel.mjs
+      '';
+    in
+    pkgs.runCommand "pi-browser-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+      export PI_BROWSER_FLOCK=${if isLinux then "${pkgs.util-linux}/bin/flock" else "/bin/flock"}
+      node --experimental-strip-types ${testSource}/tests/pi-browser.ts
+      node ${testSource}/tests/pi-browser-loader.mjs ${pi-coding-agent}/lib/node_modules/pi-monorepo
+      touch $out
+    '';
+
+  # Offline wire/config contract against the actual pinned native CLI; no Chrome.
+  pi-browser-native-test =
+    if isLinux then
+      pkgs.runCommand "pi-browser-native-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+        mkdir -p tests extensions
+        cp ${./tests/pi-browser-native.ts} tests/pi-browser-native.ts
+        cp ${./extensions/pi-browser.ts} extensions/pi-browser.ts
+        cp ${./rpc-runtime/browser-channel.mjs} extensions/browser-channel.mjs
+        export HOME=$TMPDIR PI_OFFLINE=1
+        node --experimental-strip-types tests/pi-browser-native.ts ${agent-browser}/bin/agent-browser
+        touch $out
+      ''
+    else
+      null;
 
   pi-workflow-extension-test =
     let
@@ -248,6 +284,8 @@ in
         mkdir -p $out/test
         cp ${./rpc-runtime/runtime.mjs} $out/runtime.mjs
         cp ${./rpc-runtime/sandbox.mjs} $out/sandbox.mjs
+        cp ${./rpc-runtime/browser-channel.mjs} $out/browser-channel.mjs
+        cp ${./rpc-runtime/browser-config.test.mjs} $out/browser-config.test.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs
         cp ${./rpc-runtime/folders.mjs} $out/folders.mjs
         cp ${./rpc-runtime/discover-profiles.mjs} $out/discover-profiles.mjs
@@ -257,7 +295,7 @@ in
       '';
     in
     pkgs.runCommand "pi-rpc-runtime-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
-      tests=(${testSource}/test/*.test.mjs)
+      tests=(${testSource}/browser-config.test.mjs ${testSource}/test/*.test.mjs)
       for test in ${testSource}/web/*.test.mjs; do
         [ ! -f "$test" ] || tests+=("$test")
       done
@@ -266,13 +304,14 @@ in
     '';
 
   pi-agentsmd-test =
-    pkgs.runCommand "pi-agentsmd-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
-      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
-      node --experimental-strip-types ${./tests/pi-agentsmd.mjs} \
-        ${pi-agentsmd.extension} \
-        ${pi-coding-agent}/lib/node_modules/pi-monorepo
-      touch $out
-    '';
+    pkgs.runCommand "pi-agentsmd-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; }
+      ''
+        export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+        node --experimental-strip-types ${./tests/pi-agentsmd.mjs} \
+          ${pi-agentsmd.extension} \
+          ${pi-coding-agent}/lib/node_modules/pi-monorepo
+        touch $out
+      '';
 
   pi-cursor-test =
     let
