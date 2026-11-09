@@ -180,6 +180,44 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 - Visible network/auth/scope errors, disabled unavailable controls, bounded
   reconnect backoff, and snapshot reconciliation without prompt retries.
 
+## Browser Preview And Human Control (Phase 2 First Slice)
+
+The header's **Browser** button explicitly opens a separate context-pane mode for
+only the selected live conversation's **main browser tab**, not delegated tabs.
+Opening a file preview replaces Browser and releases control. Inline transcript
+images and transcript-based file previews are unchanged.
+
+- Authenticated same-origin JSON status/JPEG reads use the existing transport and
+  required `X-Pi-Session-Id`; bearer tokens never appear in image URLs. The image
+  is a validated, bounded `data:image/jpeg` source (supported by the page CSP).
+- Preview is single-flight, at most about 1 fps while open/visible, with bounded
+  2–8 second failure backoff. It never starts a browser that the agent has not
+  opened. Server `permissions.view` and `permissions.control` are authoritative;
+  ordinary chat write access does not imply takeover permission. Browser reads
+  require `sessions:read` + `browser:read` and profile `get_state`; takeover also
+  requires `sessions:write` + `browser:control` and profile `prompt`.
+- **Take control** must be acknowledged before input. Leases expire after 30
+  seconds and are explicitly renewed every 10 seconds. Ref Click/Fill, key,
+  bounded scroll, HTTP(S) navigation, Back/Forward/Reload all require a frame
+  younger than 5 seconds. Every attempted mutation discards the old frame; no
+  mutation is automatically retried. Ambiguous acquisition/release relies on
+  expiry, not a retry. Human control pauses structured browser actions across
+  the delegated family, not arbitrary shell programs.
+- Close/Escape, selected-tab close (including the last tab), selection/reconnect,
+  native replacement, connection loss, hidden page, logout and file-preview mode
+  dispose the panel. Release is best effort using the **old** native/session/auth
+  binding, including late acquire replies; server expiry is the fallback. Reopen
+  Browser explicitly after returning to the page. Images, refs, drafts and leases
+  stay only in mounted pane memory and never enter local storage or chat history.
+- Page labels are text only. There are no pixel clicks, global keyboard forwarding,
+  WebSockets, artifact/download routes, or persistent browser login controls.
+
+`browser-panel.test.mjs` exercises the controller with injected transport/clock,
+including stale completions, read-only permissions, single-flight polling, lease
+renewal/expiry/disposal and no mutation retries. Its minimal DOM checks and app
+source-seam assertions are not a substitute for real-browser/operator acceptance.
+Backend bridge availability and sandbox-enabled rollout acceptance are separate.
+
 ## Contract And Reconciliation
 
 Uses the existing runtime README/RPC contract and these supervisor additions:

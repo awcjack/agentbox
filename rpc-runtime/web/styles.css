@@ -678,3 +678,16 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
     box-shadow: 0 0 0 3px #ed987a2e, 0 0 8px #ed987a55;
   }
 }
+
+/* Authenticated main-tab JPEG preview; no pixel or global keyboard input. */
+.browser-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.browser-panel p { margin: 0; overflow-wrap: anywhere; }
+.browser-frame { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; background: #000; }
+.browser-frame[hidden] { display: none; }
+.browser-control-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.browser-panel fieldset { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--border); }
+.browser-panel legend { padding: 0 4px; }
+.browser-panel label { display: flex; flex-direction: column; gap: 5px; width: 100%; min-width: 0; font-size: 12px; }
+.browser-panel input, .browser-panel select, .browser-panel textarea { width: 100%; min-width: 0; max-width: 100%; padding: 8px; background: #202020; color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+.browser-panel textarea { min-height: 64px; resize: vertical; }
+.browser-panel fieldset:disabled { opacity: .65; }

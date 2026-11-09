@@ -12,6 +12,7 @@ import { readAttachments, attachmentMessage, uploadAttachments, initComposerFile
 import { sessionTitle } from "./session-title.mjs";
 import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
 import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
+import { mountBrowserPanel } from "./browser-panel.mjs";
 
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
@@ -69,6 +70,7 @@ let openTabs = [], newTargetProfile = null;
 let current = null, sessions = [], profiles = [], history = [], readOnly = false, createDenied = false, createBusy = false;
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
+let browserPanel = null, browserBinding = null;
 const records = new Map();
 const baseTitle = document.title;
 const attention = createAttentionTracker();
@@ -149,8 +151,15 @@ function canExportConversation(ctx) {
     && !ctx.state.isCompacting && !ctx.state.pendingMessageCount && !ctx.meta.pendingUi?.length
     && !ctx.record.sending && !ctx.record.autoModeBusy && !ctx.modelBusy && !ctx.thinkingBusy);
 }
+function browserViewAvailable(ctx) {
+  return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running"
+    && ctx.meta.nativeSessionId && !ctx.record.ending && !ctx.record.conversationBusy
+    && !ctx.replacing && !ctx.meta.conversationReplacing && !document.hidden);
+}
 function updateControls() {
   const ctx = current;
+  $("open-browser").disabled = !browserViewAvailable(ctx);
+  if (browserPanel && (!browserViewAvailable(ctx) || browserBinding?.ctx !== ctx || browserBinding?.nativeId !== ctx?.meta.nativeSessionId)) closeContextPane();
   $("export-conversation").disabled = !canExportConversation(ctx);
   $("export-conversation").textContent = ctx?.record.exporting ? "Exporting..." : "Export JSON";
   $("settings").disabled = !canChangeConversation(ctx) || ctx.record.settingsBusy;
@@ -945,22 +954,53 @@ function forgetRecent(...ids) {
 }
 
 function closeContextPane() {
+  browserPanel?.dispose(); browserPanel = null; browserBinding = null;
+  $("open-browser").setAttribute("aria-expanded", "false");
   const pane = $("context-pane");
   if (!pane || pane.hidden) return;
   pane.hidden = true;
   $("workspace").classList.remove("context-open");
   $("context-pane-body").replaceChildren();
   $("context-pane-path").textContent = "";
+  $("context-pane-path").title = "";
+  delete pane.dataset.mode;
+}
+
+function openBrowserPane() {
+  const ctx = current;
+  if (!browserViewAvailable(ctx)) return;
+  closeContextPane();
+  const pane = $("context-pane");
+  pane.dataset.mode = "browser";
+  pane.setAttribute("aria-label", "Browser preview and human control");
+  $("context-pane-path").textContent = "Browser · main conversation";
+  $("close-context-pane").setAttribute("aria-label", "Close browser preview");
+  pane.hidden = false; $("workspace").classList.add("context-open");
+  $("open-browser").setAttribute("aria-expanded", "true");
+  // Capture both identity and auth BEFORE cleanup/replacement/logout. A late
+  // acquire can then release only its original session, never the new selection.
+  const ownToken = token;
+  const browserApi = createTransport(() => ownToken);
+  browserBinding = { ctx, nativeId: ctx.meta.nativeSessionId };
+  browserPanel = mountBrowserPanel($("context-pane-body"), {
+    sessionId: ctx.id, nativeSessionId: browserBinding.nativeId,
+    request: (route, options) => browserApi.request(route, options),
+  });
+  $("context-pane-body").focus();
 }
 
 function openContextPane(path) {
   if (!path || !current) return;
+  closeContextPane();
   const messages = visibleMessages(current.record.messages, current.partial);
   const results = new Map(current.tools);
   for (const message of messages) if (message.role === "toolResult") results.set(message.toolCallId, message);
   const preview = findFilePreview(messages, results, path);
   const pane = $("context-pane");
   const body = $("context-pane-body");
+  pane.dataset.mode = "file";
+  pane.setAttribute("aria-label", "File preview");
+  $("close-context-pane").setAttribute("aria-label", "Close file preview");
   $("context-pane-path").textContent = pathBreadcrumb(preview?.path || path);
   $("context-pane-path").title = preview?.path || path;
   body.replaceChildren();
@@ -1350,6 +1390,7 @@ function renderApprovals(ctx) {
 
 function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
+    if (browserBinding?.ctx === ctx) closeContextPane();
     cancelModels(ctx); ctx.modelsRequested = true; ctx.record.models = [];
     ctx.record.messages = []; ctx.partial = null; ctx.bash = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
     ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
@@ -1678,6 +1719,7 @@ function closeTab(id) {
   const index = openTabs.indexOf(id);
   openTabs = openTabs.filter((value) => value !== id);
   if (current?.id === id) {
+    closeContextPane();
     current.controller.abort(); clearTimeout(current.refreshTimer); selection++;
     current = null;
     const next = sessions.find((session) => session.id === openTabs[Math.min(index, openTabs.length - 1)]);
@@ -2212,6 +2254,7 @@ async function attachImages(files) {
 }
 
 function logout(message = "", { clearRemembered = true } = {}) {
+  closeContextPane(); // Release with the old credential/identity before clearing auth.
   epoch++; selection++; listVersion++;
   token = ""; auth.abort(); auth = new AbortController();
   clearTimeout(sessionPoll); sessionPoll = null; endedHistory.clear();
@@ -2345,6 +2388,7 @@ for (const button of document.querySelectorAll(".starter")) button.addEventListe
   current.record.draft.text = button.dataset.prompt; current.record.draft.version++; restoreDraft(); $("prompt").focus();
 });
 $("close-context-pane").addEventListener("click", () => closeContextPane());
+$("open-browser").addEventListener("click", openBrowserPane);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !$("context-pane").hidden) { closeContextPane(); event.preventDefault(); return; }
   if (event.key === "Escape" && $("sidebar").classList.contains("open")) { drawer(false); $("open-drawer").focus(); }
@@ -2357,7 +2401,10 @@ document.addEventListener("keydown", (event) => {
   if (event.key.toLowerCase() === "n" && !event.ctrlKey && !event.altKey && !event.metaKey && !event.target.closest("input, textarea, select, [contenteditable], dialog")) openNew();
 });
 window.addEventListener("focus", () => renderSessions());
-document.addEventListener("visibilitychange", () => renderSessions());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && browserPanel) closeContextPane();
+  renderSessions(); updateControls();
+});
 window.addEventListener("offline", () => { if (current) { current.online = false; current.streamController?.abort(); updateControls(); } setNetwork("reconnecting", "Offline"); });
 window.addEventListener("online", () => { if (token) { if (current) activate(current.meta, { reconnect: true }); else setNetwork("online", "Connected"); refreshSessions(); } });
 window.addEventListener("pagehide", () => logout("", { clearRemembered: false }));
