@@ -21,9 +21,12 @@ let
       ];
     };
   evaluate =
-    platform: settings:
+    platform:
+    evaluateForSystem platform (if platform == "linux" then "x86_64-linux" else "aarch64-darwin");
+  evaluateForSystem =
+    platform: system: settings:
     let
-      pkgs = pkgsFor (if platform == "linux" then "x86_64-linux" else "aarch64-darwin");
+      pkgs = pkgsFor system;
       base = {
         services.agentbox = {
           enable = true;
@@ -33,7 +36,7 @@ let
     in
     if platform == "linux" then
       (import (nixpkgs + "/nixos/lib/eval-config.nix") {
-        system = "x86_64-linux";
+        inherit system;
         modules = [
           ../modules/nixos.nix
           base
@@ -84,25 +87,26 @@ let
     idleTimeoutMs = 3600000;
   };
   checksFor =
-    platform:
+    platform: presetName:
     let
       off = evaluate platform { };
       on = evaluate platform { settings.browser.enable = true; };
-      preset = evaluate platform { settings.hardening.seccompProfile = "browser"; };
+      rpcOnly = evaluate platform { settings.piRpcApi.enable = true; };
+      preset = evaluate platform { settings.hardening.seccompProfile = presetName; };
       presetWithBrowser = evaluate platform {
         settings.browser.enable = true;
-        settings.hardening.seccompProfile = "browser";
+        settings.hardening.seccompProfile = presetName;
         settings.hardening.noNewPrivileges = true;
       };
       presetNetwork = evaluate platform {
-        settings.hardening.seccompProfile = "browser";
+        settings.hardening.seccompProfile = presetName;
         settings.network = {
           enable = true;
           image = "/tmp/prebuilt-network.tar";
         };
       };
       presetPrivileged = evaluate platform {
-        settings.hardening.seccompProfile = "browser";
+        settings.hardening.seccompProfile = presetName;
         settings.enableDocker = true;
       };
       customProfile = evaluate platform {
@@ -111,11 +115,20 @@ let
       unconfined = evaluate platform { settings.hardening.seccompProfile = "unconfined"; };
       profilePath = builtins.unsafeDiscardStringContext (
         toString (
-          (pkgsFor (if platform == "linux" then "x86_64-linux" else "aarch64-darwin")).callPackage
-            ../browser-seccomp.nix
-            { }
+          (pkgsFor (if platform == "linux" then "x86_64-linux" else "aarch64-darwin")).callPackage (
+            if presetName == "browser" then ../browser-seccomp.nix else ../browser-rpc-seccomp.nix
+          ) { }
         )
       );
+      unsupported = evaluateForSystem platform (
+        if platform == "linux" then "riscv64-linux" else "x86_64-linux"
+      ) { settings.hardening.seccompProfile = presetName; };
+      alternateArch = evaluateForSystem platform (
+        if platform == "linux" then "aarch64-linux" else "x86_64-darwin"
+      ) { settings.hardening.seccompProfile = presetName; };
+      otherPreset = evaluate platform {
+        settings.hardening.seccompProfile = if presetName == "browser" then "browser-rpc" else "browser";
+      };
       custom = evaluate platform {
         settings.browser = customBrowser // {
           shmSize = "2g";
@@ -175,7 +188,16 @@ let
     {
       seccompDefault = off.services.agentbox.settings.hardening.seccompProfile == "default";
       seccompNotImplicit = !lib.hasInfix "seccomp=" (options on);
+      seccompNotImplicitRpc = !lib.hasInfix "seccomp=" (options rpcOnly);
       seccompExplicit = lib.hasInfix "seccomp=${profilePath}" (options preset);
+      seccompDistinctPresets = !lib.hasInfix "seccomp=${profilePath}" (options otherPreset);
+      seccompRejectsUnsupportedArchitecture = lib.any (
+        a: !a.assertion && a.message == "Agentbox browser seccomp supports only x86_64/aarch64 Docker hosts"
+      ) unsupported.assertions;
+      seccompAcceptsAlternateArchitecture =
+        !lib.any (
+          a: !a.assertion && lib.hasPrefix "Agentbox browser seccomp" a.message
+        ) alternateArch.assertions;
       seccompWithBrowser = lib.hasInfix "seccomp=${profilePath}" (options presetWithBrowser);
       seccompHostOnly = (runtime presetWithBrowser).browser == defaults // { enable = true; };
       seccompRetainsNoNewPrivileges = lib.hasInfix "no-new-privileges" (options presetWithBrowser);
@@ -237,7 +259,7 @@ let
         let
           podman = evaluate platform {
             backend = "podman";
-            settings.hardening.seccompProfile = "browser";
+            settings.hardening.seccompProfile = presetName;
           };
         in
         lib.any (
@@ -280,7 +302,13 @@ let
   );
   verify = name: passed: if passed then true else throw "Browser evaluation failed: ${name}";
 in
-(lib.genAttrs [ "linux" "darwin" ] (platform: lib.mapAttrs verify (checksFor platform)))
+(lib.genAttrs [ "linux" "darwin" ] (
+  platform:
+  lib.genAttrs [ "browser" "browser-rpc" ] (
+    presetName:
+    lib.mapAttrs (name: verify "${platform}.${presetName}.${name}") (checksFor platform presetName)
+  )
+))
 // {
   image = lib.mapAttrs verify {
     disabledLazy = builtins.deepSeq basePackages true;

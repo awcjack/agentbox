@@ -22,6 +22,7 @@ let
   agent-browser = if isLinux then pkgs.callPackage ./agent-browser.nix { } else null;
   agentbox-browser = if isLinux then pkgs.callPackage ./browser.nix { } else null;
   agentbox-browser-seccomp = pkgs.callPackage ./browser-seccomp.nix { };
+  agentbox-browser-rpc-seccomp = pkgs.callPackage ./browser-rpc-seccomp.nix { };
   pi-post = pkgs.callPackage ./pi-post.nix { };
   pi-cursor = pkgs.callPackage ./pi-cursor.nix { };
   pi-agentsmd = pkgs.callPackage ./pi-agentsmd.nix { };
@@ -51,6 +52,7 @@ in
     agent-browser
     agentbox-browser
     agentbox-browser-seccomp
+    agentbox-browser-rpc-seccomp
     agentbox-neovim
     agentbox-pi-goal-runtime
     agentbox-pi-rpc-runtime
@@ -66,6 +68,8 @@ in
       ''
         python3 ${./tests/browser-seccomp.py} \
           ${./security/seccomp/vendor/moby-default-v0.2.3.json} ${agentbox-browser-seccomp}
+        python3 ${./tests/browser-rpc-seccomp.py} \
+          ${agentbox-browser-seccomp} ${agentbox-browser-rpc-seccomp} ${./tests/browser-seccomp.py}
         touch $out
       '';
 

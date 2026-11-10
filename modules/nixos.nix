@@ -28,10 +28,15 @@
 
 let
   cfg = config.services.agentbox;
-  browserSeccomp = cfg.settings.hardening.seccompProfile == "browser";
+  browserSeccomp = builtins.elem cfg.settings.hardening.seccompProfile [
+    "browser"
+    "browser-rpc"
+  ];
   seccompProfile =
-    if browserSeccomp then
+    if cfg.settings.hardening.seccompProfile == "browser" then
       pkgs.callPackage ../browser-seccomp.nix { }
+    else if cfg.settings.hardening.seccompProfile == "browser-rpc" then
+      pkgs.callPackage ../browser-rpc-seccomp.nix { }
     else
       cfg.settings.hardening.seccompProfile;
   validMcpServerName = name: builtins.match "[A-Za-z0-9][A-Za-z0-9._-]{0,63}" name != null;
@@ -679,9 +684,9 @@ in
         "--cap-drop=NET_RAW"
         "--cap-drop=SYS_ADMIN"
       ]
-      # The browser preset must not activate Moby's broad SYS_ADMIN branch.
+      # The browser presets must not activate Moby's broad SYS_ADMIN branch.
       ++ lib.optional (browserSeccomp && !net.enable) "--cap-drop=SYS_ADMIN"
-      # "default" keeps Docker's own profile; "browser" resolves to immutable
+      # "default" keeps Docker's own profile; browser presets resolve to immutable
       # generated JSON on the host. Neither is selected implicitly by the image.
       ++ lib.optional (
         cfg.settings.hardening.seccompProfile != "default"

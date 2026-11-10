@@ -37,7 +37,9 @@ enabledTest("uses isolated namespaces, private runtime trees, and only two defau
   const result = buildSandboxLaunch(input);
   assert.equal(result.executable, input.sandbox.executable);
   for (const flag of ["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--die-with-parent", "--new-session"]) assert.ok(result.args.includes(flag));
-  assert.ok(!result.args.includes("--unshare-net"));
+  // Keep the exact clone signature in security/seccomp/browser-rpc.nix valid.
+  assert.deepEqual(result.args.filter((arg) => arg.startsWith("--unshare-")),
+    ["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"]);
   assert.deepEqual(mounts(result.args, "--bind"), [[input.profile.cwd, input.profile.cwd], [input.profile.sessionDir, input.profile.sessionDir]]);
   assert.deepEqual(mounts(result.args, "--tmpfs").map(([path]) => path), ["/tmp", "/run", "/home/agent"]);
   assert.ok(result.args.includes("--proc"));

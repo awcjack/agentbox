@@ -436,14 +436,19 @@ in
                              privileged enableDocker mode and non-Docker
                              backends. Does not change host
                              sysctls, AppArmor, or Chromium sandbox flags.
+              "browser-rpc" — browser permissions plus the RPC bubblewrap
+                             namespace/mount sandbox permissions. Explicit opt-in
+                             with the same Docker-only, unprivileged-mode,
+                             architecture and SYS_ADMIN restrictions as browser.
               "unconfined" — disable syscall filtering entirely (not recommended).
               <path>       — complete custom Docker seccomp JSON file readable by
                              the host Docker CLI, not a container path.
-            The browser preset supports x86_64/aarch64 Docker hosts and preserves
+            Both browser presets support x86_64/aarch64 Docker hosts and preserve
             existing capability-conditional rules; do not add SYS_ADMIN. Enabling
-            browser tools alone never selects this profile. Host user namespace
-            support and live sandboxed acceptance are still required. It is not
-            a general bubblewrap/mount-namespace profile.
+            browser tools or RPC alone never selects either profile. Host user
+            namespace support and live sandboxed acceptance are still required.
+            The original browser preset is not a general bubblewrap/mount-namespace
+            profile; select browser-rpc explicitly for the RPC sandbox.
           '';
         };
 
