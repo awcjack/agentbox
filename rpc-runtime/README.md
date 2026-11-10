@@ -163,7 +163,28 @@ readable by the process. Networking is inherited, not filtered: this is not a
 credential-confidentiality or network-exfiltration boundary.
 
 Bubblewrap requires Linux user namespaces and compatible outer-container seccomp,
-AppArmor, and kernel settings. Unsupported environments fail closed: Pi is never
+AppArmor, and kernel settings. Docker's default policy and Agentbox's narrow
+`browser` preset do not permit this launcher's namespace/mount setup. For an
+unprivileged x86_64/aarch64 Docker container, explicitly configure:
+
+```nix
+services.agentbox.settings = {
+  enableDocker = false;
+  hardening.seccompProfile = "browser-rpc";
+  piRpcApi.sandbox.enable = true;
+};
+```
+
+This opt-in retains Chromium's sandbox and RPC filesystem isolation but exposes
+additional namespace and mount syscalls **container-wide**; see the
+[policy contract](../security/seccomp/README.md#rpc-bubblewrap-preset).
+Recreate the container after changing the policy; restarting Pi or pi-rpc is not
+enough. Consumers pinned to an older Agentbox input must update that pin to a
+revision containing this preset before selecting it. A local sibling checkout
+does not update the pinned input. Host AppArmor/LSM restrictions can still block
+user namespaces or mounts and require a separately reviewed host policy.
+
+Unsupported environments fail closed: Pi is never
 launched directly as a fallback. Do not solve namespace failures with privileged
 containers or broadly disabling security policy. Validate the isolation integration
 test in the actual deployment environment before relying on the boundary.

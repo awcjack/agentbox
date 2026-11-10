@@ -62,6 +62,50 @@ seccomp contract. Do not add that capability when consuming the JSON directly.
 This is **not** a profile for
 bubblewrap's mount-namespace setup.
 
+## RPC Bubblewrap preset
+
+`hardening.seccompProfile = "browser-rpc"` explicitly selects
+`security/seccomp/browser-rpc.nix`, packaged by `browser-rpc-seccomp.nix`. It
+preserves the narrow browser preset and adds exactly three rules for amd64/arm64
+containers without `CAP_SYS_ADMIN`:
+
+- `clone` argument 0 exactly `0x3c020011`: `SIGCHLD | CLONE_NEWNS |
+  CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWUTS`.
+- `mount` and `pivot_root`, required for the private filesystem tree.
+- `umount2` argument 1 exactly `MNT_DETACH` (2), to discard the old root.
+
+Evidence: the pinned Bubblewrap **0.11.2**
+[`bubblewrap.c`](https://github.com/containers/bubblewrap/blob/v0.11.2/bubblewrap.c)
+(`main`, `privileged_op`) and
+[`bind-mount.c`](https://github.com/containers/bubblewrap/blob/v0.11.2/bind-mount.c)
+(`bind_mount`), with the flags in `rpc-runtime/sandbox.mjs`. The later
+`unshare(CLONE_NEWUSER)` is already covered by the browser preset. No `setns`,
+network/cgroup namespace clone, modern mount API or `clone3` grant is added.
+
+**This increases container-wide kernel attack surface.** Seccomp cannot scope
+mount paths, filesystem types (pointer arguments), or grants to the Bubblewrap
+executable. All container code gains these mount syscall permissions, subject to
+kernel capability checks; namespace-local capabilities do not grant host
+capabilities. Keep `enableDocker = false`, the explicit `SYS_ADMIN` drop and
+`no-new-privileges`; do not use privileged mode or `seccomp=unconfined`.
+The original `browser` preset remains unchanged for operators who do not accept
+this broader surface. Neither preset is selected implicitly.
+
+Recreate the container to apply the policy. AppArmor's Docker default profile
+can independently deny mounts, and host LSM/user-namespace restrictions remain
+separate blockers; this preset does not disable them. Consumers must first pin
+an Agentbox revision containing this preset. Do not change a pinned consumer to
+`browser-rpc` while it still uses an older module.
+
+`browser-seccomp-test` checks both profiles' exact deltas and architecture,
+capability, namespace and sensitive-syscall matrices. Module tests check both
+platforms' selection and hardening. These are offline checks, not live acceptance.
+After an authorized rollout, run the Bubblewrap integration test from
+`rpc-runtime/test/sandbox.test.mjs` as the agent user inside the recreated
+container (with `TEST_BWRAP` pointing to its packaged Bubblewrap); a skipped test
+is not acceptance. Then start a fresh RPC session and exercise its file tools,
+and run browser acceptance if browser tools are enabled.
+
 ## Security boundary and acceptance
 
 This is opt-in **container-wide** permission, not a Chromium-only exemption.
