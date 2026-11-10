@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { buildSandboxLaunch } from "../sandbox.mjs";
+import { buildSandboxLaunch, managedGitConfigMount } from "../sandbox.mjs";
 
 function fixture(t) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-sandbox-test-")));
@@ -49,13 +49,39 @@ enabledTest("uses isolated namespaces, private runtime trees, and only two defau
     assert.equal(source, realpathSync(source));
     if (destination.startsWith("/run/pi-seed/")) {
       assert.ok(["auth.json", "settings.json", "models.json"].includes(destination.split("/").at(-1)));
-    } else assert.equal(source, destination);
+    } else if (destination !== "/home/agent/.gitconfig") assert.equal(source, destination);
     assert.ok(!["/", "/workspace", "/home", "/home/agent", "/home/agent/.pi/agent", "/home/agent/.pi/agent/sessions"].includes(source));
   }
   const command = result.args.slice(result.args.indexOf("--") + 1);
   assert.equal(command[0], process.env.PI_RPC_SANDBOX_SHELL ?? "/bin/sh");
   assert.deepEqual(command.slice(-3), ["/bin/sh", "-c", "true"]);
   assert.deepEqual(command.slice(5, 9), ["/run/pi-seed", "/home/agent/.pi/agent", process.env.PI_RPC_SANDBOX_COREUTILS ?? "/bin", "0"]);
+});
+
+test("managed Git identity exposes only its regular config file read-only", (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-git-config-test-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "managed-gitconfig");
+  writeFileSync(config, '[user]\n  name = Sandbox Test\n  email = sandbox@example.invalid\n');
+  const mount = managedGitConfigMount({ realpath(path) {
+    assert.equal(path, "/home/agent/.gitconfig");
+    return config; // Also covers a managed file backed by a symlink.
+  } });
+  assert.deepEqual(mount, ["--ro-bind", config, "/home/agent/.gitconfig"]);
+  const identity = spawnSync(process.env.TEST_GIT ?? "git", ["var", "GIT_AUTHOR_IDENT"], {
+    cwd: root, encoding: "utf8", env: {
+      PATH: process.env.PATH, HOME: root,
+      GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: mount[1],
+    },
+  });
+  assert.equal(identity.status, 0, identity.stderr || identity.error?.message);
+  assert.match(identity.stdout, /^Sandbox Test <sandbox@example\.invalid> /);
+  for (const code of ["ENOENT", "ENOTDIR"]) {
+    assert.deepEqual(managedGitConfigMount({ realpath() { throw Object.assign(new Error(code), { code }); } }), []);
+  }
+  assert.throws(() => managedGitConfigMount({ realpath() { throw Object.assign(new Error("denied"), { code: "EACCES" }); } }), /denied/);
+  assert.throws(() => managedGitConfigMount({ realpath: () => root }), /regular non-device file/);
+  assert.throws(() => managedGitConfigMount({ realpath: () => "/proc/fake", stat: () => ({ isFile: () => true }) }), /regular non-device file/);
 });
 
 enabledTest("shell metacharacters remain argv, never shell interpolation", (t) => {
@@ -131,7 +157,7 @@ enabledTest("requires an existing, distinct, canonical cwd and session directory
 enabledTest("rejects broad/reserved mounts, alias escapes, overlaps and missing extra paths", (t) => {
   const input = fixture(t);
   for (const key of ["readOnlyPaths", "readWritePaths"]) {
-    for (const path of ["/", "/tmp", "/usr", "/proc", "/dev", input.root, input.profile.cwd, input.profile.sessionDir, join(input.root, "missing")]) {
+    for (const path of ["/", "/tmp", "/usr", "/proc", "/dev", "/home/agent/.gitconfig", "/home/agent/.gitconfig.lock", input.root, input.profile.cwd, input.profile.sessionDir, join(input.root, "missing")]) {
       assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, [key]: [path] } }));
     }
     assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, [key]: "not-an-array" } }), /arrays/);
@@ -184,7 +210,12 @@ test ! -e "$agent/auth.json.lock"
 IFS= read -r initial < "$agent/auth.json" || :
 test "$initial" = '{"fixture":"auth.json"}'
 for name in auth.json settings.json models.json; do printf changed > "$agent/$name"; done
-: > "$agent/auth.json.lock"`, "sandbox-test", secret, input.profile.sessionDir, readonly];
+: > "$agent/auth.json.lock"
+! printf changed > /home/agent/.gitconfig
+unset GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+export HOME=/home/agent GIT_CONFIG_NOSYSTEM=1
+identity=$("$4" var GIT_AUTHOR_IDENT)
+case "$identity" in 'Sandbox Test <sandbox@example.invalid> '*) ;; *) exit 1 ;; esac`, "sandbox-test", secret, input.profile.sessionDir, readonly, process.env.TEST_GIT ?? "/usr/bin/git"];
   for (let iteration = 0; iteration < 2; iteration++) {
     const result = spawnSync(...launchTuple(input), { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
@@ -199,6 +230,7 @@ for name in auth.json settings.json models.json; do printf changed > "$agent/$na
   assert.equal(readFileSync(join(input.profile.cwd, "written"), "utf8"), "project");
   assert.equal(readFileSync(join(input.profile.sessionDir, "written"), "utf8"), "session");
   assert.equal(readFileSync(join(readonly, "marker"), "utf8"), "unchanged");
+  assert.match(readFileSync(join(input.root, "fixture-gitconfig"), "utf8"), /name = Sandbox Test/);
 });
 
 function launchTuple(input) {
@@ -208,7 +240,7 @@ function launchTuple(input) {
   const args = [];
   const split = launch.args.indexOf("--");
   for (let i = 0; i < split; i++) {
-    if (launch.args[i] === "--ro-bind" && launch.args[i + 2].startsWith("/run/pi-seed/")) { i += 2; continue; }
+    if (launch.args[i] === "--ro-bind" && (launch.args[i + 2].startsWith("/run/pi-seed/") || launch.args[i + 2] === "/home/agent/.gitconfig")) { i += 2; continue; }
     args.push(launch.args[i]);
   }
   const seeds = join(input.root, "fixture-seeds");
@@ -217,6 +249,9 @@ function launchTuple(input) {
     writeFileSync(join(seeds, name), JSON.stringify({ fixture: name }));
     args.push("--ro-bind", join(seeds, name), `/run/pi-seed/${name}`);
   }
+  const gitConfig = join(input.root, "fixture-gitconfig");
+  writeFileSync(gitConfig, '[user]\n  name = Sandbox Test\n  email = sandbox@example.invalid\n');
+  args.push("--ro-bind", gitConfig, "/home/agent/.gitconfig");
   return [launch.executable, [...args, ...launch.args.slice(split)]];
 }
 

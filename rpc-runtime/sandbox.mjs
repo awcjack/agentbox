@@ -14,6 +14,23 @@ const optionalReadOnly = [
   "/etc/passwd", "/etc/group", "/etc/localtime",
   "/etc/pi", "/etc/agentbox",
 ];
+const managedGitConfig = "/home/agent/.gitconfig";
+
+// Mount only the managed file, never its containing home or symlink target's
+// directory. Missing configuration is valid; other errors must fail closed.
+export function managedGitConfigMount({ realpath = realpathSync, stat = statSync } = {}) {
+  let target;
+  try { target = realpath(managedGitConfig); }
+  catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return [];
+    throw error;
+  }
+  if (!stat(target).isFile() || ["/proc", "/dev", "/sys"].some((root) => target === root || target.startsWith(`${root}/`))) {
+    throw new Error("sandbox managed Git config must be a regular non-device file");
+  }
+  return ["--ro-bind", target, managedGitConfig];
+}
+
 const agentHome = "/home/agent/.pi/agent";
 const seedDir = "/run/pi-seed";
 const configNames = ["auth.json", "settings.json", "models.json"];
@@ -74,7 +91,7 @@ function canonical(path, label) {
 }
 
 function restricted(path, label) {
-  if (broadPaths.has(path) || overlaps(path, seedDir) || configNames.some((name) => overlaps(path, `${agentHome}/${name}`) || path.startsWith(`${agentHome}/${name}.`)) || ["/proc", "/dev", "/sys", "/etc", "/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64"].some((root) => contains(root, path))) {
+  if (broadPaths.has(path) || overlaps(path, managedGitConfig) || path.startsWith(`${managedGitConfig}.`) || overlaps(path, seedDir) || configNames.some((name) => overlaps(path, `${agentHome}/${name}`) || path.startsWith(`${agentHome}/${name}.`)) || ["/proc", "/dev", "/sys", "/etc", "/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64"].some((root) => contains(root, path))) {
     throw new Error(`sandbox ${label} is too broad or reserved: ${path}`);
   }
 }
@@ -173,6 +190,7 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
     }
     launchArgs.push("--ro-bind", target, `${seedDir}/${name}`);
   }
+  launchArgs.push(...managedGitConfigMount());
   launchArgs.push("--bind", cwd, cwd, "--bind", sessionDir, sessionDir);
   for (const [flag, path] of extras) launchArgs.push(flag, path, path);
   // -p prevents BASH_ENV/ENV and imported shell functions from running before

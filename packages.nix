@@ -303,7 +303,7 @@ in
       for test in ${testSource}/web/*.test.mjs; do
         [ ! -f "$test" ] || tests+=("$test")
       done
-      PI_RPC_SANDBOX_SHELL=${pkgs.bash}/bin/bash PI_RPC_SANDBOX_COREUTILS=${pkgs.coreutils}/bin TEST_BASH=${pkgs.bash}/bin/bash ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "TEST_BWRAP=${pkgs.bubblewrap}/bin/bwrap"} node --test "''${tests[@]}"
+      TEST_GIT=${pkgs.git}/bin/git PI_RPC_SANDBOX_SHELL=${pkgs.bash}/bin/bash PI_RPC_SANDBOX_COREUTILS=${pkgs.coreutils}/bin TEST_BASH=${pkgs.bash}/bin/bash ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux "TEST_BWRAP=${pkgs.bubblewrap}/bin/bwrap"} node --test "''${tests[@]}"
       touch $out
     '';
 

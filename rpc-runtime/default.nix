@@ -4,6 +4,7 @@
   makeWrapper,
   bash,
   coreutils,
+  git,
   nodejs_22,
   bubblewrap ? null,
   pi-coding-agent ? null,
@@ -21,7 +22,7 @@ stdenvNoCC.mkDerivation {
 
   checkPhase = ''
     runHook preCheck
-    PI_RPC_SANDBOX_SHELL=${bash}/bin/bash PI_RPC_SANDBOX_COREUTILS=${coreutils}/bin TEST_BASH=${bash}/bin/bash ${
+    TEST_GIT=${git}/bin/git PI_RPC_SANDBOX_SHELL=${bash}/bin/bash PI_RPC_SANDBOX_COREUTILS=${coreutils}/bin TEST_BASH=${bash}/bin/bash ${
       lib.optionalString (
         stdenvNoCC.hostPlatform.isLinux && bubblewrap != null
       ) "TEST_BWRAP=${bubblewrap}/bin/bwrap"
