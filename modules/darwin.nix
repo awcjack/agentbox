@@ -439,6 +439,9 @@ let
       cfg.settings.hardening.seccompProfile != "default"
     ) "--security-opt ${lib.escapeShellArg "seccomp=${seccompProfile}"}"
     ++ lib.optional (browserSeccomp && !net.enable) "--cap-drop=SYS_ADMIN"
+    # Docker Desktop's Linux VM enforces the same procfs mask restrictions.
+    # Explicit opt-in only: this removes ALL Docker system-path protections.
+    ++ lib.optional cfg.settings.hardening.allowNestedProcMount "--security-opt systempaths=unconfined"
     ++ lib.optional cfg.settings.hardening.noNewPrivileges "--security-opt no-new-privileges"
   );
 
@@ -1128,6 +1131,22 @@ in
 
   config = lib.mkIf cfg.enable {
     assertions = [
+      {
+        assertion =
+          !cfg.settings.hardening.allowNestedProcMount
+          || cfg.settings.hardening.seccompProfile == "browser-rpc";
+        message = "Agentbox nested proc mount requires the browser-rpc seccomp preset";
+      }
+      {
+        assertion = !cfg.settings.hardening.allowNestedProcMount || cfg.settings.hardening.noNewPrivileges;
+        message = "Agentbox nested proc mount requires noNewPrivileges = true";
+      }
+      {
+        assertion =
+          !cfg.settings.hardening.allowNestedProcMount
+          || (cfg.settings.piRpcApi.enable && cfg.settings.piRpcApi.sandbox.enable);
+        message = "Agentbox nested proc mount requires enabled RPC filesystem sandboxing";
+      }
       {
         assertion = !browserSeccomp || !cfg.settings.enableDocker;
         message = "Agentbox browser seccomp requires unprivileged mode; settings.enableDocker must be false";

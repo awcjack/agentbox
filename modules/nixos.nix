@@ -458,6 +458,22 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
+        assertion =
+          !cfg.settings.hardening.allowNestedProcMount
+          || cfg.settings.hardening.seccompProfile == "browser-rpc";
+        message = "Agentbox nested proc mount requires the browser-rpc seccomp preset";
+      }
+      {
+        assertion = !cfg.settings.hardening.allowNestedProcMount || cfg.settings.hardening.noNewPrivileges;
+        message = "Agentbox nested proc mount requires noNewPrivileges = true";
+      }
+      {
+        assertion =
+          !cfg.settings.hardening.allowNestedProcMount
+          || (cfg.settings.piRpcApi.enable && cfg.settings.piRpcApi.sandbox.enable);
+        message = "Agentbox nested proc mount requires enabled RPC filesystem sandboxing";
+      }
+      {
         assertion = !browserSeccomp || cfg.backend == "docker";
         message = "Agentbox browser seccomp preset requires the Docker backend.";
       }
@@ -691,6 +707,9 @@ in
       ++ lib.optional (
         cfg.settings.hardening.seccompProfile != "default"
       ) "--security-opt=seccomp=${seccompProfile}"
+      # Explicit container-wide removal of Docker system-path masks, not a
+      # proc-only exemption. Keep separate from seccomp and never infer it.
+      ++ lib.optional cfg.settings.hardening.allowNestedProcMount "--security-opt=systempaths=unconfined"
       ++ lib.optional cfg.settings.hardening.noNewPrivileges "--security-opt=no-new-privileges"
       ++ lib.optionals cfg.settings.enableDocker [
         "--privileged"

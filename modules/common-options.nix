@@ -452,6 +452,25 @@ in
           '';
         };
 
+        allowNestedProcMount = lib.mkOption {
+          type = lib.types.bool;
+          default = false;
+          description = ''
+            Explicitly remove Docker's default masked and read-only system paths
+            with `--security-opt systempaths=unconfined`, allowing Bubblewrap to
+            mount a fresh procfs for its private PID namespace. This is a
+            container-wide security relaxation, NOT a proc-only exception: it
+            removes Docker's protections for system paths under /proc and /sys
+            for all container processes. Kernel permissions still apply.
+            Requires the browser-rpc seccomp preset, enabled RPC filesystem
+            sandboxing and noNewPrivileges = true; privileged Docker-in-Docker
+            and non-Docker backends are rejected by that preset. Does not disable
+            seccomp, AppArmor, or change host sysctls. AppArmor/LSM rules may still
+            deny the mount. Requires container recreation and live acceptance;
+            never enabled implicitly by RPC or a seccomp preset.
+          '';
+        };
+
         noNewPrivileges = lib.mkOption {
           type = lib.types.bool;
           default = false;

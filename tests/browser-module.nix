@@ -109,6 +109,26 @@ let
         settings.hardening.seccompProfile = presetName;
         settings.enableDocker = true;
       };
+      nestedProcSettings = {
+        settings = {
+          hardening = {
+            seccompProfile = "browser-rpc";
+            noNewPrivileges = true;
+            allowNestedProcMount = true;
+          };
+          piRpcApi = {
+            enable = true;
+            sandbox.enable = true;
+          };
+        };
+      };
+      nestedProc = evaluate platform nestedProcSettings;
+      nestedProcInvalid = overrides: evaluate platform (lib.recursiveUpdate nestedProcSettings overrides);
+      nestedProcRejected =
+        overrides:
+        lib.any (
+          a: !a.assertion && lib.hasPrefix "Agentbox nested proc mount" a.message
+        ) (nestedProcInvalid overrides).assertions;
       customProfile = evaluate platform {
         settings.hardening.seccompProfile = "/tmp/custom profile.json";
       };
@@ -186,6 +206,39 @@ let
         )).success;
     in
     {
+      nestedProcDefault = !off.services.agentbox.settings.hardening.allowNestedProcMount;
+      nestedProcAbsentByDefault = !lib.hasInfix "systempaths=" (options off);
+      nestedProcNotImplicitInPreset =
+        !preset.services.agentbox.settings.hardening.allowNestedProcMount
+        && !lib.hasInfix "systempaths=" (options preset);
+      nestedProcExplicit = lib.hasInfix "systempaths=unconfined" (options nestedProc);
+      nestedProcAcceptsValid =
+        !lib.any (
+          a: !a.assertion && lib.hasPrefix "Agentbox nested proc mount" a.message
+        ) nestedProc.assertions;
+      nestedProcRetainsSeccomp =
+        lib.hasInfix "seccomp=${profilePath}" (options nestedProc) == (presetName == "browser-rpc");
+      nestedProcRetainsSysAdminDrop = lib.hasInfix "--cap-drop=SYS_ADMIN" (options nestedProc);
+      nestedProcRetainsNoNewPrivileges = lib.hasInfix "no-new-privileges" (options nestedProc);
+      nestedProcNoUnconfinedSeccomp = !lib.hasInfix "seccomp=unconfined" (options nestedProc);
+      nestedProcNoImplicitApparmor = !lib.hasInfix "apparmor=" (options nestedProc);
+      nestedProcNoAddedCapabilities = !lib.hasInfix "--cap-add=SYS_ADMIN" (options nestedProc);
+      nestedProcRejectsWrongPreset = nestedProcRejected {
+        settings.hardening.seccompProfile = "browser";
+      };
+      nestedProcRejectsDefaultPreset = nestedProcRejected {
+        settings.hardening.seccompProfile = "default";
+      };
+      nestedProcRejectsMissingNoNewPrivileges = nestedProcRejected {
+        settings.hardening.noNewPrivileges = false;
+      };
+      nestedProcRejectsRpcDisabled = nestedProcRejected { settings.piRpcApi.enable = false; };
+      nestedProcRejectsSandboxDisabled = nestedProcRejected {
+        settings.piRpcApi.sandbox.enable = false;
+      };
+      nestedProcRejectsPrivileged = lib.any (
+        a: !a.assertion && lib.hasPrefix "Agentbox browser seccomp requires" a.message
+      ) (nestedProcInvalid { settings.enableDocker = true; }).assertions;
       seccompDefault = off.services.agentbox.settings.hardening.seccompProfile == "default";
       seccompNotImplicit = !lib.hasInfix "seccomp=" (options on);
       seccompNotImplicitRpc = !lib.hasInfix "seccomp=" (options rpcOnly);
@@ -255,6 +308,9 @@ let
       rejectsShm = rejected { shmSize = "1g --ipc=host"; };
     }
     // lib.optionalAttrs (platform == "linux") {
+      nestedProcRejectsPodman = lib.any (
+        a: !a.assertion && a.message == "Agentbox browser seccomp preset requires the Docker backend."
+      ) (nestedProcInvalid { backend = "podman"; }).assertions;
       seccompRejectsPodman =
         let
           podman = evaluate platform {
