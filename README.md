@@ -360,12 +360,16 @@ Reply badges show the model/provider recorded on each old reply.
 ### OpenAI models and fast mode
 
 The Pi-only `nixpkgs-unstable` pin supplies **Pi 0.87.1**. Agentbox also backports
-**GPT-6.1 Sol** (`gpt-6.1-sol`) into its offline OpenAI API and Codex catalogs,
-using provider-specific metadata from [Pi's OpenAI catalog](https://pi.dev/api/models/providers/openai)
+**GPT-6.1 Sol** and **GPT-6.1 Terra** into its offline OpenAI API and Codex catalogs,
+plus OpenAI's `chat-latest`, `gpt-5.6-cyber`, `gpt-daybreak-blue-latest`, and
+`gpt-daybreak-red-latest`, using provider-specific metadata from [Pi's OpenAI catalog](https://pi.dev/api/models/providers/openai)
 and [Codex catalog](https://pi.dev/api/models/providers/openai-codex). Native catalog
 refreshes remain authoritative. Select `/model openai/gpt-6.1-sol`,
 `/model openai-codex/gpt-6.1-sol`, or `/model codex-work/gpt-6.1-sol`.
-Codex Work mirrors the native Codex catalog, so no separate model list is needed. Authentication and
+Codex Sol 6.1 and Terra 6.1 use the published 500,000-token context; the OpenAI
+API variants use 272,000. The CLI and RPC UI share this catalog; RPC **Refresh**
+fetches current published metadata. Codex Work mirrors the native Codex catalog,
+so no separate model list is needed. Authentication and
 account entitlements still determine which models you can use. Rebuild/redeploy
 the image to upgrade Pi; `pi update --models` refreshes metadata only.
 When customizing `agentboxImage.override`, retain its bundled `pi-coding-agent`:

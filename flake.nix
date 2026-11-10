@@ -46,7 +46,7 @@
           patches = (old.patches or [ ]) ++ [
             ./patches/pi-startup-provider-refresh.patch
             ./patches/pi-rpc-model-refresh.patch
-            ./patches/pi-gpt-6.1-sol.patch
+            ./patches/pi-openai-models.patch
           ];
         });
       opencodePackageFor =

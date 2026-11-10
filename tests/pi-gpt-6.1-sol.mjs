@@ -29,7 +29,7 @@ for (const providerId of ["openai", "openai-codex"]) {
   assert.equal(model.api, providerId === "openai" ? "openai-responses" : "openai-codex-responses");
   assert.equal(model.baseUrl, provider.baseUrl);
   assert.equal(model.name, "GPT-6.1 Sol");
-  assert.equal(model.contextWindow, 272000);
+  assert.equal(model.contextWindow, providerId === "openai" ? 272000 : 500000);
   assert.equal(model.maxTokens, 128000);
   assert.equal(model.reasoning, true);
   assert.deepEqual(model.input, ["text", "image"]);
@@ -42,6 +42,31 @@ for (const providerId of ["openai", "openai-codex"]) {
     low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max",
   });
   assert.ok(provider.getModels().some((entry) => entry.id === "gpt-6-sol"), "older models retained");
+}
+// Current official catalog additions must also work without network/cache state.
+const additions = {
+  openai: {
+    "chat-latest": [400000, 5, 30],
+    "gpt-5.6-cyber": [400000, 12.5, 75],
+    "gpt-6.1-terra": [272000, 1, 5],
+    "gpt-daybreak-blue-latest": [1050000, 4, 20],
+    "gpt-daybreak-red-latest": [400000, 12.5, 75],
+  },
+  "openai-codex": { "gpt-6.1-terra": [500000, 1, 5] },
+};
+for (const [providerId, entries] of Object.entries(additions)) {
+  const provider = providers.find((entry) => entry.id === providerId);
+  for (const [modelId, [context, inputCost, outputCost]] of Object.entries(entries)) {
+    const matches = provider.getModels().filter((model) => model.id === modelId);
+    assert.equal(matches.length, 1, `${providerId}/${modelId}: unique offline fallback`);
+    const [model] = matches;
+    assert.equal(model.provider, providerId);
+    assert.equal(model.baseUrl, provider.baseUrl);
+    assert.equal(model.contextWindow, context);
+    assert.equal(model.maxTokens, 128000);
+    assert.equal(model.cost.input, inputCost);
+    assert.equal(model.cost.output, outputCost);
+  }
 }
 const extension = new URL("../extensions/pi-codex-accounts.ts", import.meta.url).pathname;
 const loaded = await loadExtensions([extension], process.cwd());
@@ -118,6 +143,15 @@ for (const lastModified of [undefined, generatedAt - 1, generatedAt + 1]) {
   }
   expectModel("codex-work", { ...sol("openai-codex"), provider: "codex-work" });
 }
+// Verify the same additions reach the authenticated CLI/RPC picker and work alias.
+for (const [provider, entries] of Object.entries(additions)) {
+  for (const modelId of Object.keys(entries)) {
+    assert.ok(registry.getAvailable().some((model) => model.provider === provider && model.id === modelId));
+  }
+}
+assert.deepEqual(registry.find("codex-work", "gpt-6.1-terra"), {
+  ...registry.find("openai-codex", "gpt-6.1-terra"), provider: "codex-work",
+});
 await cache(generatedAt + 1, true);
 await refresh();
 for (const provider of nativeIds) {
@@ -151,7 +185,7 @@ for (const includeSol of [false, true]) {
   }
 }
 assert.equal(networkCalls, 0, "no network, token refresh or catalog fetch");
-console.log("GPT-6.1 Sol: native metadata, offline stale-cache runtime/registry picker, codex-work bootstrap, published/user precedence passed");
+console.log("OpenAI catalogs: new offline models, provider-specific Sol/Terra metadata, stale-cache picker, codex-work bootstrap, published/user precedence passed");
 } finally {
   globalThis.fetch = originalFetch;
   for (const [key, value] of Object.entries(savedEnv)) {
