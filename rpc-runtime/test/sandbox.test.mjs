@@ -53,7 +53,7 @@ enabledTest("uses isolated namespaces, private runtime trees, and only two defau
   const command = result.args.slice(result.args.indexOf("--") + 1);
   assert.equal(command[0], process.env.PI_RPC_SANDBOX_SHELL ?? "/bin/sh");
   assert.deepEqual(command.slice(-3), ["/bin/sh", "-c", "true"]);
-  assert.deepEqual(command.slice(5, 8), ["/run/pi-seed", "/home/agent/.pi/agent", process.env.PI_RPC_SANDBOX_COREUTILS ?? "/bin"]);
+  assert.deepEqual(command.slice(5, 9), ["/run/pi-seed", "/home/agent/.pi/agent", process.env.PI_RPC_SANDBOX_COREUTILS ?? "/bin", "0"]);
 });
 
 enabledTest("shell metacharacters remain argv, never shell interpolation", (t) => {
@@ -188,6 +188,7 @@ for name in auth.json settings.json models.json; do printf changed > "$agent/$na
     assert.equal(result.status, 0, result.stderr || result.error?.message);
   }
   input.browserRpcFd = 3;
+  // Bubblewrap inherits descriptors; the trusted bootstrap keeps only fd 3.
   input.args = ["-peu", "-c", "printf private-bridge >&3; test ! -e /proc/self/fd/4"];
   const inherited = spawnSync(...launchTuple(input), { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"] });
   assert.equal(inherited.status, 0, inherited.stderr || inherited.error?.message);
@@ -217,11 +218,13 @@ function launchTuple(input) {
   return [launch.executable, [...args, ...launch.args.slice(split)]];
 }
 
-enabledTest("preserves exactly fd3 only for the private browser bridge", (t) => {
+enabledTest("keeps only fd3 for the private browser bridge", (t) => {
   const input = fixture(t);
-  assert.equal(buildSandboxLaunch(input).args.includes("--preserve-fds"), false);
+  const without = buildSandboxLaunch(input).args;
+  assert.equal(without.includes("--preserve-fds"), false);
+  assert.equal(without[without.indexOf("pi-rpc-sandbox-bootstrap") + 4], "0");
   const { args } = buildSandboxLaunch({ ...input, browserRpcFd: 3 });
-  assert.equal(args.filter((arg) => arg === "--preserve-fds").length, 1);
-  assert.equal(args[args.indexOf("--preserve-fds") + 1], "1");
+  assert.equal(args.includes("--preserve-fds"), false);
+  assert.equal(args[args.indexOf("pi-rpc-sandbox-bootstrap") + 4], "1");
   for (const fd of [0, 1, 2, 4, "3", [3], null]) assert.throws(() => buildSandboxLaunch({ ...input, browserRpcFd: fd }), /must be 3/);
 });

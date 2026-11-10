@@ -2012,7 +2012,7 @@ for (const enabled of [false, true]) test(`browser fd is exclusively supervisor-
   } else assert.equal(result.body.error.code, "browser_unavailable");
 });
 
-test("sandbox browser launch preserves only the intended fd", { skip: process.platform !== "linux" }, async (t) => {
+test("sandbox browser launch keeps only the intended bridge fd", { skip: process.platform !== "linux" }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-browser-fd-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = join(root, "project"); await mkdir(cwd);
@@ -2020,7 +2020,8 @@ test("sandbox browser launch preserves only the intended fd", { skip: process.pl
     profiles: { default: { cwd, sessionDir: join(root, "history") } } }), { realpath: sandboxRealpath });
   await createSession(f.baseUrl);
   const args = f.spawns[0].args;
-  assert.equal(args[args.indexOf("--preserve-fds") + 1], "1");
+  assert.equal(args.includes("--preserve-fds"), false);
+  assert.equal(args[args.indexOf("pi-rpc-sandbox-bootstrap") + 4], "1");
   assert.equal(f.spawns[0].options.stdio.length, 4);
 });
 

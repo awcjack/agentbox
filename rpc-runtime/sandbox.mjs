@@ -21,7 +21,9 @@ const configNames = ["auth.json", "settings.json", "models.json"];
 // never resolved via a profile-controlled PATH. Each invocation gets fresh copies;
 // OAuth refresh/settings changes and lock files are writable but LOST on exit;
 // providers rotating refresh tokens may require re-authentication afterwards.
-const bootstrap = `seed=$1; agent=$2; tools=$3; shift 3
+// Bubblewrap keeps inherited descriptors; it has no --preserve-fds. Close extras
+// inside this trusted bootstrap so only stdio (and optional bridge fd 3) remain.
+const bootstrap = `seed=$1; agent=$2; tools=$3; keep_bridge=$4; shift 4
 export PI_CODING_AGENT_DIR="$agent"
 umask 077
 "$tools/mkdir" -p -- "$agent"
@@ -30,6 +32,14 @@ for name in auth.json settings.json models.json; do
     "$tools/cp" -- "$seed/$name" "$agent/$name"
     "$tools/chmod" 600 -- "$agent/$name"
   fi
+done
+for fd in /proc/self/fd/*; do
+  n=\${fd##*/}
+  case "$n" in
+    0|1|2) ;;
+    3) [ "$keep_bridge" = 1 ] || eval "exec $n>&-" 2>/dev/null || : ;;
+    [0-9]*) eval "exec $n>&-" 2>/dev/null || : ;;
+  esac
 done
 exec "$@"`;
 
@@ -119,7 +129,6 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
     "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home/agent",
     "--proc", "/proc", "--dev", "/dev",
   ];
-  if (browserRpcFd === 3) launchArgs.push("--preserve-fds", "1");
   const bound = new Set();
   const aliases = [];
   for (const path of optionalReadOnly) {
@@ -168,6 +177,9 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
   for (const [flag, path] of extras) launchArgs.push(flag, path, path);
   // -p prevents BASH_ENV/ENV and imported shell functions from running before
   // this trusted bootstrap, even if configured child environment contains them.
-  launchArgs.push("--chdir", cwd, "--", shell, "-peu", "-c", bootstrap, "pi-rpc-sandbox-bootstrap", seedDir, agentHome, tools, executable, ...args);
+  launchArgs.push(
+    "--chdir", cwd, "--", shell, "-peu", "-c", bootstrap, "pi-rpc-sandbox-bootstrap",
+    seedDir, agentHome, tools, browserRpcFd === 3 ? "1" : "0", executable, ...args,
+  );
   return { executable: sandbox.executable, args: launchArgs };
 }
