@@ -91,9 +91,27 @@ capabilities. Keep `enableDocker = false`, the explicit `SYS_ADMIN` drop and
 The original `browser` preset remains unchanged for operators who do not accept
 this broader surface. Neither preset is selected implicitly.
 
-Recreate the container to apply the policy. AppArmor's Docker default profile
-can independently deny mounts, and host LSM/user-namespace restrictions remain
-separate blockers; this preset does not disable them. Consumers must first pin
+Recreate the container to apply the policy. Seccomp permission alone does not
+make Docker compatible with nested procfs: Docker's masked/read-only `/proc`
+submounts can cause the kernel's `mount_too_revealing` check to reject Bubblewrap's
+fresh procfs (`Can't mount proc on /newroot/proc: Operation not permitted`).
+
+For deployments accepting the additional risk, explicitly set
+`hardening.allowNestedProcMount = true` together with
+`hardening.noNewPrivileges = true`. This emits Docker's
+`--security-opt systempaths=unconfined` and removes **all default masked and
+read-only system-path protections container-wide**, including paths under
+`/proc` and `/sys`. It is not limited to procfs or to Bubblewrap. The option is
+false by default, never inferred from a preset, and requires `browser-rpc` and
+an enabled RPC filesystem sandbox. That preset continues to require unprivileged
+Docker and drop `SYS_ADMIN`; no-new-privileges also disables in-container sudo.
+No seccomp or AppArmor bypass is added, and the private PID namespace and fresh
+procfs are retained. Never substitute a bind of the outer `/proc`: sibling
+`/proc/<pid>/root` paths would undermine the filesystem isolation boundary.
+
+AppArmor's Docker default profile can independently deny mounts, and host
+LSM/user-namespace restrictions remain separate blockers; these options do not
+disable them. Consumers must first pin
 an Agentbox revision containing this preset. Do not change a pinned consumer to
 `browser-rpc` while it still uses an older module.
 

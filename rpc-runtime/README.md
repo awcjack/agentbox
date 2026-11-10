@@ -172,8 +172,25 @@ services.agentbox.settings = {
   enableDocker = false;
   hardening.seccompProfile = "browser-rpc";
   piRpcApi.sandbox.enable = true;
+  # Additional explicit relaxation if Docker's system-path masks deny procfs:
+  # hardening.allowNestedProcMount = true;
+  # hardening.noNewPrivileges = true; # required for the relaxation; disables sudo
 };
 ```
+
+If namespace creation succeeds but Bubblewrap reports `Can't mount proc on
+/newroot/proc: Operation not permitted`, Docker's default system-path masks may
+be preventing the kernel from mounting a fresh procfs inside the nested user/PID
+namespace. AppArmor/LSM rules can independently cause the same error. After
+reviewing the container-wide tradeoff, enable both commented hardening options
+above and recreate the container. `allowNestedProcMount` emits
+`--security-opt systempaths=unconfined`: this removes **all** Docker default masked
+and read-only system-path protections, including under `/proc` and `/sys`, not
+just a single proc mount restriction. It defaults off and requires `browser-rpc`,
+`noNewPrivileges = true` and enabled RPC filesystem sandboxing. This does not
+disable AppArmor or seccomp; a remaining LSM denial requires separate review.
+Do not bind the outer `/proc` into RPC sessions: that would expose sibling
+processes and potentially their filesystem roots, undermining profile isolation.
 
 This opt-in retains Chromium's sandbox and RPC filesystem isolation but exposes
 additional namespace and mount syscalls **container-wide**; see the
