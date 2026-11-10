@@ -151,9 +151,15 @@ same paths to **every** profile and explicitly widen the boundary. Paths must
 exist and be canonical; broad, reserved, and overlapping mounts are rejected.
 Installed home-directory skills are not exposed automatically; explicitly grant
 read-only access to `/home/agent/.pi/agent/skills` if needed. Extra sockets, SSH
-keys, browser displays, Git configuration, and cloud credential files are not
-implicitly exposed. External MCP services retain their own permissions; this
-sandbox cannot restrict a remote tool's filesystem or database access.
+keys, browser displays, and cloud credential files are not implicitly exposed.
+The managed `/home/agent/.gitconfig` is exposed as a single read-only file, so
+Git retains the configured author name/email without exposing the rest of the
+home directory. Missing Git configuration is allowed. Global configuration writes
+are blocked; use repository-local `git config` for project overrides. Included
+configuration files, signing keys, and credential-helper data outside the allowed
+mounts remain unavailable unless separately granted. External MCP services retain
+their own permissions; this sandbox cannot restrict a remote tool's filesystem or
+database access.
 
 Authentication, settings, and models are seeded from the agent's existing files
 into **private writable copies**. Lock files and OAuth refreshes work within a
