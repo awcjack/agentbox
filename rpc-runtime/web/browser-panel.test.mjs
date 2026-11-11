@@ -26,7 +26,7 @@ function clock() {
 }
 const binding = { version: 1, nativeSessionId: "native-old", browserSessionId: "browser-old" };
 function frame(now = 100_000, frameId = "frame-1") {
-  return { ...binding, frameId, createdAt: now, width: 1280, height: 720, mimeType: "image/jpeg", data: "/9j/AA==", refs: [{ ref: "@e1", role: "textbox", name: "Page name" }], control: { mode: "agent" } };
+  return { ...binding, frameId, createdAt: now, width: 1280, height: 720, url: "https://example.test/start", mimeType: "image/jpeg", data: "/9j/AA==", refs: [{ ref: "@e1", role: "textbox", name: "Page name" }], control: { mode: "agent" } };
 }
 function fixture(options = {}) {
   const time = clock(), calls = [], changes = [];
@@ -116,6 +116,14 @@ test("acknowledged lease plus post-acquire frame, renew at 10s, release stops re
   f.controller.dispose();
 });
 
+test("takeover gets a fresh frame within 250ms and active preview stays bounded at four polls per second", async () => {
+  const f = fixture(); await f.start(); await f.controller.acquire();
+  await f.time.tick(249); assert.equal(f.calls.filter(c => c.path.endsWith("/frame")).length, 1);
+  await f.time.tick(1); assert.equal(f.controller.getState().canInput, true);
+  await f.time.tick(750); assert.equal(f.calls.filter(c => c.path.endsWith("/frame")).length, 5);
+  f.controller.dispose();
+});
+
 test("single-flight inputs consume frame before await and are never retried", async () => {
   const pending = deferred();
   const f = fixture({ handle: (_path, opts) => opts.body?.operation === "input" ? pending.promise : undefined });
@@ -152,6 +160,20 @@ test("failed acquisition/release is not retried, including concurrent disposal",
     assert.equal(g.mutations("release").length, 1);
     assert.equal(g.mutations("renew").length, 0);
   }
+});
+
+test("an explicitly rejected stale frame keeps the lease without replaying the rejected input", async () => {
+  let reject = true;
+  const f = fixture({ handle(_path, opts) {
+    if (reject && opts.body?.operation === "input") { reject = false; throw Object.assign(new Error("stale"), { status: 409, code: "browser_frame_stale" }); }
+  } });
+  await f.start(); await f.controller.acquire(); await f.time.tick(250);
+  assert.equal(await f.controller.input({ action: "resize", width: 390, height: 844 }), false);
+  assert.equal(f.controller.getState().held, true); assert.equal(f.mutations("release").length, 0);
+  await f.time.tick(250); assert.equal(f.mutations("input").length, 1);
+  assert.equal(f.controller.getState().canInput, true);
+  assert.equal(await f.controller.input({ action: "resize", width: 390, height: 844 }), true);
+  f.controller.dispose();
 });
 
 test("successful input also needs a newly fetched frame", async () => {
@@ -259,6 +281,7 @@ test("bounded canonical JPEG frames, identities, freshness and refs validated", 
     { refs: Array.from({ length: 101 }, () => ({ ref: "@e1", role: "button", name: "x" })) },
     { refs: [{ ref: "@e1", role: "button", name: "x".repeat(513) }] },
     { refs: [{ ref: "#selector", role: "button", name: "x" }] },
+    { url: "javascript:alert(1)" }, { url: "ws://127.0.0.1/private" }, { url: "https://user:secret@example.test/" }, { url: "x".repeat(4097) },
   ];
   for (const patch of bad) assert.throws(() => validateFrame({ ...frame(), ...patch }, "native-old", "browser-old", 100_000));
   const bytes = Buffer.alloc(600 * 1024); bytes[0] = 255; bytes[1] = 216; bytes[2] = 255;
@@ -272,7 +295,7 @@ test("human input allows only strict ref/key/scroll/navigation shapes", () => {
 });
 
 class FakeElement {
-  constructor(tag, ownerDocument) { this.tag = tag; this.ownerDocument = ownerDocument; this.children = []; this.attributes = {}; this.value = ""; this.textContent = ""; this.listeners = {}; }
+  constructor(tag, ownerDocument) { this.tag = tag; this.ownerDocument = ownerDocument; this.children = []; this.attributes = {}; this.style = {}; this.value = ""; this.textContent = ""; this.listeners = {}; }
   append(...nodes) { this.children.push(...nodes); }
   replaceChildren(...nodes) { this.children = nodes; }
   setAttribute(key, value) { this.attributes[key] = value; }
@@ -291,6 +314,126 @@ test("DOM adapter renders page labels as text only and clears in-memory images/d
   assert.ok(nodes.some((n) => n.tag === "option" && n.textContent.includes("<img src=x onerror=alert(1)>")));
   const text = nodes.find((n) => n.tag === "textarea"); text.value = "not persisted";
   mounted.dispose(); assert.equal(root.children.length, 0); assert.equal(image.src, ""); assert.equal(text.value, "");
+});
+
+test("takeover, renewal and release keep the preview stable without enabling stale input", async () => {
+  const doc = { createElement: (tag) => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+  const f = fixture();
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time });
+  await flush();
+  const all = (el) => [el, ...el.children.flatMap(all)];
+  const nodes = all(root), image = nodes.find((n) => n.tag === "img");
+  const refs = nodes.find((n) => n.attributes["aria-label"] === "Accessibility reference");
+  const actions = nodes.find((n) => n.tag === "fieldset" && n.className !== "browser-resolution");
+  const button = (name) => nodes.find((n) => n.tag === "button" && n.textContent === name);
+  button("Take control").listeners.click(); await flush();
+  assert.equal(image.hidden, false);
+  assert.equal(image.attributes["data-stale"], "false");
+  assert.equal(actions.disabled, true);
+  await f.time.tick(1000);
+  refs.value = "@e1"; refs.listeners.change();
+  assert.equal(button("Click reference").disabled, false);
+  await f.time.tick(RENEW_INTERVAL - 1000);
+  assert.equal(f.mutations("renew").length, 1);
+  assert.equal(image.hidden, false);
+  assert.equal(image.attributes["data-stale"], "false");
+  assert.equal(refs.value, "@e1");
+  assert.equal(actions.disabled, false);
+  assert.equal(button("Click reference").disabled, false);
+  await f.time.tick(1000);
+  assert.equal(image.attributes["data-stale"], "false");
+  assert.equal(refs.value, "@e1");
+  assert.equal(button("Click reference").disabled, false);
+  button("Release control").listeners.click(); await flush();
+  assert.equal(image.hidden, false);
+  assert.equal(refs.value, "");
+  mounted.dispose();
+});
+
+test("clicking a scaled preview focuses keyboard capture; typing and IME are sent once in order", async () => {
+  const doc = { createElement: (tag) => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+  const f = fixture();
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time });
+  await flush();
+  const all = (el) => [el, ...el.children.flatMap(all)], nodes = all(root);
+  const image = nodes.find(n => n.tag === "img");
+  const keyboard = nodes.find(n => n.attributes["aria-label"] === "Type in browser preview");
+  let focused = false;
+  keyboard.focus = () => { focused = true; };
+  image.getBoundingClientRect = () => ({ left: 10, top: 20, width: 640, height: 360 });
+  nodes.find(n => n.textContent === "Take control" && n.tag === "button").listeners.click(); await flush(); await f.time.tick(1000);
+  image.listeners.click({ clientX: 170, clientY: 120 }); await flush();
+  assert.equal(focused, true);
+  assert.deepEqual(f.mutations("input").at(-1).body.request, { action: "pointer", x: 320, y: 200 });
+  keyboard.value = "Hello"; keyboard.listeners.input({ isComposing: false });
+  assert.equal(keyboard.value, "");
+  await f.time.tick(1000);
+  assert.deepEqual(f.mutations("input").at(-1).body.request, { action: "type", text: "Hello" });
+  let prevented = false;
+  keyboard.listeners.keydown({ key: "@", ctrlKey: true, altKey: true, getModifierState: () => true, preventDefault() { prevented = true; } });
+  assert.equal(prevented, false, "AltGr text must go through native composition/input");
+  keyboard.value = "世界"; keyboard.listeners.input({ isComposing: true });
+  keyboard.listeners.compositionend(); keyboard.listeners.input({ isComposing: false });
+  await f.time.tick(1000);
+  assert.equal(f.mutations("input").filter(c => c.body.request.text === "世界").length, 1);
+  mounted.dispose(); assert.equal(f.time.size, 0); assert.equal(keyboard.value, "");
+});
+
+test("wheel is intercepted only during takeover; resolution changes reach the browser and preview expansion is local", async () => {
+  const doc = { createElement: (tag) => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+  let width = 1280, height = 720, human = false, seq = 0;
+  const f = fixture({ handle(path, opts, time) {
+    if (opts.body?.operation === "acquire") human = true;
+    if (opts.body?.operation === "release") human = false;
+    if (opts.body?.request?.action === "resize") ({ width, height } = opts.body.request);
+    if (path.endsWith("/frame")) return { ...frame(time.now(), `s-${++seq}`), width, height, control: { mode: human ? "human" : "agent" } };
+  } });
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time }); await flush();
+  const all = el => [el, ...el.children.flatMap(all)], nodes = all(root);
+  const image = nodes.find(n => n.tag === "img"), viewport = nodes.find(n => n.className === "browser-viewport");
+  const button = name => nodes.find(n => n.tag === "button" && n.textContent === name);
+  image.getBoundingClientRect = () => ({ left: 10, top: 20, width: 640, height: 360 });
+  let intercepted = 0;
+  const wheel = { clientX: 170, clientY: 120, deltaX: 3, deltaY: 20, deltaMode: 0, preventDefault() { intercepted++; } };
+  image.listeners.wheel(wheel); assert.equal(intercepted, 0);
+  button("Take control").listeners.click(); await flush(); await f.time.tick(250);
+  image.listeners.wheel(wheel); await flush(); assert.equal(intercepted, 1);
+  assert.deepEqual(f.mutations("input").at(-1).body.request, { action: "wheel", x: 320, y: 200, deltaX: 6, deltaY: 40 });
+  await f.time.tick(250);
+  const widthInput = nodes.find(n => n.min === "320"), heightInput = nodes.find(n => n.min === "240");
+  widthInput.value = "390"; heightInput.value = "844"; widthInput.listeners.input();
+  button("Apply resolution").listeners.click(); await flush(); await f.time.tick(250);
+  assert.deepEqual(f.mutations("input").at(-1).body.request, { action: "resize", width: 390, height: 844 });
+  assert.equal(viewport.style.aspectRatio, "390 / 844");
+  assert.equal(widthInput.value, "390"); assert.equal(heightInput.value, "844");
+  const mutations = f.mutations("input").length;
+  button("Expand preview").listeners.click(); assert.match(viewport.className, /is-expanded/);
+  button("Fit preview").listeners.click(); assert.equal(viewport.className, "browser-viewport");
+  assert.equal(f.mutations("input").length, mutations);
+  widthInput.value = "2561"; widthInput.listeners.input(); button("Apply resolution").listeners.click(); await flush();
+  assert.equal(f.mutations("input").length, mutations);
+  mounted.dispose();
+});
+
+test("URL bar reflects acknowledged location, preserves a draft through refresh, and Enter navigates without model input", async () => {
+  const doc = { createElement: tag => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+  let location = "https://example.test/start", human = false, seq = 0;
+  const f = fixture({ handle(path, opts, time) {
+    if (opts.body?.operation === "acquire") human = true;
+    if (opts.body?.request?.action === "open") location = opts.body.request.url;
+    if (path.endsWith("/frame")) return { ...frame(time.now(), `url-${++seq}`), url: location, control: { mode: human ? "human" : "agent" } };
+  } });
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time }); await flush();
+  const all = el => [el, ...el.children.flatMap(all)], nodes = all(root);
+  const address = nodes.find(n => n.attributes["aria-label"] === "Browser URL");
+  assert.equal(address.value, location); assert.equal(address.readOnly, true);
+  nodes.find(n => n.tag === "button" && n.textContent === "Take control").listeners.click(); await flush(); await f.time.tick(250);
+  address.value = "https://example.test/next"; address.listeners.input();
+  await f.time.tick(500); assert.equal(address.value, "https://example.test/next");
+  address.listeners.keydown({ key: "Enter", preventDefault() {} }); await flush(); await f.time.tick(250);
+  assert.deepEqual(f.mutations("input").at(-1).body.request, { action: "open", url: "https://example.test/next" });
+  assert.equal(address.value, location);
+  mounted.dispose(); assert.equal(address.value, "");
 });
 
 test("app lifecycle seams dispose browser before auth reset and preserve file mode", async () => {
