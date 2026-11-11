@@ -2129,6 +2129,11 @@ test("control is narrow, principal is injected, responses are projected and neve
     assert.equal(result.body.leaseId, ["acquire", "renew"].includes(operation) ? "lease-one" : undefined);
   }
   assert.equal(seen.length, 6);
+  for (const requestBody of [{ action: "pointer", x: 0, y: 0 }, { action: "pointer", x: 1279, y: 719 }, { action: "type", text: "--config '世界'" }, { action: "wheel", x: 120, y: 200, deltaX: -20, deltaY: 100 }, { action: "resize", width: 390, height: 844 }]) {
+    const result = await request(f.baseUrl, `${path}/control`, { method: "POST", headers: browserHeaders(id, true), body: { operation: "input", browserSessionId: "browser-incarnation", leaseId: "lease-one", frameId: "frame-one", request: requestBody } });
+    assert.equal(result.response.status, 200, JSON.stringify(result.body));
+    assert.deepEqual(seen.at(-1).payload.request, requestBody);
+  }
   assert.match(seen[0].principal, /^[0-9a-f]{64}$/);
   assert.notEqual(seen[0].principal, TOKEN_HASH);
   assert.ok(seen.every((req) => req.principal === seen[0].principal && req.nativeSessionId === id));
@@ -2139,13 +2144,15 @@ test("control is narrow, principal is injected, responses are projected and neve
     { operation: "cdp", browserSessionId: "browser-incarnation" },
     ...[{ action: "open", url: "file:///tmp/private" }, { action: "open", url: "https://user:pass@example.com" },
       { action: "evaluate", script: "1" }, { action: "click", ref: "#selector" }, { action: "scroll", amount: 2001 },
-      { action: "press", key: "--flag" }, { action: "reload", path: "/tmp" }].map((request) => ({ operation: "input", browserSessionId: "browser-incarnation", leaseId: "lease-one", frameId: "frame-one", request })),
+      { action: "press", key: "--flag" }, { action: "reload", path: "/tmp" },
+      { action: "pointer", x: -1, y: 0 }, { action: "pointer", x: 2560, y: 0 }, { action: "pointer", x: 0, y: 1600 }, { action: "pointer", x: 1.5, y: 0 }, { action: "pointer", x: 1, y: 1, button: "right" },
+      { action: "type", text: "" }, { action: "type", text: "bad\0" }, { action: "wheel", x: 0, y: 0, deltaX: 0, deltaY: 0 }, { action: "wheel", x: 0, y: 0, deltaX: 0, deltaY: 2001 }, { action: "resize", width: 319, height: 844 }, { action: "resize", width: 390, height: 1601 }].map((request) => ({ operation: "input", browserSessionId: "browser-incarnation", leaseId: "lease-one", frameId: "frame-one", request })),
   ]) {
     const result = await request(f.baseUrl, `${path}/control`, { method: "POST", headers: browserHeaders(id, true), body });
     assert.equal(result.response.status, 400, JSON.stringify(body));
     assert.equal(result.body.error.code, "invalid_browser_request");
   }
-  assert.equal(seen.length, 6);
+  assert.equal(seen.length, 11);
 });
 
 for (const mutate of [
@@ -2153,6 +2160,8 @@ for (const mutate of [
   (data) => ({ ...data, data: Buffer.from("not-jpeg").toString("base64") }),
   (data) => ({ ...data, data: Buffer.alloc(600 * 1024 + 1, 255).toString("base64") }),
   (data) => ({ ...data, width: 999999 }),
+  (data) => ({ ...data, url: "ws://127.0.0.1/private-cdp" }),
+  (data) => ({ ...data, url: "https://user:private@example.test/" }),
   (data) => ({ ...data, refs: [{ ref: "@e1", role: "textbox", name: "x".repeat(513) }] }),
   (data) => ({ ...data, refs: Array.from({ length: 101 }, (_, i) => ({ ref: `@e${i + 1}`, role: "button", name: "" })) }),
   (data) => ({ ...data, nativeSessionId: RESUME_ID }),

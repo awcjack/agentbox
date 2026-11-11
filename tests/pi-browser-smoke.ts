@@ -14,11 +14,15 @@ const [executable, chromium] = process.argv.slice(2)
 assert(executable?.startsWith("/") && chromium?.startsWith("/"), "Supply absolute CLI and sandboxed Chromium executable paths")
 let disallowedRequests = 0
 const html = `<!doctype html><meta charset="utf-8"><title>Agentbox browser fixture</title>
+<style>#name{position:absolute;left:80px;top:100px;width:220px;height:32px}#save{position:absolute;left:340px;top:100px;width:80px;height:32px}</style>
 <label>Name<input id="name"></label><button id="save">Save</button><p id="result">initial</p><p id="cookie"></p>
+<p id="viewport"></p><p id="scroll-state"></p><div style="margin-top:300px;width:2200px;height:2200px;background:linear-gradient(#eee,#cdd)">Scrollable fixture</div>
 <script>
 document.querySelector('#cookie').textContent=document.cookie;
 document.querySelector('#save').onclick=()=>{document.querySelector('#result').textContent='saved '+document.querySelector('#name').value;document.cookie='fixture=shared; path=/';};
 console.log('fixture console message');
+const report=()=>{document.querySelector('#viewport').textContent='viewport '+innerWidth+'x'+innerHeight;document.querySelector('#scroll-state').textContent='scroll '+Math.round(scrollX)+' '+Math.round(scrollY)};
+addEventListener('resize',report);addEventListener('scroll',report);report();
 </script>`
 const server = createServer((req, res) => {
   if (req.headers.host?.startsWith("localhost:")) disallowedRequests++
@@ -94,6 +98,64 @@ try {
   assert.match(text(await parent.execute({ action: "get", property: "text" })), /saved Human/)
   await controlChild.execute({ action: "snapshot" })
   await controlChild.shutdown()
+  // Keep the main tab visible for screenshot-based direct-input acceptance.
+  stage("phase2: coordinate click, focused text, and keyboard editing")
+  const directLease = await control("acquire", { browserSessionId: parent.session })
+  const direct = async (request: any) => {
+    stage(`phase2 direct: ${request.action}`)
+    const frame = await control("frame")
+    assert.equal((await control("input", { browserSessionId: parent.session, leaseId: directLease.leaseId, frameId: frame.frameId, request })).accepted, true)
+  }
+  await direct({ action: "pointer", x: 180, y: 116 })
+  await direct({ action: "press", key: "Control+a" })
+  await direct({ action: "type", text: "--config /literal '世界'x" })
+  await direct({ action: "press", key: "Backspace" })
+  await direct({ action: "pointer", x: 380, y: 116 })
+  await direct({ action: "resize", width: 390, height: 844 })
+  const phoneFrame = await control("frame")
+  assert.equal(phoneFrame.width, 390); assert.equal(phoneFrame.height, 844)
+  assert.equal(phoneFrame.url, url)
+  await direct({ action: "wheel", x: 150, y: 300, deltaX: 120, deltaY: 300 })
+  await control("frame") // Let the composited scroll frame settle before checking the fixture text.
+  await control("release", { browserSessionId: parent.session, leaseId: directLease.leaseId })
+  const phoneText = text(await parent.execute({ action: "get", property: "text" }))
+  assert(phoneText.includes("saved --config /literal '世界'"))
+  assert(phoneText.includes("viewport 390x844")); assert.match(phoneText, /scroll [1-9][0-9]* [1-9][0-9]*/)
+  const desktopLease = await control("acquire", { browserSessionId: parent.session })
+  const beforeDesktop = await control("frame")
+  await control("input", { browserSessionId: parent.session, leaseId: desktopLease.leaseId, frameId: beforeDesktop.frameId, request: { action: "resize", width: 1920, height: 1080 } })
+  const desktopFrame = await control("frame")
+  assert.equal(desktopFrame.width, 1920); assert.equal(desktopFrame.height, 1080)
+  assert.equal(desktopFrame.url, url)
+  await control("release", { browserSessionId: parent.session, leaseId: desktopLease.leaseId })
+  assert(text(await parent.execute({ action: "get", property: "text" })).includes("viewport 1920x1080"))
+  stage("agent visual tools: desktop resize and coordinate focus")
+  const frame = (result: any) => {
+    assert.equal(result.content[1].type, "image")
+    assert(result.content[0].text.includes(result.details.frame.frameId))
+    return result.details.frame
+  }
+  const desktop = frame(await parent.execute({ action: "resize", width: 1280, height: 720 }))
+  assert.equal(desktop.width, 1280); assert.equal(desktop.height, 720)
+  await parent.execute({ action: "open", url })
+  const visible = frame(await parent.execute({ action: "screenshot" }))
+  await parent.execute({ action: "pointer", frameId: visible.frameId, x: 180, y: 116 })
+  await parent.execute({ action: "press", key: "Control+a" })
+  const selected = frame(await parent.execute({ action: "screenshot" }))
+  stage("agent visual tools: literal typing and coordinate save")
+  const typed = frame(await parent.execute({ action: "type", frameId: selected.frameId, text: "--config /agent '世界'" }))
+  const saved = frame(await parent.execute({ action: "pointer", frameId: typed.frameId, x: 380, y: 116 }))
+  assert(text(await parent.execute({ action: "get", property: "text" })).includes("saved --config /agent '世界'"))
+  await assert.rejects(parent.execute({ action: "pointer", frameId: typed.frameId, x: 380, y: 116 }), { code: "browser_frame_stale" })
+  stage("agent visual tools: diagonal wheel and phone viewport")
+  frame(await parent.execute({ action: "wheel", frameId: saved.frameId, x: 150, y: 300, deltaX: 120, deltaY: 300 }))
+  await parent.execute({ action: "screenshot" }) // Composite scroll before inspecting fixture state.
+  assert.match(text(await parent.execute({ action: "get", property: "text" })), /scroll [1-9][0-9]* [1-9][0-9]*/)
+  const agentPhone = frame(await parent.execute({ action: "resize", width: 390, height: 844 }))
+  assert.equal(agentPhone.width, 390); assert.equal(agentPhone.height, 844)
+  assert(text(await parent.execute({ action: "get", property: "text" })).includes("viewport 390x844"))
+  stage("agent visual tools: return preview to desktop")
+  frame(await parent.execute({ action: "resize", width: 1280, height: 720 }))
   await parent.disconnectControl()
   stage("unrelated conversation: verify cookie isolation")
   const unrelated = await make()
@@ -117,4 +179,4 @@ try {
   await new Promise<void>(resolve => server.close(() => resolve()))
   assert(!cleanupFailed, "Browser cleanup must succeed")
 }
-console.log("Real browser form/screenshot/console, shared-tab login, human preview/takeover, conversation isolation, and allowlist smoke passed")
+console.log("Real browser form/screenshot/console, agent visual input/resolution, shared-tab login, human preview/takeover, conversation isolation, and allowlist smoke passed")

@@ -1201,10 +1201,14 @@ function browserRequest(body) {
     fields.push("frameId", "request");
     if (!browserId(body.frameId) || !browserObject(body.request)) invalid();
     const p = body.request;
-    const actions = { open: ["url"], click: ["ref"], fill: ["ref", "text"], press: ["key"], scroll: ["direction", "amount"], back: [], forward: [], reload: [] };
+    const actions = { open: ["url"], click: ["ref"], fill: ["ref", "text"], pointer: ["x", "y"], wheel: ["x", "y", "deltaX", "deltaY"], resize: ["width", "height"], type: ["text"], press: ["key"], scroll: ["direction", "amount"], back: [], forward: [], reload: [] };
     if (!Object.hasOwn(actions, p.action) || Object.keys(p).some((key) => key !== "action" && !actions[p.action].includes(key))) invalid();
     if (["click", "fill"].includes(p.action) && !browserRef(p.ref)) invalid();
     if (p.action === "fill" && (typeof p.text !== "string" || p.text.length > 10000 || p.text.includes("\0"))) invalid();
+    if (["pointer", "wheel"].includes(p.action) && (!Number.isInteger(p.x) || p.x < 0 || p.x >= 2560 || !Number.isInteger(p.y) || p.y < 0 || p.y >= 1600)) invalid();
+    if (p.action === "wheel" && (![p.deltaX, p.deltaY].every(v => Number.isInteger(v) && Math.abs(v) <= 2000) || (!p.deltaX && !p.deltaY))) invalid();
+    if (p.action === "resize" && (!Number.isInteger(p.width) || p.width < 320 || p.width > 2560 || !Number.isInteger(p.height) || p.height < 240 || p.height > 1600)) invalid();
+    if (p.action === "type" && (typeof p.text !== "string" || !p.text.length || p.text.length > 10000 || p.text.includes("\0"))) invalid();
     if (p.action === "press" && (typeof p.key !== "string" || !/^[A-Za-z0-9+ _]{1,64}$/.test(p.key))) invalid();
     if (p.action === "scroll" && ((p.direction !== undefined && !["up", "down", "left", "right"].includes(p.direction))
       || (p.amount !== undefined && (!Number.isInteger(p.amount) || p.amount < 1 || p.amount > 2000)))) invalid();
@@ -1237,7 +1241,7 @@ function browserResult(data, operation, nativeSessionId, payload, canControl) {
       capabilities: { liveView: true, takeover: true }, control: control(), permissions: { view: true, control: canControl } };
   }
   if (operation === "frame") {
-    if (!browserId(data.frameId) || !browserTime(data.createdAt) || data.width !== 1280 || data.height !== 720 || data.mimeType !== "image/jpeg"
+    if (!browserId(data.frameId) || !browserTime(data.createdAt) || !Number.isInteger(data.width) || data.width < 320 || data.width > 2560 || !Number.isInteger(data.height) || data.height < 240 || data.height > 1600 || data.mimeType !== "image/jpeg"
       || typeof data.data !== "string" || data.data.length > 819200 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data.data)) invalid();
     const jpeg = Buffer.from(data.data, "base64");
     if (jpeg.length > 600 * 1024 || jpeg.length < 4 || jpeg.toString("base64") !== data.data
@@ -1251,8 +1255,17 @@ function browserResult(data, operation, nativeSessionId, payload, canControl) {
       seen.add(ref.ref);
       return { ref: ref.ref, role: ref.role, name: ref.name };
     });
-    return { ...base, frameId: data.frameId, createdAt: data.createdAt, width: 1280, height: 720,
-      mimeType: "image/jpeg", data: data.data, refs, control: control() };
+    let pageUrl = null;
+    if (data.url !== undefined && data.url !== null) {
+      if (typeof data.url !== "string" || data.url.length > 4096) invalid();
+      try {
+        const parsed = new URL(data.url);
+        if ((!["http:", "https:"].includes(parsed.protocol) && parsed.href !== "about:blank") || parsed.username || parsed.password) invalid();
+        pageUrl = parsed.href;
+      } catch { invalid(); }
+    }
+    return { ...base, frameId: data.frameId, createdAt: data.createdAt, width: data.width, height: data.height,
+      mimeType: "image/jpeg", data: data.data, url: pageUrl, refs, control: control() };
   }
   if (["acquire", "renew"].includes(operation)) {
     if (!browserId(data.leaseId) || !browserTime(data.expiresAt)) invalid();

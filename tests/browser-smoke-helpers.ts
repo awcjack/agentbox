@@ -27,8 +27,9 @@ function commandLabel(args: string[]) {
   if (at === 0) return "unknown command"
   if (args[at] === "--cdp") at += 2
   if (args[at] === "--pin-tab") at++
+  if (args[at] === "--action-policy") at += 2
   const action = args[at]
-  const actions = ["open", "snapshot", "click", "fill", "press", "scroll", "wait", "screenshot", "get", "back", "forward", "reload", "console", "errors", "close", "session", "tab", "set"]
+  const actions = ["open", "snapshot", "click", "fill", "press", "scroll", "wait", "screenshot", "get", "back", "forward", "reload", "console", "errors", "close", "session", "tab", "set", "batch"]
   if (!actions.includes(action)) return "unknown command"
   const sub = args[at + 1]
   return ["session", "tab", "get", "set"].includes(action) && ["info", "list", "close", "cdp-url", "url", "title", "text", "viewport"].includes(sub)
@@ -46,7 +47,8 @@ function excerpt(value: string) {
  */
 export const runFixtureBrowser: BrowserRunner = (file, args, options) => new Promise((resolve, reject) => {
   const started = Date.now()
-  execFile(file, args, { ...options, encoding: "utf8", maxBuffer: 256 * 1024, killSignal: "SIGKILL", windowsHide: true }, (error, stdout, stderr) => {
+  const { input, ...execOptions } = options
+  const child = execFile(file, args, { ...execOptions, encoding: "utf8", maxBuffer: 256 * 1024, killSignal: "SIGKILL", windowsHide: true }, (error, stdout, stderr) => {
     if (!error) { resolve(stdout); return }
     let diagnostic = stdout
     try {
@@ -62,4 +64,6 @@ export const runFixtureBrowser: BrowserRunner = (file, args, options) => new Pro
     ]
     reject(new Error(details.join("\n")))
   })
+  child.stdin?.on("error", () => {})
+  if (input !== undefined) child.stdin?.end(input)
 })
