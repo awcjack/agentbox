@@ -15,6 +15,8 @@ const optionalReadOnly = [
   "/etc/pi", "/etc/agentbox",
 ];
 const managedGitConfig = "/home/agent/.gitconfig";
+const forwardedAgentSocket = "/run/pi-ssh-agent.sock";
+const forwardedKnownHosts = "/home/agent/.ssh/known_hosts";
 
 // Mount only the managed file, never its containing home or symlink target's
 // directory. Missing configuration is valid; other errors must fail closed.
@@ -91,7 +93,7 @@ function canonical(path, label) {
 }
 
 function restricted(path, label) {
-  if (broadPaths.has(path) || overlaps(path, managedGitConfig) || path.startsWith(`${managedGitConfig}.`) || overlaps(path, seedDir) || configNames.some((name) => overlaps(path, `${agentHome}/${name}`) || path.startsWith(`${agentHome}/${name}.`)) || ["/proc", "/dev", "/sys", "/etc", "/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64"].some((root) => contains(root, path))) {
+  if (broadPaths.has(path) || overlaps(path, forwardedAgentSocket) || overlaps(path, "/home/agent/.ssh") || overlaps(path, managedGitConfig) || path.startsWith(`${managedGitConfig}.`) || overlaps(path, seedDir) || configNames.some((name) => overlaps(path, `${agentHome}/${name}`) || path.startsWith(`${agentHome}/${name}.`)) || ["/proc", "/dev", "/sys", "/etc", "/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64"].some((root) => contains(root, path))) {
     throw new Error(`sandbox ${label} is too broad or reserved: ${path}`);
   }
 }
@@ -105,6 +107,10 @@ function restricted(path, label) {
 export function buildSandboxLaunch({ executable, args, profile, sandbox, browserRpcFd }) {
   // Never accept arbitrary descriptor ranges: fd 3 is the sole private bridge.
   if (browserRpcFd !== undefined && browserRpcFd !== 3) throw new Error("sandbox browserRpcFd must be 3");
+  if (profile?.sshAgentForwarding !== undefined && typeof profile.sshAgentForwarding !== "boolean") {
+    throw new Error("sandbox profile.sshAgentForwarding must be a boolean");
+  }
+  if (profile?.sshAgentForwarding && !sandbox?.enable) throw new Error("SSH agent forwarding requires the filesystem sandbox");
   if (!sandbox?.enable) return { executable, args };
   if (process.platform !== "linux") throw new Error("Pi RPC sandbox requires Linux bubblewrap");
   absolute(sandbox.executable, "executable");
@@ -138,6 +144,34 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
     }
   }
 
+  const sshArgs = [];
+  if (profile.sshAgentForwarding) {
+    const socket = canonical(sandbox.sshAgentSocket, "sshAgentSocket");
+    const knownHosts = canonical(sandbox.sshKnownHostsPath ?? forwardedKnownHosts, "sshKnownHostsPath");
+    for (const path of [socket, knownHosts]) {
+      if (["/proc", "/dev", "/sys"].some((root) => contains(root, path)) ||
+          [cwd, sessionDir, ...extras.map(([, extra]) => extra)].some((root) => overlaps(root, path))) {
+        throw new Error("sandbox SSH sources must be outside project, session, device, and extra mounts");
+      }
+    }
+    for (const path of optionalReadOnly) {
+      let target;
+      try { target = realpathSync(path); }
+      catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+        throw error;
+      }
+      if (contains(target, socket)) throw new Error("sandbox SSH socket must not be inside shared runtime mounts");
+    }
+    if (!statSync(socket).isSocket()) throw new Error("sandbox sshAgentSocket must be a Unix socket");
+    if (!statSync(knownHosts).isFile()) throw new Error("sandbox sshKnownHostsPath must be a regular file");
+    // Read-only mount prevents filesystem mutation, NOT agent protocol operations.
+    // Connecting clients can authenticate, sign, list, or remove loaded identities.
+    sshArgs.push("--ro-bind", socket, forwardedAgentSocket,
+      "--ro-bind", knownHosts, forwardedKnownHosts,
+      "--setenv", "SSH_AUTH_SOCK", forwardedAgentSocket);
+  }
+
   // bwrap starts with an empty mount namespace. --dev creates a private minimal
   // device tree, NOT a bind of host /dev. No --unshare-net: networking is out of scope.
   const launchArgs = [
@@ -145,6 +179,7 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
     "--die-with-parent", "--new-session", "--cap-drop", "ALL",
     "--tmpfs", "/tmp", "--tmpfs", "/run", "--tmpfs", "/home/agent",
     "--proc", "/proc", "--dev", "/dev",
+    "--unsetenv", "SSH_AUTH_SOCK",
   ];
   const bound = new Set();
   const aliases = [];
@@ -190,7 +225,7 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
     }
     launchArgs.push("--ro-bind", target, `${seedDir}/${name}`);
   }
-  launchArgs.push(...managedGitConfigMount());
+  launchArgs.push(...managedGitConfigMount(), ...sshArgs);
   launchArgs.push("--bind", cwd, cwd, "--bind", sessionDir, sessionDir);
   for (const [flag, path] of extras) launchArgs.push(flag, path, path);
   // -p prevents BASH_ENV/ENV and imported shell functions from running before

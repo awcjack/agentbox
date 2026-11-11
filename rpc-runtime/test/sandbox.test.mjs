@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer as createSocketServer } from "node:net";
 import { buildSandboxLaunch, managedGitConfigMount } from "../sandbox.mjs";
 
 function fixture(t) {
@@ -82,6 +83,100 @@ test("managed Git identity exposes only its regular config file read-only", (t) 
   assert.throws(() => managedGitConfigMount({ realpath() { throw Object.assign(new Error("denied"), { code: "EACCES" }); } }), /denied/);
   assert.throws(() => managedGitConfigMount({ realpath: () => root }), /regular non-device file/);
   assert.throws(() => managedGitConfigMount({ realpath: () => "/proc/fake", stat: () => ({ isFile: () => true }) }), /regular non-device file/);
+});
+
+async function sshFixture(t) {
+  const input = fixture(t);
+  const socket = join(input.root, "agent.sock");
+  const knownHosts = join(input.root, "known_hosts");
+  writeFileSync(knownHosts, "fixture-known-hosts\n");
+  const server = createSocketServer((connection) => connection.end("fixture-agent"));
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socket, resolve); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  input.profile.sshAgentForwarding = true;
+  input.sandbox.sshAgentSocket = socket;
+  input.sandbox.sshKnownHostsPath = knownHosts;
+  return input;
+}
+
+enabledTest("SSH forwarding exposes only a socket and known_hosts to opted-in profiles", async (t) => {
+  const input = await sshFixture(t);
+  const { args } = buildSandboxLaunch(input);
+  assert.ok(mounts(args, "--ro-bind").some(([source, dest]) => source === input.sandbox.sshAgentSocket && dest === "/run/pi-ssh-agent.sock"));
+  assert.ok(mounts(args, "--ro-bind").some(([source, dest]) => source === input.sandbox.sshKnownHostsPath && dest === "/home/agent/.ssh/known_hosts"));
+  const envIndex = args.indexOf("--setenv");
+  assert.deepEqual(args.slice(envIndex, envIndex + 3), ["--setenv", "SSH_AUTH_SOCK", "/run/pi-ssh-agent.sock"]);
+  assert.ok(args.indexOf("--unsetenv") < envIndex);
+  for (const [source] of [...mounts(args, "--bind"), ...mounts(args, "--ro-bind")]) {
+    assert.ok(![input.root, "/home/agent/.ssh"].includes(source));
+  }
+  const optedOut = buildSandboxLaunch({ ...input, profile: { ...input.profile, sshAgentForwarding: false } }).args;
+  assert.ok(optedOut.includes("--unsetenv"));
+  assert.ok(!optedOut.includes("--setenv"));
+  assert.ok(!optedOut.includes(input.sandbox.sshAgentSocket));
+  assert.ok(!optedOut.includes(input.sandbox.sshKnownHostsPath));
+});
+
+enabledTest("SSH forwarding fails closed for missing, aliased, invalid or project-owned sources", async (t) => {
+  const input = await sshFixture(t);
+  assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { enable: false } }), /requires the filesystem sandbox/);
+  for (const key of ["sshAgentSocket", "sshKnownHostsPath"]) {
+    for (const value of [...(key === "sshAgentSocket" ? [undefined] : []), "relative", join(input.root, "missing")]) {
+      assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, [key]: value } }));
+    }
+    const alias = join(input.root, `${key}-alias`);
+    symlinkSync(input.sandbox[key], alias);
+    assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, [key]: alias } }), /canonical/);
+  }
+  assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, sshAgentSocket: input.sandbox.sshKnownHostsPath } }), /Unix socket/);
+  assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, sshKnownHostsPath: join(input.root, "extra-ro") } }), /regular file/);
+  const projectTrust = join(input.profile.cwd, "known_hosts");
+  writeFileSync(projectTrust, "fixture");
+  assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { ...input.sandbox, sshKnownHostsPath: projectTrust } }), /outside project/);
+  assert.throws(() => buildSandboxLaunch({ ...input, profile: { ...input.profile, sshAgentForwarding: "true" } }), /must be a boolean/);
+});
+
+enabledTest("bubblewrap SSH forwarding connects to only the fixture socket without exposing its directory", { timeout: 10000 }, async (t) => {
+  const bwrap = process.env.TEST_BWRAP ?? (process.env.PATH ?? "").split(":")
+    .filter((path) => path.startsWith("/"))
+    .map((path) => join(path, "bwrap")).find((path) => existsSync(path));
+  if (!bwrap) return t.skip("bubblewrap is unavailable (PATH/TEST_BWRAP)");
+  const input = await sshFixture(t);
+  input.sandbox.executable = bwrap;
+  input.executable = process.execPath;
+  input.args = ["-e", ""];
+  const probe = spawnSync(...launchTuple(input), { encoding: "utf8" });
+  if (probe.error?.code === "ENOENT") return t.skip("configured bubblewrap is unavailable");
+  if (probe.status !== 0 && /(?:operation not permitted|permission denied|no permissions to create|creating new namespace failed)/i.test(probe.stderr ?? "")) {
+    return t.skip("kernel/container disallows bubblewrap user namespaces");
+  }
+  assert.equal(probe.status, 0, probe.stderr || probe.error?.message);
+  input.args = ["-e", `
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    assert.equal(process.env.SSH_AUTH_SOCK, '/run/pi-ssh-agent.sock');
+    assert.equal(fs.existsSync(process.argv[1]), false);
+    assert.deepEqual(fs.readdirSync('/home/agent/.ssh'), ['known_hosts']);
+    assert.equal(fs.readFileSync('/home/agent/.ssh/known_hosts', 'utf8'), 'fixture-known-hosts\\n');
+    assert.throws(() => fs.writeFileSync('/home/agent/.ssh/known_hosts', 'changed'));
+    const connection = require('node:net').createConnection(process.env.SSH_AUTH_SOCK);
+    let data = '';
+    connection.setTimeout(2000, () => connection.destroy(new Error('fixture timeout')));
+    connection.on('data', chunk => { data += chunk; });
+    connection.on('end', () => assert.equal(data, 'fixture-agent'));
+    connection.on('error', error => { console.error(error.message); process.exitCode = 1; });
+  `, input.sandbox.sshAgentSocket];
+  const [file, args] = launchTuple(input);
+  await new Promise((resolve, reject) => {
+    const child = spawn(file, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve(); else reject(new Error(`sandbox fixture exited ${code}: ${stderr}`));
+    });
+  });
+  assert.equal(readFileSync(input.sandbox.sshKnownHostsPath, "utf8"), "fixture-known-hosts\n");
 });
 
 enabledTest("shell metacharacters remain argv, never shell interpolation", (t) => {

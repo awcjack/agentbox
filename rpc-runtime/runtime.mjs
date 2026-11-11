@@ -230,7 +230,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   const raw = assertObject(root.piRpcApi, "piRpcApi");
   assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "autoDiscoverProfiles", "limits", "sandbox"]), "piRpcApi");
   const sandboxRaw = raw.sandbox === undefined ? {} : assertObject(raw.sandbox, "piRpcApi.sandbox");
-  assertKnownKeys(sandboxRaw, new Set(["enable", "executable", "readOnlyPaths", "readWritePaths"]), "piRpcApi.sandbox");
+  assertKnownKeys(sandboxRaw, new Set(["enable", "executable", "readOnlyPaths", "readWritePaths", "sshAgentSocket", "sshKnownHostsPath"]), "piRpcApi.sandbox");
   if (sandboxRaw.enable !== undefined && typeof sandboxRaw.enable !== "boolean") {
     throw new Error("piRpcApi.sandbox.enable must be a boolean");
   }
@@ -244,7 +244,16 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
     executable: sandboxRaw.executable ?? environment.PI_RPC_SANDBOX_EXECUTABLE,
     readOnlyPaths: stringArray(sandboxRaw.readOnlyPaths, [], "piRpcApi.sandbox.readOnlyPaths"),
     readWritePaths: stringArray(sandboxRaw.readWritePaths, [], "piRpcApi.sandbox.readWritePaths"),
+    sshAgentSocket: sandboxRaw.sshAgentSocket ?? null,
+    sshKnownHostsPath: sandboxRaw.sshKnownHostsPath === undefined ? "/home/agent/.ssh/known_hosts" : sandboxRaw.sshKnownHostsPath,
   };
+  for (const key of ["sshAgentSocket", "sshKnownHostsPath"]) {
+    const path = sandbox[key];
+    if (key === "sshAgentSocket" && path === null) continue;
+    if (typeof path !== "string" || !path.startsWith("/") || path.includes("\0") || normalizePath(path) !== path) {
+      throw new Error(`piRpcApi.sandbox.${key} must be a normalized absolute path`);
+    }
+  }
   if ((sandbox.enable || sandbox.executable !== undefined) &&
       (typeof sandbox.executable !== "string" || !sandbox.executable.startsWith("/") || sandbox.executable.includes("\0"))) {
     throw new Error("piRpcApi.sandbox.executable must be an absolute path");
@@ -310,7 +319,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   for (const [name, entry] of Object.entries(profilesRaw)) {
     if (!PROFILE_NAME_RE.test(name)) throw new Error(`invalid profile name ${name}`);
     const profile = assertObject(entry, `piRpcApi.profiles.${name}`);
-    assertKnownKeys(profile, new Set(["cwd", "sessionDir", "args", "env", "envReferences", "allowedCommands"]), `piRpcApi.profiles.${name}`);
+    assertKnownKeys(profile, new Set(["cwd", "sessionDir", "args", "env", "envReferences", "allowedCommands", "sshAgentForwarding"]), `piRpcApi.profiles.${name}`);
     if (typeof profile.cwd !== "string" || !profile.cwd.startsWith("/")) {
       throw new Error(`piRpcApi.profiles.${name}.cwd must be an absolute path`);
     }
@@ -320,6 +329,9 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
     const sessionDir = profile.sessionDir === undefined ? undefined : normalizePath(profile.sessionDir);
     if (sessionDir !== undefined && sessionDir !== profile.sessionDir) {
       throw new Error(`piRpcApi.profiles.${name}.sessionDir must be normalized`);
+    }
+    if (profile.sshAgentForwarding !== undefined && typeof profile.sshAgentForwarding !== "boolean") {
+      throw new Error(`piRpcApi.profiles.${name}.sshAgentForwarding must be a boolean`);
     }
     const args = stringArray(profile.args, [], `piRpcApi.profiles.${name}.args`);
     const ownsSessionOption = (arg) => [
@@ -378,6 +390,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
       sessionDir,
       args,
       env: resolvedEnv,
+      sshAgentForwarding: profile.sshAgentForwarding ?? false,
       allowedCommands: profileCommands,
     });
   }
@@ -387,10 +400,13 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
     const discovery = assertObject(raw.autoDiscoverProfiles, "piRpcApi.autoDiscoverProfiles");
     assertKnownKeys(discovery, new Set([
       "enable", "root", "sessionDirPrefix", "exclude", "excludePrefixes", "maxProfiles",
-      "args", "env", "envReferences", "allowedCommands",
+      "args", "env", "envReferences", "allowedCommands", "sshAgentForwarding",
     ]), "piRpcApi.autoDiscoverProfiles");
     if (discovery.enable !== true && discovery.enable !== false) {
       throw new Error("piRpcApi.autoDiscoverProfiles.enable must be a boolean");
+    }
+    if (discovery.sshAgentForwarding !== undefined && typeof discovery.sshAgentForwarding !== "boolean") {
+      throw new Error("piRpcApi.autoDiscoverProfiles.sshAgentForwarding must be a boolean");
     }
     if (discovery.enable) {
       if (typeof discovery.root !== "string" || !discovery.root.startsWith("/")) {
@@ -469,6 +485,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
           sessionDir: entry.sessionDir,
           args: templateArgs,
           env: resolvedTemplateEnv,
+          sshAgentForwarding: discovery.sshAgentForwarding ?? false,
           allowedCommands: templateCommands,
         });
         discoveredProfiles.push(entry.name);
@@ -497,8 +514,21 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   }
 
   if (profiles.size === 0) throw new Error("piRpcApi.profiles must define at least one profile");
+  if ([...profiles.values()].some((profile) => profile.sshAgentForwarding)) {
+    for (const owner of profiles.values()) {
+      for (const source of [sandbox.sshAgentSocket, sandbox.sshKnownHostsPath]) {
+        if (typeof source === "string" && (containsFolder(source, normalizePath(owner.cwd)) ||
+            (owner.sessionDir !== undefined && containsFolder(source, owner.sessionDir)))) {
+          throw new Error("SSH sources must not be inside any profile workspace or session directory");
+        }
+      }
+    }
+  }
   const ownedSessionDirs = [];
   for (const [name, profile] of profiles) {
+    if (profile.sshAgentForwarding && (!sandbox.enable || sandbox.sshAgentSocket === null)) {
+      throw new Error(`profile ${name} SSH forwarding requires sandbox.enable and sandbox.sshAgentSocket`);
+    }
     if (sandbox.enable && (typeof profile.sessionDir !== "string" || !profile.sessionDir.startsWith("/") ||
         profile.sessionDir.includes("\0") || normalizePath(profile.sessionDir) !== profile.sessionDir)) {
       throw new Error(`piRpcApi.profiles.${name}.sessionDir must be a normalized absolute path when sandbox is enabled`);

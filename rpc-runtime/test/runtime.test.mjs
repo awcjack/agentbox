@@ -19,8 +19,9 @@ const RESUME_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
 test("sandbox schema defaults disabled and validates keys, types and paths", () => {
   assert.deepEqual(normalizeConfig(config(), {}).sandbox, {
     enable: false, executable: undefined, readOnlyPaths: [], readWritePaths: [],
+    sshAgentSocket: null, sshKnownHostsPath: "/home/agent/.ssh/known_hosts",
   });
-  const sandbox = { enable: true, executable: "/bin/bwrap", readOnlyPaths: ["/opt/tools"], readWritePaths: ["/var/cache/tool"] };
+  const sandbox = { enable: true, executable: "/bin/bwrap", readOnlyPaths: ["/opt/tools"], readWritePaths: ["/var/cache/tool"], sshAgentSocket: null, sshKnownHostsPath: "/home/agent/.ssh/known_hosts" };
   assert.deepEqual(normalizeConfig(config({ sandbox }), {}).sandbox, sandbox);
   assert.equal(normalizeConfig(config({ sandbox: { enable: true } }), { PI_RPC_SANDBOX_EXECUTABLE: "/bin/bwrap" }).sandbox.executable, "/bin/bwrap");
   for (const [value, pattern] of [
@@ -30,6 +31,11 @@ test("sandbox schema defaults disabled and validates keys, types and paths", () 
     [{ enable: true }, /executable must be an absolute path/],
     [{ executable: 42 }, /executable must be an absolute path/],
     [{ executable: "bwrap" }, /executable must be an absolute path/],
+    [{ sshAgentSocket: "relative" }, /sshAgentSocket must be a normalized absolute path/],
+    [{ sshAgentSocket: 42 }, /sshAgentSocket must be a normalized absolute path/],
+    [{ sshAgentSocket: "/tmp/../agent.sock" }, /sshAgentSocket must be a normalized absolute path/],
+    [{ sshKnownHostsPath: null }, /sshKnownHostsPath must be a normalized absolute path/],
+    [{ sshKnownHostsPath: "relative" }, /sshKnownHostsPath must be a normalized absolute path/],
     [{ readOnlyPaths: null }, /must be an array/],
     [{ readWritePaths: "/tmp" }, /must be an array/],
     [{ readOnlyPaths: [42] }, /must be an array/],
@@ -54,6 +60,35 @@ test("sandbox accepts normalized session directories for explicit and discovered
   assert.deepEqual(normalized.discoveredProfiles, ["project"]);
   assert.equal(normalized.profiles.get("project").sessionDir, join(sessions, "--project--"));
   assert.equal(normalized.sandbox.enable, true);
+});
+
+test("SSH forwarding is per-profile, explicit, and requires a sandbox socket", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-ssh-discovery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessions = join(root, "sessions");
+  await mkdir(join(workspace, "project"), { recursive: true });
+  await mkdir(sessions);
+  const sandbox = { enable: true, executable: "/bin/bwrap", sshAgentSocket: "/run/dedicated-agent.sock" };
+  const profiles = { default: { cwd: workspace, sessionDir: join(sessions, "default"), sshAgentForwarding: false } };
+  const cfg = config({ sandbox, profiles,
+    autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix: sessions, sshAgentForwarding: true },
+  });
+  const normalized = normalizeConfig(cfg, {});
+  assert.equal(normalized.profiles.get("default").sshAgentForwarding, false);
+  assert.equal(normalized.profiles.get("project").sshAgentForwarding, true);
+  assert.equal(normalizeConfig(config(), {}).profiles.get("default").sshAgentForwarding, false);
+  for (const key of ["sshAgentSocket", "sshKnownHostsPath"]) {
+    for (const source of [join(workspace, "agent-source"), join(sessions, "default", "agent-source")]) {
+      assert.throws(() => normalizeConfig({ ...cfg, piRpcApi: {
+        ...cfg.piRpcApi, sandbox: { ...sandbox, [key]: source },
+      } }, {}), /SSH sources must not be inside any profile/);
+    }
+  }
+  for (const broken of [{ enable: false }, { enable: true, executable: "/bin/bwrap" }]) {
+    assert.throws(() => normalizeConfig({ ...cfg, piRpcApi: { ...cfg.piRpcApi, sandbox: broken } }, {}), /SSH forwarding requires/);
+  }
+  assert.throws(() => normalizeConfig(config({ profiles: { default: { ...profiles.default, sshAgentForwarding: "true" } } }), {}), /sshAgentForwarding must be a boolean/);
+  assert.throws(() => normalizeConfig({ ...cfg, piRpcApi: { ...cfg.piRpcApi, autoDiscoverProfiles: { ...cfg.piRpcApi.autoDiscoverProfiles, sshAgentForwarding: "true" } } }, {}), /sshAgentForwarding must be a boolean/);
 });
 
 test("sandbox executable must resolve to an immutable store path before any spawn", () => {
