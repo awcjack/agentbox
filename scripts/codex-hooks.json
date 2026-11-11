@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "@GUARD@",
+            "timeout": 30,
+            "statusMessage": "Checking Agentbox command guards"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "@TESTS@",
+            "timeout": 300,
+            "statusMessage": "Running Agentbox tests"
+          }
+        ]
+      }
+    ]
+  }
+}
