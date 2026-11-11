@@ -190,7 +190,7 @@ images and transcript-based file previews are unchanged.
 - Authenticated same-origin JSON status/JPEG reads use the existing transport and
   required `X-Pi-Session-Id`; bearer tokens never appear in image URLs. The image
   is a validated, bounded `data:image/jpeg` source (supported by the page CSP).
-- Preview is single-flight, at most about 1 fps while open/visible, with bounded
+- Preview is single-flight, at most about 1 fps while viewing and 4 fps during takeover, with bounded
   2–8 second failure backoff. It never starts a browser that the agent has not
   opened. Server `permissions.view` and `permissions.control` are authoritative;
   ordinary chat write access does not imply takeover permission. Browser reads
@@ -199,7 +199,8 @@ images and transcript-based file previews are unchanged.
 - **Take control** must be acknowledged before input. Leases expire after 30
   seconds and are explicitly renewed every 10 seconds. Ref Click/Fill, key,
   bounded scroll, HTTP(S) navigation, Back/Forward/Reload all require a frame
-  younger than 5 seconds. Every attempted mutation discards the old frame; no
+  younger than 5 seconds. Page input, acquisition and release discard the old actionable frame;
+  renewing the unchanged lease preserves a still-fresh frame. No
   mutation is automatically retried. Ambiguous acquisition/release relies on
   expiry, not a retry. Human control pauses structured browser actions across
   the delegated family, not arbitrary shell programs.
@@ -209,8 +210,14 @@ images and transcript-based file previews are unchanged.
   binding, including late acquire replies; server expiry is the fallback. Reopen
   Browser explicitly after returning to the page. Images, refs, drafts and leases
   stay only in mounted pane memory and never enter local storage or chat history.
-- Page labels are text only. There are no pixel clicks, global keyboard forwarding,
+- Page labels are text only. Direct preview clicks/typing/wheel input require a held
+  lease and a fresh frame. Resolution presets/custom sizes change the browser's
+  actual CSS viewport; dragging the preview corner or expanding it changes only
+  its local display. There is no global keyboard forwarding,
   WebSockets, artifact/download routes, or persistent browser login controls.
+- The agent's `browser` tool exposes the same coordinate/typing/wheel/viewport
+  commands through separate agent screenshot bindings. It respects the human
+  lease; acquiring control invalidates pre-takeover agent frames even after release.
 
 `browser-panel.test.mjs` exercises the controller with injected transport/clock,
 including stale completions, read-only permissions, single-flight polling, lease

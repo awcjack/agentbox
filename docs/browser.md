@@ -66,6 +66,15 @@ perform any host rollout separately under the host's operational procedure.
   `press`, `scroll`, `wait`, `get`, navigation, `console`, `errors`, `status`,
   `screenshot`, and `close`. Page text and images are untrusted input, not
   instructions.
+- For visual control, `screenshot` returns an image plus a `frameId` in model-visible
+  text. `pointer` clicks at `x,y`; `type` inserts literal text into the focused
+  control; `wheel` scrolls at `x,y` using signed `deltaX,deltaY` pixels (±2000).
+  Each requires the latest agent `frameId`, valid once for 60 seconds, and returns
+  a fresh image/binding. Coordinates use viewport CSS pixels, not scaled preview
+  pixels. `resize` sets `width` (320–2560) and `height` (240–1600), returning a new
+  screenshot; it tests layout without changing user agent or device pixel ratio.
+  After legacy page-changing actions such as `press` or navigation, take a new
+  screenshot. On `browser_frame_stale`, inspect again instead of replaying input.
 - There is no persisted authentication/profile API, credential vault API, raw
   JavaScript/evaluation API, upload API or download API. No login-state export or
   restore is provided. In-memory cookies may exist during the browser lifetime;
@@ -190,12 +199,29 @@ session identifiers, `ownership` (`tab` or `browser`), `delegated`, `status`, an
 optional `targetId`, workflow `taskId`/`parentTaskId`, and capabilities.
 `liveView`/`takeover` are true only in the top-level RPC process with a live private
 bridge; CLI and delegated processes advertise false. `screenshots: "inline"` and
-`persistentLogin: false` remain unchanged.
+`persistentLogin: false` remain unchanged. `visualInput: true` and `viewport: true`
+advertise agent coordinate/typing/wheel and viewport tools, including for CLI and
+delegated agents without a live preview bridge.
 
 Screenshots additionally return `result.details.artifact` with `version: 1`,
 `id`, `kind: "screenshot"`, `mimeType: "image/jpeg"`, `bytes`, and
 `delivery: "inline"`. Consumers must version-check these metadata objects rather
 than treating arbitrary extension details as a stable browser control API.
+Agent screenshots also carry `details.frame` with `frameId`, `width`, `height`,
+`coordinateSpace: "viewport-css-pixels"`, and `expiresInMs: 60000`; these fields
+are repeated in the text block the model sees. IDs belong to that agent's latest
+screenshot and are consumed before input. Human acquisition invalidates all
+pre-takeover agent frames, including those in delegated processes, even after
+release or lease expiry. Failed input is not retried automatically.
+
+Example visual tool sequence (use each returned frame ID for the next call):
+
+```json
+{"action":"resize","width":1280,"height":720}
+{"action":"pointer","frameId":"<returned frameId>","x":180,"y":116}
+{"action":"type","frameId":"<returned frameId>","text":"New name"}
+{"action":"wheel","frameId":"<returned frameId>","x":600,"y":400,"deltaX":0,"deltaY":500}
+```
 
 The private runtime registry is only an internal lifecycle/ownership seam. It is
 **not an authorization boundary and must not be exposed** through RPC, static
@@ -206,8 +232,13 @@ endpoints or credentials. Public result identifiers do not authorize access.
 
 Select a running conversation and open **Browser**. The agent must first open a
 page; preview never launches or restores a browser. The pane polls bounded JPEG
-frames at approximately 1 fps and displays accessibility references. It shows
+frames at approximately 1 fps while viewing and up to 4 fps during takeover. It shows
 only the main conversation's tab, not delegated tabs.
+The URL bar shows its acknowledged HTTP(S) address (without embedded username or
+password), including updates after page navigation. With control held, enter a
+URL and press Enter or **Go**, or use Back, Forward and Reload. An unsent address
+is preserved while editing and is discarded on control loss; navigation is never
+sent to the model or automatically retried. The bar remains visible in expanded view.
 
 Explicit token scopes are required in `settings.piRpcApi.auth.tokens`:
 
@@ -225,8 +256,38 @@ all actions, refs, leases and profile rights; hiding a UI button is not security
 renewed by the pane every 10 seconds. It blocks structured model browser actions
 across the entire delegated family, including isolated delegated browsers.
 Click/fill, keys, scroll and navigation require a fresh frame after acquisition.
+After taking control, click a field in the preview and type directly. Clicks are
+scaled to the acknowledged browser viewport; typing, paste, IME text, and editing keys are
+sent in order as fresh frames arrive. Cmd/Ctrl+A selects the remote field's text.
+The reference controls remain available. Input is buffered only in this pane
+(at most 64 actions / 10000 characters), expires after five seconds waiting for
+a fresh frame, and is discarded on control loss, errors, or closing the pane.
+The agent tool also offers coordinate clicks and focused typing using its own
+single-use screenshot bindings; it cannot use a human preview's frame ID or lease.
+Text travels as JSON on the managed CLI's stdin.
+Wheel and trackpad gestures over the preview scroll the page under the pointer,
+including horizontal and diagonal movement. Consecutive gesture deltas are
+coalesced in the same bounded input queue. Read-only previews retain normal
+panel scrolling, and pinch-to-zoom is not forwarded as scrolling.
+
+**Browser viewport** offers desktop, tablet and phone presets plus custom CSS
+pixel sizes (width 320–2560, height 240–1600). **Apply resolution** changes the
+actual remote viewport under the existing lease and fresh-frame checks; the size
+label updates only from the acknowledged frame. The initial size is 1280×720.
+These are viewport dimensions, not device/UA/DPR emulation. Drag the preview's
+bottom-right corner to resize its local display, use **Fit preview** to reset it,
+or **Expand preview** for more room; those display controls do not resize the page.
 Frames expire after 5 seconds; each new snapshot invalidates older references.
+Up to four recent direct-input frame bindings are retained to cover a preview
+refresh racing with direct input, navigation, or a resize request. Reference
+actions still require the latest snapshot, and every page input consumes all
+frame bindings before dispatch. An explicitly rejected stale input is not retried;
+the valid lease is retained so the operator can check the refreshed preview.
 Actions are not retried, and website effects cannot be undone by reverting chat.
+During takeover transitions the last preview stays visible; only genuinely stale
+frames are dimmed. Acquiring control and page input require a fresh frame before
+further input. Renewing the unchanged lease preserves a still-fresh frame, without
+flashing or interrupting typing. An unchanged reference inventory preserves selection.
 
 Closing/hiding the pane, switching sessions, logout and disconnect release control
 best effort; expiry is the fallback. Frames, fill drafts and leases remain in

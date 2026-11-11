@@ -410,8 +410,27 @@ and profile `get_state` permission:
 
 - `GET /v1/sessions/:id/browser` — status; `sessions:read` + `browser:read`.
 - `GET /v1/sessions/:id/browser/frame` — bounded JPEG/ref frame; same scopes.
-- `POST /v1/sessions/:id/browser/control` — acquire/renew/release/ref-based input;
+- `POST /v1/sessions/:id/browser/control` — acquire/renew/release/fresh-frame input;
   additionally `sessions:write` + `browser:control`, profile `prompt`, and Origin.
+
+With control held, click the preview and type or paste directly, including editing
+keys and Cmd/Ctrl+A. Coordinate clicks use `{action:"pointer",x,y}` within the
+acknowledged frame; focused text uses `{action:"type",text}`. Both retain the same
+lease and consumed-frame checks as reference input. The agent's `browser` tool
+also exposes `pointer`, `type`, `wheel`, and `resize`, using separate single-use
+agent screenshot IDs (60-second lifetime); human preview IDs/leases cannot be
+used by that tool. Human takeover blocks it and invalidates its earlier frames
+across the delegated family. The frontend buffers only unsent input in memory, bounds its size, and
+discards it after five seconds waiting for freshness or when control is lost.
+Wheel input uses `{action:"wheel",x,y,deltaX,deltaY}` with integer deltas bounded
+to ±2000; `{action:"resize",width,height}` changes the remote CSS viewport within
+320–2560 by 240–1600. Frame responses carry the actual width and height. Presets
+and custom sizes are available in Browser viewport; local frame resizing and
+expansion are independent display controls. Viewing polls at 1 fps; takeover
+polls at up to 4 fps. Renewal preserves fresh frames under the unchanged lease.
+Frames also project the current page `url` (HTTP(S) or `about:blank`, with embedded
+credentials removed). The URL bar supports Enter/Go, Back, Forward and Reload
+under the same control permissions and frame guards, and remains visible when expanded.
 
 Wildcard tokens retain full authority. Tokens are operator-wide capabilities,
 not per-user ownership. All responses are no-store; frames and leases never enter
