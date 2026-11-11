@@ -3,7 +3,7 @@
 let
   lib = import (nixpkgs + "/lib");
   evaluate =
-    platform: sandbox:
+    platform: overrides:
     let
       pkgs = import nixpkgs {
         system = if platform == "linux" then "x86_64-linux" else "aarch64-darwin";
@@ -26,8 +26,10 @@ let
         settings.piRpcApi = {
           enable = true;
           auth.tokens = [ { tokenEnv = "TEST_TOKEN"; } ];
-          inherit sandbox;
+          sandbox = overrides.sandbox or { };
+          autoDiscoverProfiles.sshAgentForwarding = overrides.discoveryForwarding or false;
           profiles.project = {
+            sshAgentForwarding = overrides.forwarding or false;
             cwd = "/workspace/project";
             sessionDir = "/home/agent/.pi/agent/sessions/--project--";
           };
@@ -83,10 +85,16 @@ let
     platform:
     let
       defaults = evaluate platform { };
-      off = evaluate platform { enable = false; };
+      off = evaluate platform { sandbox.enable = false; };
       custom = evaluate platform {
-        readOnlyPaths = [ "/opt/project-reference" ];
-        readWritePaths = [ "/var/cache/project" ];
+        forwarding = true;
+        discoveryForwarding = true;
+        sandbox = {
+          readOnlyPaths = [ "/opt/project-reference" ];
+          readWritePaths = [ "/var/cache/project" ];
+          sshAgentSocket = "/run/dedicated-agent.sock";
+          sshKnownHostsPath = "/var/lib/project-known-hosts";
+        };
       };
     in
     assert
@@ -94,8 +102,16 @@ let
         enable = true;
         readOnlyPaths = [ ];
         readWritePaths = [ ];
+        sshAgentSocket = null;
+        sshKnownHostsPath = "/home/agent/.ssh/known_hosts";
       };
+    assert defaults.profiles.project.sshAgentForwarding == false;
+    assert defaults.autoDiscoverProfiles.sshAgentForwarding == false;
     assert off.sandbox.enable == false;
+    assert custom.profiles.project.sshAgentForwarding == true;
+    assert custom.autoDiscoverProfiles.sshAgentForwarding == true;
+    assert custom.sandbox.sshAgentSocket == "/run/dedicated-agent.sock";
+    assert custom.sandbox.sshKnownHostsPath == "/var/lib/project-known-hosts";
     assert custom.sandbox.readOnlyPaths == [ "/opt/project-reference" ];
     assert custom.sandbox.readWritePaths == [ "/var/cache/project" ];
     assert custom.executable == "/bin/pi";

@@ -236,7 +236,7 @@ let
     profiles = lib.mapAttrs (
       _name: profile:
       {
-        inherit (profile) cwd args;
+        inherit (profile) cwd args sshAgentForwarding;
         envReferences = profile.env;
       }
       // lib.optionalAttrs (profile.sessionDir != null) { sessionDir = profile.sessionDir; }
@@ -253,6 +253,7 @@ let
         excludePrefixes
         maxProfiles
         args
+        sshAgentForwarding
         ;
       envReferences = cfg.settings.piRpcApi.autoDiscoverProfiles.env;
     }

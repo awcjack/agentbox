@@ -1650,6 +1650,22 @@ in
               separately launched interactive Pi processes or external MCP services.
             '';
           };
+          sshAgentSocket = lib.mkOption {
+            type = lib.types.nullOr (lib.types.strMatching "/.*");
+            default = null;
+            description = ''
+              Existing canonical Unix socket inside Agentbox for a dedicated SSH
+              agent. Only profiles opting into sshAgentForwarding can connect.
+              This does not start an agent, load keys, or mount a host socket into
+              the outer container. Forwarded clients can use every loaded identity
+              and can modify the agent's identity list; use a dedicated agent.
+            '';
+          };
+          sshKnownHostsPath = lib.mkOption {
+            type = lib.types.strMatching "/.*";
+            default = "/home/agent/.ssh/known_hosts";
+            description = "Existing canonical known_hosts file mounted read-only for SSH-enabled profiles. No private key files or containing directories are exposed.";
+          };
           readOnlyPaths = lib.mkOption {
             type = lib.types.listOf lib.types.str;
             default = [ ];
@@ -1760,6 +1776,11 @@ in
                   type = lib.types.strMatching "/.*";
                   default = "/workspace";
                 };
+                sshAgentForwarding = lib.mkOption {
+                  type = lib.types.bool;
+                  default = false;
+                  description = "Allow this profile to use sandbox.sshAgentSocket. Requires filesystem sandboxing and an existing socket and known_hosts file.";
+                };
                 sessionDir = lib.mkOption {
                   type = lib.types.nullOr (lib.types.strMatching "/.*");
                   default = "/home/agent/.pi/agent/sessions";
@@ -1801,6 +1822,11 @@ in
               files, and explicit extra mounts. Otherwise profiles provide soft
               selection only and share the container filesystem.
             '';
+          };
+          sshAgentForwarding = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = "Opt all discovered profiles into the configured SSH agent. Explicit profiles retain their own setting.";
           };
           root = lib.mkOption {
             type = lib.types.strMatching "/.*";
@@ -2218,6 +2244,22 @@ in
   # platforms because the platform config bodies already fold extraVolumes /
   # extraActivation into the container.
   config = lib.mkMerge [
+    (lib.mkIf (cfg.enable && cfg.settings.piRpcApi.enable) {
+      assertions = [
+        {
+          assertion =
+            !(
+              lib.any (profile: profile.sshAgentForwarding) (lib.attrValues cfg.settings.piRpcApi.profiles)
+              || (
+                cfg.settings.piRpcApi.autoDiscoverProfiles.enable
+                && cfg.settings.piRpcApi.autoDiscoverProfiles.sshAgentForwarding
+              )
+            )
+            || (cfg.settings.piRpcApi.sandbox.enable && cfg.settings.piRpcApi.sandbox.sshAgentSocket != null);
+          message = "Agentbox RPC SSH forwarding requires sandbox.enable and sandbox.sshAgentSocket";
+        }
+      ];
+    })
     (lib.mkIf (cfg.settings.piRpcApi.enable && !cfg.settings.piRpcApi.autoStart) {
       services.agentbox.onDemandScripts.pi-rpc = ''
         export HOME=/home/agent
