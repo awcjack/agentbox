@@ -214,6 +214,58 @@ test in the actual deployment environment before relying on the boundary.
 Disabling `sandbox.enable` explicitly restores the previous shared-filesystem
 behavior. Independently launched interactive Pi sessions are not covered.
 
+### Opt-in SSH-agent forwarding
+
+Forwarding is disabled by default and must be granted per profile. First arrange
+for a **dedicated** SSH agent's Unix socket to be reachable inside the outer
+Agentbox container. Then configure:
+
+```nix
+services.agentbox.settings.piRpcApi = {
+  sandbox = {
+    sshAgentSocket = "/run/dedicated-ssh-agent.sock";
+    sshKnownHostsPath = "/home/agent/.ssh/known_hosts";
+  };
+  profiles.my-project.sshAgentForwarding = true;
+  # Optional grant to every discovered project (explicit profiles keep their setting):
+  # autoDiscoverProfiles.sshAgentForwarding = true;
+};
+```
+
+For a dedicated host-side agent, an explicit outer-container volume can supply
+its socket; adapt the source path and permissions to the host:
+
+```nix
+services.agentbox.extraVolumes = [
+  "/run/user/1000/agentbox-ssh-agent.sock:/run/dedicated-ssh-agent.sock:ro"
+];
+```
+
+The forwarded socket must already exist, be canonical, and be accessible to the
+container's agent UID. No agent is started and no keys are loaded automatically;
+interactive-shell SSH agents do not automatically supply a stable socket to the
+RPC service. Platform-specific host-agent forwarding (including Docker Desktop)
+is separate from this per-profile grant.
+
+Opted-in sandboxes receive only the socket at `/run/pi-ssh-agent.sock`, with
+`SSH_AUTH_SOCK` set accordingly, plus a read-only `known_hosts` file at its normal
+agent-home location. Populate that file using trusted host keys via Agentbox's
+`settings.sshKnownHosts`, or configure another canonical trust file. Missing,
+non-socket, or symlinked agent paths and missing/invalid trust files fail closed.
+Neither source may be inside any profile workspace/session tree; the socket also
+cannot live in shared runtime mounts. Private key files and parent directories
+are not exposed. Opted-out profiles have `SSH_AUTH_SOCK` unset, regardless of
+profile environment mappings. Forwarding requires the filesystem sandbox.
+
+**A read-only socket mount does not make the SSH-agent protocol read-only.**
+Clients can authenticate/sign with all loaded identities and can list, add, or
+remove identities. A malicious project can use the agent to access other
+repositories/servers or disrupt other projects sharing it. Use a dedicated,
+least-privilege agent, not an unrestricted personal agent. Host verification is
+not disabled, and no SSH configuration or private keys are copied. If the agent
+replaces its socket, restart affected RPC sessions (and recreate an outer file
+bind mount if necessary); existing mounts pin the old socket inode.
+
 For standalone runtime JSON, opt in with `piRpcApi.sandbox.enable = true`;
 `executable` selects an absolute immutable Bubblewrap path, defaulting to the
 packaged `PI_RPC_SANDBOX_EXECUTABLE`. The package also supplies immutable bootstrap
