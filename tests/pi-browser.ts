@@ -10,7 +10,7 @@ import { once } from "node:events"
 import { Duplex } from "node:stream"
 import { setTimeout as delay } from "node:timers/promises"
 import { createBrowserClient } from "../extensions/browser-channel.mjs"
-import { BrowserSession, browserArgs, parseBrowserConfig, createPiBrowserExtension, runBrowser, withBrowserLock } from "../extensions/pi-browser.ts"
+import { BrowserSession, browserArgs, humanBrowserCommands, parseBrowserConfig, createPiBrowserExtension, runBrowser, withBrowserLock } from "../extensions/pi-browser.ts"
 import type { BrowserConfig, BrowserRunner, RunOptions, BrowserLock } from "../extensions/pi-browser.ts"
 import { snapshotRef, runFixtureBrowser } from "./browser-smoke-helpers.ts"
 
@@ -116,6 +116,8 @@ function fakeBrowser() {
     }
     if (action === "screenshot") { await fake.screenshot(sub); return ok({ path: sub }) }
     if (action === "snapshot") return ok({ snapshot: '- button "Submit" [ref=e1]\n- textbox "Name" [ref=e2]', refs: { e1: { role: "button", name: "Submit" }, e2: { role: "textbox", name: "Name" } } })
+    if (action === "get" && sub === "url") return ok({ url: "https://example.test/start" })
+    if (action === "batch") return JSON.stringify(JSON.parse(options.input!).map((_: unknown, index: number) => ({ index, success: true, data: {} })))
     return ok({ value: "page output" })
   }
   return fake
@@ -486,6 +488,106 @@ test("delegation rejects non-private, mismatched and symlinked registry roots", 
   await assert.rejects(child().initialize(join(parent.root, "..", "other")), /Invalid delegated/)
 })
 
+function agentFrame(result: any) {
+  const frame = result.details.frame
+  assert(frame?.frameId)
+  assert(result.content[0].text.includes(frame.frameId), "model-visible text must carry the binding, not just UI details")
+  assert.equal(result.content[1].type, "image")
+  return frame
+}
+
+test("agent visual tools return fresh screenshot bindings and send literal input only through JSON stdin", async t => {
+  const { session, fake } = await setup(t)
+  const phone = agentFrame(await session.execute({ action: "resize", width: 390, height: 844 }))
+  assert.equal(phone.width, 390); assert.equal(phone.height, 844)
+  assert.equal(phone.coordinateSpace, "viewport-css-pixels"); assert.equal(phone.expiresInMs, 60000)
+  const clicked = agentFrame(await session.execute({ action: "pointer", frameId: phone.frameId, x: 389, y: 843 }))
+  const pointer = fake.calls.findLast(c => c.command[0] === "batch")!
+  assert.deepEqual(JSON.parse(pointer.options.input!), [["mouse", "move", "389", "843"], ["mouse", "down", "left"], ["mouse", "up", "left"]])
+  const literal = "--config /private '世界'\n"
+  const typed = agentFrame(await session.execute({ action: "type", frameId: clicked.frameId, text: literal }))
+  const call = fake.calls.findLast(c => c.command[0] === "batch")!
+  assert.deepEqual(call.command, ["batch", "--bail", "--omit-command"])
+  assert.deepEqual(JSON.parse(call.options.input!), [["keyboard", "inserttext", literal]])
+  assert(!JSON.stringify(call.args).includes("/private"))
+  const scrolled = agentFrame(await session.execute({ action: "wheel", frameId: typed.frameId, x: 100, y: 300, deltaX: -200, deltaY: 400 }))
+  assert.deepEqual(JSON.parse(fake.calls.findLast(c => c.command[0] === "batch")!.options.input!), [["mouse", "move", "100", "300"], ["mouse", "wheel", "400", "-200"]])
+  assert.equal(new Set([phone, clicked, typed, scrolled].map(f => f.frameId)).size, 4)
+  const policy = JSON.parse(await fs.readFile(join(session.root, "policy.json"), "utf8"))
+  for (const action of ["mousemove", "mousedown", "mouseup", "keyboard", "wheel", "viewport"]) assert(policy.allow.includes(action))
+})
+
+test("agent visual input rejects stale, foreign, consumed and out-of-viewport frames before CLI without poisoning the session", async t => {
+  let now = 100000
+  const { session, fake } = await setup(t, {}, fakeBrowser(), "visual-parent", undefined, () => now)
+  const initial = agentFrame(await session.execute({ action: "resize", width: 390, height: 844 }))
+  const before = fake.calls.length
+  for (const request of [
+    { action: "pointer", frameId: initial.frameId, x: 390, y: 10 },
+    { action: "wheel", frameId: initial.frameId, x: 1, y: 844, deltaX: 1, deltaY: 0 },
+    { action: "type", frameId: "00000000-0000-4000-8000-000000000000", text: "foreign" },
+  ]) await assert.rejects(session.execute(request as any), { code: "browser_frame_stale" })
+  assert.equal(fake.calls.length, before)
+  now += 60000
+  await assert.rejects(session.execute({ action: "pointer", frameId: initial.frameId, x: 0, y: 0 }), { code: "browser_frame_stale" })
+  assert.equal(fake.calls.length, before)
+  const fresh = agentFrame(await session.execute({ action: "screenshot" }))
+  now += 59999
+  await session.execute({ action: "type", frameId: fresh.frameId, text: "once" })
+  const after = fake.calls.length
+  await assert.rejects(session.execute({ action: "type", frameId: fresh.frameId, text: "replay" }), { code: "browser_frame_stale" })
+  assert.equal(fake.calls.length, after)
+  const updated = agentFrame(await session.execute({ action: "screenshot" }))
+  await session.execute({ action: "press", key: "Enter" })
+  await assert.rejects(session.execute({ action: "pointer", frameId: updated.frameId, x: 0, y: 0 }), { code: "browser_frame_stale" })
+  assert.equal(session.uncertain, false)
+})
+
+test("human takeover blocks visual model input and invalidates parent and delegated screenshots even after release", async t => {
+  const { session: parent, fake } = await readyControl(t, { delegation: "tabs" })
+  const { session: child } = await setup(t, { delegation: "tabs" }, fake, "visual-child", parent.root)
+  const parentFrame = agentFrame(await parent.execute({ action: "screenshot" }))
+  const childFrame = agentFrame(await child.execute({ action: "screenshot" }))
+  const lease = await control(parent, "acquire", { browserSessionId: parent.session })
+  const before = fake.calls.length
+  for (const [session, frame] of [[parent, parentFrame], [child, childFrame]] as const) {
+    await assert.rejects(session.execute({ action: "pointer", frameId: frame.frameId, x: 0, y: 0 }), { code: "browser_control_held" })
+    await assert.rejects(session.execute({ action: "resize", width: 320, height: 240 }), { code: "browser_control_held" })
+  }
+  assert.equal(fake.calls.length, before)
+  await control(parent, "release", { browserSessionId: parent.session, leaseId: lease.leaseId })
+  for (const [session, frame] of [[parent, parentFrame], [child, childFrame]] as const) {
+    await assert.rejects(session.execute({ action: "type", frameId: frame.frameId, text: "stale" }), { code: "browser_frame_stale" })
+    assert.equal(session.uncertain, false)
+    const fresh = agentFrame(await session.execute({ action: "screenshot" }))
+    await session.execute({ action: "pointer", frameId: fresh.frameId, x: 0, y: 0 })
+  }
+})
+
+test("partial visual model input consumes its binding and quarantines uncertain native state", async t => {
+  const { session, fake } = await setup(t)
+  const frame = agentFrame(await session.execute({ action: "screenshot" }))
+  fake.hook = async call => call.command[0] === "batch" ? JSON.stringify([{ success: true }, { success: false }]) : undefined
+  await assert.rejects(session.execute({ action: "pointer", frameId: frame.frameId, x: 1, y: 1 }), /input sequence/)
+  assert.equal(session.uncertain, true)
+  const before = fake.calls.length
+  await assert.rejects(session.execute({ action: "pointer", frameId: frame.frameId, x: 1, y: 1 }), { code: "browser_frame_stale" })
+  assert.equal(fake.calls.length, before)
+  await assert.rejects(session.execute({ action: "screenshot" }), /uncertain|interrupted/)
+})
+
+test("agent visual arguments reject extra fields, unsafe text and unsupported dimensions before effects", () => {
+  const frameId = "00000000-0000-4000-8000-000000000000"
+  for (const request of [
+    { action: "pointer", x: 0, y: 0 }, { action: "pointer", frameId, x: -1, y: 0 },
+    { action: "pointer", frameId, x: 0.5, y: 0 }, { action: "pointer", frameId, x: 0, y: 0, selector: "#save" },
+    { action: "type", frameId, text: "" }, { action: "type", frameId, text: "a\0" }, { action: "type", frameId, text: "a".repeat(10001) },
+    { action: "wheel", frameId, x: 0, y: 0, deltaX: 0, deltaY: 0 }, { action: "wheel", frameId, x: 0, y: 0, deltaX: 2001, deltaY: 1 },
+    { action: "resize", width: 319, height: 240 }, { action: "resize", width: 2560, height: 1601 },
+    { action: "resize", width: 320, height: 240, frameId },
+  ]) assert.throws(() => browserArgs(request as any))
+})
+
 test("screenshots are bounded native JPEG images, never exposed paths, and temporary files are deleted", async t => {
   const { session, fake } = await setup(t)
   const result = await session.execute({ action: "screenshot" })
@@ -659,6 +761,7 @@ test("default runner captures stdout but never reflects failing argv/stderr and 
   t.after(() => fs.rm(cwd, { recursive: true, force: true }))
   const options = { cwd, env: {}, timeout: 3000 }
   assert.equal(await runBrowser(process.execPath, ["-e", "process.stdout.write('ok')"], options), "ok")
+  assert.equal(await runBrowser(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], { ...options, input: "--config literal '世界'\n" }), "--config literal '世界'\n")
   const marker = "test-sensitive-fill-value"
   await assert.rejects(runBrowser(process.execPath, ["-e", `process.stderr.write('${marker}');process.exit(1)`], options), e => {
     assert(!String(e).includes(marker)); assert.match(String(e), /failed or timed out/); return true
@@ -867,6 +970,26 @@ test("persisted operation journal survives the originating process and fails clo
   await sibling.execute({ action: "snapshot" })
 })
 
+test("human coordinate clicks and literal typing retain independent lease/frame guards", async t => {
+  const { session, fake } = await readyControl(t)
+  const lease = await control(session, "acquire", { browserSessionId: session.session })
+  for (const request of [{ action: "pointer", x: 320, y: 180 }, { action: "type", text: "--config /private '世界'\n" }]) {
+    const frame = await control(session, "frame")
+    assert.equal((await control(session, "input", input(session, lease, frame, request))).accepted, true)
+    const call = fake.calls.at(-1)!
+    assert.deepEqual(call.command, ["batch", "--bail", "--omit-command"])
+    assert.deepEqual(JSON.parse(call.options.input!), humanBrowserCommands(request))
+    assert(!call.args.some(arg => arg.includes("/private")))
+    await assert.rejects(control(session, "input", input(session, lease, frame, request)), { code: "browser_frame_stale" })
+    assert.throws(() => browserArgs(request as any), /frameId/)
+  }
+  for (const request of [{ action: "pointer", x: -1, y: 0 }, { action: "pointer", x: 2560, y: 0 }, { action: "pointer", x: 0, y: 1600 }, { action: "pointer", x: 0.1, y: 0 }, { action: "pointer", x: 0, y: 0, script: "1" }, { action: "type", text: "" }, { action: "type", text: "x\0" }, { action: "type", text: "x".repeat(10001) }]) assert.throws(() => humanBrowserCommands(request))
+  fake.hook = async call => call.command[0] === "batch" ? JSON.stringify([{ success: true }, { success: false }]) : undefined
+  const frame = await control(session, "frame")
+  await assert.rejects(control(session, "input", input(session, lease, frame, { action: "pointer", x: 0, y: 0 })), /input sequence/)
+  assert.equal(session.uncertain, true, "a partial pointer operation must be quarantined")
+})
+
 test("human input requires fresh frame refs, consumes all frames, and rejects raw or unsupported actions", async t => {
   let now = 100000
   const { session, fake } = await readyControl(t, {}, () => now)
@@ -901,6 +1024,58 @@ test("human input requires fresh frame refs, consumes all frames, and rejects ra
   assert.equal(session.uncertain, false)
 })
 
+test("human wheel and resolution changes are bounded and pointer coordinates follow the acknowledged viewport", async t => {
+  const { session, fake } = await readyControl(t)
+  const lease = await control(session, "acquire", { browserSessionId: session.session })
+  const original = await control(session, "frame")
+  assert.equal((await control(session, "input", input(session, lease, original, { action: "resize", width: 390, height: 844 }))).accepted, true)
+  assert.deepEqual(fake.calls.at(-1)?.command, ["set", "viewport", "390", "844"])
+  await assert.rejects(control(session, "input", input(session, lease, original)), { code: "browser_frame_stale" })
+  const phone = await control(session, "frame")
+  assert.equal(phone.width, 390); assert.equal(phone.height, 844)
+  await assert.rejects(control(session, "input", input(session, lease, phone, { action: "pointer", x: 390, y: 10 })), { code: "browser_frame_stale" })
+  const wheel = { action: "wheel", x: 120, y: 800, deltaX: -15, deltaY: 300 }
+  assert.equal((await control(session, "input", input(session, lease, phone, wheel))).accepted, true)
+  assert.deepEqual(JSON.parse(fake.calls.at(-1)!.options.input!), [["mouse", "move", "120", "800"], ["mouse", "wheel", "300", "-15"]])
+  const fresh = await control(session, "frame")
+  await control(session, "input", input(session, lease, fresh, { action: "resize", width: 1920, height: 1080 }))
+  const desktop = await control(session, "frame")
+  assert.equal(desktop.width, 1920); assert.equal(desktop.height, 1080)
+  assert.throws(() => browserArgs(wheel as any), /frameId/)
+  assert.deepEqual(browserArgs({ action: "resize", width: 390, height: 844 }), ["set", "viewport", "390", "844"])
+  for (const request of [{ action: "resize", width: 319, height: 844 }, { action: "resize", width: 2561, height: 844 }, { action: "resize", width: 390, height: 1601 }, { action: "resize", width: 390, height: 239 }, { ...wheel, deltaY: 2001 }, { ...wheel, deltaX: 0, deltaY: 0 }, { ...wheel, deltaX: 0.5 }]) assert.throws(() => humanBrowserCommands(request))
+})
+
+test("in-flight direct input survives a new preview but references, expiry and consumption still fail closed", async t => {
+  let now = 100000
+  const { session } = await readyControl(t, {}, () => now)
+  const lease = await control(session, "acquire", { browserSessionId: session.session })
+  const shown = await control(session, "frame"), newer = await control(session, "frame")
+  await assert.rejects(control(session, "input", input(session, lease, shown)), { code: "browser_frame_stale" })
+  assert.equal((await control(session, "input", input(session, lease, shown, { action: "pointer", x: 100, y: 100 }))).accepted, true)
+  await assert.rejects(control(session, "input", input(session, lease, newer, { action: "type", text: "cannot replay" })), { code: "browser_frame_stale" })
+  const beforeResize = await control(session, "frame")
+  await control(session, "frame")
+  assert.equal((await control(session, "input", input(session, lease, beforeResize, { action: "resize", width: 390, height: 844 }))).accepted, true)
+  const beforeNavigation = await control(session, "frame")
+  await control(session, "frame")
+  assert.equal((await control(session, "input", input(session, lease, beforeNavigation, { action: "open", url: "https://example.test/next" }))).accepted, true)
+  const expired = await control(session, "frame")
+  now += 5000
+  await assert.rejects(control(session, "input", input(session, lease, expired, { action: "wheel", x: 100, y: 100, deltaX: 0, deltaY: 100 })), { code: "browser_frame_stale" })
+  const bounded = await control(session, "frame")
+  for (let n = 0; n < 4; n++) await control(session, "frame")
+  await assert.rejects(control(session, "input", input(session, lease, bounded, { action: "pointer", x: 100, y: 100 })), { code: "browser_frame_stale" })
+})
+
+test("frame location is current and strips embedded credentials and internal browser URLs", async t => {
+  const { session, fake } = await readyControl(t)
+  for (const [raw, expected] of [["https://user:private@example.test/page?q=hello", "https://example.test/page?q=hello"], ["about:blank", "about:blank"], ["ws://localhost/private-cdp", null], ["file:///private", null], ["https://example.test/" + "x".repeat(4096), null]] as const) {
+    fake.hook = async call => call.command[0] === "get" && call.command[1] === "url" ? ok({ url: raw }) : undefined
+    assert.equal((await control(session, "frame")).url, expected)
+  }
+})
+
 test("human navigation, key and scroll input uses only the validated structured command surface", async t => {
   const { session, fake } = await readyControl(t)
   const lease = await control(session, "acquire", { browserSessionId: session.session })
@@ -917,7 +1092,7 @@ test("human navigation, key and scroll input uses only the validated structured 
   }
 })
 
-test("each new snapshot invalidates older frames and renewal/release invalidate previous frames", async t => {
+test("snapshots invalidate older references; release consumes frames and renewal preserves freshness", async t => {
   const { session } = await readyControl(t)
   const lease = await control(session, "acquire", { browserSessionId: session.session })
   const frames = []
@@ -928,7 +1103,7 @@ test("each new snapshot invalidates older frames and renewal/release invalidate 
   assert.equal((await control(session, "input", input(session, lease, frames.at(-1)))).accepted, true)
   const preRenew = await control(session, "frame")
   await control(session, "renew", binding(session, lease))
-  await assert.rejects(control(session, "input", input(session, lease, preRenew)), { code: "browser_frame_stale" })
+  assert.equal((await control(session, "input", input(session, lease, preRenew))).accepted, true)
   const preRelease = await control(session, "frame")
   await control(session, "release", binding(session, lease))
   await assert.rejects(control(session, "input", input(session, lease, preRelease)), { code: "browser_lease_invalid" })

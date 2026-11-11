@@ -34,7 +34,8 @@ try {
   // Bare open is the internal launch-only operation, including with containment.
   // Verify the pinned CLI accepts it and reaches launch, not a URL/policy error.
   const startup = [["open"], ["--allowed-domains", "127.0.0.1", "open"]]
-  for (const args of [...startup, ...requests.map(p => browserArgs(p as any)), ["screenshot", join(session.root, "tmp", "test.jpg")], ["set", "viewport", "1280", "720"], ["tab", "list"]]) {
+  const visual = [["mouse", "move", "100", "100"], ["mouse", "down", "left"], ["mouse", "up", "left"], ["mouse", "wheel", "300", "100"], ["keyboard", "inserttext", "literal text"]]
+  for (const args of [...startup, ...requests.map(p => browserArgs(p as any)), ...visual, ["screenshot", join(session.root, "tmp", "test.jpg")], browserArgs({ action: "resize", width: 390, height: 844 }), ["tab", "list"]]) {
     const result = await invoke(args)
     const response = JSON.parse(result.stdout)
     assert.equal(response.success, false, `test Chromium deliberately missing: ${args[0]}`)
