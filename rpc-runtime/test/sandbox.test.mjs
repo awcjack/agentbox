@@ -322,6 +322,13 @@ case "$identity" in 'Sandbox Test <sandbox@example.invalid> '*) ;; *) exit 1 ;; 
   assert.equal(inherited.status, 0, inherited.stderr || inherited.error?.message);
   assert.equal(inherited.output[3], "private-bridge");
   assert.equal(inherited.output[4], "");
+  input.postRpcFd = 5;
+  input.args = ["-peu", "-c", "printf messaging-bridge >&5; test ! -e /proc/self/fd/4; test ! -e /proc/self/fd/6"];
+  const messaging = spawnSync(...launchTuple(input), { encoding: "utf8", stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe", "pipe"] });
+  assert.equal(messaging.status, 0, messaging.stderr || messaging.error?.message);
+  assert.equal(messaging.output[5], "messaging-bridge");
+  assert.equal(messaging.output[4], "");
+  assert.equal(messaging.output[6], "");
   assert.equal(readFileSync(join(input.profile.cwd, "written"), "utf8"), "project");
   assert.equal(readFileSync(join(input.profile.sessionDir, "written"), "utf8"), "session");
   assert.equal(readFileSync(join(readonly, "marker"), "utf8"), "unchanged");
@@ -350,7 +357,7 @@ function launchTuple(input) {
   return [launch.executable, [...args, ...launch.args.slice(split)]];
 }
 
-enabledTest("keeps only fd3 for the private browser bridge", (t) => {
+enabledTest("keeps only explicit fd3/browser and fd5/messaging capabilities", (t) => {
   const input = fixture(t);
   const without = buildSandboxLaunch(input).args;
   assert.equal(without.includes("--preserve-fds"), false);
@@ -359,4 +366,9 @@ enabledTest("keeps only fd3 for the private browser bridge", (t) => {
   assert.equal(args.includes("--preserve-fds"), false);
   assert.equal(args[args.indexOf("pi-rpc-sandbox-bootstrap") + 4], "1");
   for (const fd of [0, 1, 2, 4, "3", [3], null]) assert.throws(() => buildSandboxLaunch({ ...input, browserRpcFd: fd }), /must be 3/);
+  const post = buildSandboxLaunch({ ...input, postRpcFd: 5 }).args;
+  assert.equal(post[post.indexOf("pi-rpc-sandbox-bootstrap") + 6], "1");
+  assert.equal(without[without.indexOf("pi-rpc-sandbox-bootstrap") + 6], "0");
+  for (const fd of [0, 1, 2, 3, 4, 6, "5", [5], null]) assert.throws(() => buildSandboxLaunch({ ...input, postRpcFd: fd }), /must be 5/);
+  assert.throws(() => buildSandboxLaunch({ ...input, sandbox: { enable: false }, postRpcFd: 5 }), /requires filesystem isolation/);
 });

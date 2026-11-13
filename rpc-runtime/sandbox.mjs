@@ -42,8 +42,8 @@ const configNames = ["auth.json", "settings.json", "models.json"];
 // OAuth refresh/settings changes and lock files are writable but LOST on exit;
 // providers rotating refresh tokens may require re-authentication afterwards.
 // Bubblewrap keeps inherited descriptors; it has no --preserve-fds. Close extras
-// inside this trusted bootstrap so only stdio (and optional bridge fd 3) remain.
-const bootstrap = `seed=$1; agent=$2; tools=$3; keep_bridge=$4; nix_store=$5; shift 5
+// inside this trusted bootstrap so only stdio and explicit broker bridges remain.
+const bootstrap = `seed=$1; agent=$2; tools=$3; keep_bridge=$4; nix_store=$5; keep_post=$6; shift 6
 export PI_CODING_AGENT_DIR="$agent"
 umask 077
 if [ -n "$nix_store" ]; then
@@ -66,6 +66,7 @@ for fd in /proc/self/fd/*; do
   case "$n" in
     0|1|2) ;;
     3) [ "$keep_bridge" = 1 ] || eval "exec $n>&-" 2>/dev/null || : ;;
+    5) [ "$keep_post" = 1 ] || eval "exec $n>&-" 2>/dev/null || : ;;
     [0-9]*) eval "exec $n>&-" 2>/dev/null || : ;;
   esac
 done
@@ -113,9 +114,11 @@ function restricted(path, label) {
  * As with all pathname-based mounts, trusted host administrators must not rename
  * or replace these directories between validation and exec (TOCTOU).
  */
-export function buildSandboxLaunch({ executable, args, profile, sandbox, browserRpcFd }, { nixStoreMounts = nixBuildStoreMounts } = {}) {
+export function buildSandboxLaunch({ executable, args, profile, sandbox, browserRpcFd, postRpcFd }, { nixStoreMounts = nixBuildStoreMounts } = {}) {
   // Never accept arbitrary descriptor ranges: fd 3 is the sole private bridge.
   if (browserRpcFd !== undefined && browserRpcFd !== 3) throw new Error("sandbox browserRpcFd must be 3");
+  if (postRpcFd !== undefined && postRpcFd !== 5) throw new Error("sandbox postRpcFd must be 5");
+  if (postRpcFd === 5 && !sandbox?.enable) throw new Error("sandbox messaging bridge requires filesystem isolation");
   if (profile?.sshAgentForwarding !== undefined && typeof profile.sshAgentForwarding !== "boolean") {
     throw new Error("sandbox profile.sshAgentForwarding must be a boolean");
   }
@@ -254,7 +257,7 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
   // this trusted bootstrap, even if configured child environment contains them.
   launchArgs.push(
     "--chdir", cwd, "--", shell, "-peu", "-c", bootstrap, "pi-rpc-sandbox-bootstrap",
-    seedDir, agentHome, tools, browserRpcFd === 3 ? "1" : "0", nixStore, executable, ...args,
+    seedDir, agentHome, tools, browserRpcFd === 3 ? "1" : "0", nixStore, postRpcFd === 5 ? "1" : "0", executable, ...args,
   );
   if (sandbox.nixBuilds) {
     // Image closures can exceed execve's argv limit. Feed NUL-delimited argv

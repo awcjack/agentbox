@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
 import { buildSandboxLaunch } from "./sandbox.mjs";
 import { createBrowserClient } from "./browser-channel.mjs";
+import { createPostBroker } from "./post-broker.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
 import { messageTitle } from "./web/session-title.mjs";
 
@@ -707,7 +708,7 @@ function safeWrite(stream, object) {
 }
 
 class Session extends EventEmitter {
-  constructor({ id, profileName, profile, resume, resumePath, name, folder, config, spawnProcess, signalProcessGroup, now, uuid }) {
+  constructor({ id, profileName, profile, resume, resumePath, name, folder, config, postBroker, spawnProcess, signalProcessGroup, now, uuid }) {
     super();
     this.id = id;
     this.profileName = profileName;
@@ -752,16 +753,25 @@ class Session extends EventEmitter {
     args.push(...profile.args);
     if (config.sandbox.enable) mkdirSync(profile.sessionDir, { recursive: true, mode: 0o700 });
     const browserRpcFd = config.browserEnabled ? 3 : undefined;
-    const launch = buildSandboxLaunch({ sandbox: config.sandbox, profile, executable: config.executable, args, browserRpcFd });
+    const postRpcFd = postBroker ? 5 : undefined;
+    // Child RPC output is untrusted: get_state may update display state, but it
+    // must never change the identity authorized for the messaging channel.
+    const postSessionId = resume ?? id;
+    const launch = buildSandboxLaunch({ sandbox: config.sandbox, profile, executable: config.executable, args, browserRpcFd, postRpcFd });
     const env = { ...SAFE_CHILD_ENV, ...profile.env };
     delete env.PI_BROWSER_RPC_FD;
+    delete env.PI_POST_BROKER_FD;
+    delete env.PI_POST_BROKER_SOCKET;
     if (browserRpcFd === 3) env.PI_BROWSER_RPC_FD = "3";
+    if (postRpcFd === 5) env.PI_POST_BROKER_FD = "5";
     this.child = spawnProcess(launch.executable, launch.args, {
       cwd: profile.cwd,
       env,
-      stdio: launch.argumentData
-        ? ["pipe", "pipe", "pipe", browserRpcFd === 3 ? "pipe" : "ignore", "pipe"]
-        : browserRpcFd === 3 ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+      stdio: postRpcFd === 5
+        ? ["pipe", "pipe", "pipe", browserRpcFd === 3 ? "pipe" : "ignore", launch.argumentData ? "pipe" : "ignore", "pipe"]
+        : launch.argumentData
+          ? ["pipe", "pipe", "pipe", browserRpcFd === 3 ? "pipe" : "ignore", "pipe"]
+          : browserRpcFd === 3 ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,
     });
@@ -769,6 +779,18 @@ class Session extends EventEmitter {
     this.browserChannel = browserRpcFd === 3 && this.child.stdio?.[3]
       ? createBrowserClient(this.child.stdio[3]) : null;
     this.browserPending = 0;
+    if (postRpcFd === 5) {
+      if (!this.child.stdio?.[5]) {
+        this.child.kill("SIGKILL");
+        throw new Error("Pi messaging broker channel is unavailable");
+      }
+      this.detachPost = postBroker.attach(this.child.stdio[5], () => ({
+        sessionId: postSessionId, rootSessionId: postSessionId,
+        cwd: this.profile.cwd, sessionDir: this.profile.sessionDir,
+        name: this.previewName ?? this.name ?? undefined,
+        live: this.exit === null && !this.stopping && this.status !== "failed",
+      }));
+    }
 
     this.child.stderr.on("data", (chunk) => {
       this.lastActivityAt = this.now();
@@ -966,6 +988,7 @@ class Session extends EventEmitter {
   protocolFailure(error) {
     if (this.status === "exited") return;
     this.browserChannel?.close();
+    this.detachPost?.();
     this.status = "failed";
     this.publish({ type: "supervisor", event: "protocol_error", error: error.message });
     this.signal("SIGKILL");
@@ -984,6 +1007,7 @@ class Session extends EventEmitter {
   onExit(code, signal, error) {
     if (this.exit) return;
     this.browserChannel?.close();
+    this.detachPost?.();
     this.status = this.status === "failed" || error || (code !== 0 && code !== null) ? "failed" : "exited";
     this.exit = { code, signal, error: error?.message ?? null };
     this.publish({ type: "supervisor", event: this.conversationReplacing ? "conversation_source_exited" : "child_exit", ...this.exit });
@@ -1320,6 +1344,10 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   const spawnProcess = dependencies.spawn;
   if (typeof spawnProcess !== "function") throw new Error("createRuntime requires dependencies.spawn");
   const now = dependencies.now ?? Date.now;
+  const postBroker = sandbox.enable ? createPostBroker({
+    root: dependencies.postRoot ?? process.env.PI_POST_DIR ?? join(homedir(), ".pi", "agent", "post"),
+    profiles: config.profiles, now,
+  }) : null;
   const uuid = dependencies.randomUUID ?? randomUUID;
   const signalProcessGroup = dependencies.signalProcessGroup ?? ((pid, signal) => process.kill(-pid, signal));
   const sessions = new Map();
@@ -1604,7 +1632,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
             }
           }
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
-          session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, folder, config, spawnProcess, signalProcessGroup, now, uuid });
+          session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, folder, config, postBroker, spawnProcess, signalProcessGroup, now, uuid });
           sessions.set(id, session);
         } catch (error) {
           if (error instanceof HttpError) throw error;
@@ -1767,7 +1795,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
           try {
             child = new Session({ id: body.action === "fork" ? uuid() : session.id, profileName: session.profileName, profile: session.profile,
-              resume: nativeId, resumePath: path, config, spawnProcess, signalProcessGroup, now, uuid });
+              resume: nativeId, resumePath: path, config, postBroker, spawnProcess, signalProcessGroup, now, uuid });
           } catch { throw new HttpError(502, "spawn_failed", "failed to start conversation child; source is unchanged"); }
           child.conversationLocked = true;
           preparing.add(child);
@@ -2010,6 +2038,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         : Promise.resolve();
       await Promise.allSettled([...sessions.values(), ...preparing].map((session) => session.stop()));
       await closeServer;
+      postBroker?.close();
       clearTimeout(forceClose);
       sessions.clear();
     })();

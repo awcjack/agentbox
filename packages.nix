@@ -290,6 +290,9 @@ in
         cp ${./rpc-runtime/sandbox.mjs} $out/sandbox.mjs
         cp ${./rpc-runtime/nix-builds.mjs} $out/nix-builds.mjs
         cp ${./rpc-runtime/browser-channel.mjs} $out/browser-channel.mjs
+        cp ${./rpc-runtime/post-broker.mjs} $out/post-broker.mjs
+        cp ${./rpc-runtime/post-client.mjs} $out/post-client.mjs
+        cp ${./rpc-runtime/post-cli.mjs} $out/post-cli.mjs
         cp ${./rpc-runtime/browser-config.test.mjs} $out/browser-config.test.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs
         cp ${./rpc-runtime/folders.mjs} $out/folders.mjs

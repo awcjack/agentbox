@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex, PassThrough } from "node:stream";
 import { serveBrowserChannel } from "../browser-channel.mjs";
+import { PostClient } from "../post-client.mjs";
 import test from "node:test";
 import { createRuntime, internals, normalizeConfig } from "../runtime.mjs";
 
@@ -241,15 +242,19 @@ async function fixture(t, customConfig = config(), options = {}) {
   const children = [];
   const spawns = [];
   const spawn = (file, args, spawnOptions) => {
-    const child = new FakeChild(spawnOptions.stdio.length === 4);
+    const child = new FakeChild(spawnOptions.stdio[3] === "pipe");
+    if (spawnOptions.stdio[4] === "pipe") child.stdio[4] = new PassThrough();
+    if (spawnOptions.stdio[5] === "pipe") [child.stdio[5], child.postPeer] = browserDuplexPair();
     if (child.browserPeer && options.browserHandler) serveBrowserChannel(child.browserPeer, options.browserHandler);
     children.push(child);
     spawns.push({ file, args, options: spawnOptions });
     options.onSpawn?.(child, args);
     return child;
   };
+  const postRoot = customConfig.piRpcApi.sandbox?.enable ? await mkdtemp(join(tmpdir(), "pi-post-runtime-")) : undefined;
   const runtime = createRuntime(customConfig, {
     spawn,
+    postRoot,
     now: options.now,
     randomUUID: options.randomUUID,
     realpath: options.realpath ?? (() => "/nix/store/00000000000000000000000000000000-pi/bin/pi"),
@@ -257,9 +262,51 @@ async function fixture(t, customConfig = config(), options = {}) {
   });
   const address = await runtime.listen();
   const baseUrl = `http://127.0.0.1:${address.port}`;
-  t.after(() => runtime.close());
-  return { runtime, children, spawns, baseUrl };
+  t.after(async () => {
+    await runtime.close();
+    if (postRoot) await rm(postRoot, { recursive: true, force: true });
+  });
+  return { runtime, children, spawns, baseUrl, postRoot };
 }
+
+test("sandboxed RPC sessions communicate through the supervisor without sharing registry or histories", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-post-separated-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const profiles = {};
+  for (const name of ["alpha", "beta"]) {
+    profiles[name] = { cwd: join(root, name), sessionDir: join(root, `sessions-${name}`) };
+    await mkdir(profiles[name].cwd);
+  }
+  const f = await fixture(t, config({ profiles, sandbox: { enable: true, executable: "/bin/bwrap" } }), { realpath: sandboxRealpath });
+  const alphaId = await createSession(f.baseUrl, { profile: "alpha", name: "alpha" });
+  const betaId = await createSession(f.baseUrl, { profile: "beta", name: "dev brian" });
+  const a = new PostClient(f.children[0].postPeer), b = new PostClient(f.children[1].postPeer);
+  t.after(() => { a.close(); b.close(); });
+  await a.request("register", { sessionId: alphaId });
+  await b.request("register", { sessionId: betaId });
+  const before = await a.request("list");
+  assert.ok(before.sessions.some((entry) => entry.name === "dev brian" && entry.live));
+  assert.equal((await a.request("resolve", { to: "dev brian" })).sameMain, false);
+  // Forged child stdout cannot rebind its messaging principal to another root.
+  f.children[0].output({ type: "response", command: "get_state", success: true, data: { sessionId: betaId } });
+  await new Promise(resolve => setImmediate(resolve));
+  await assert.rejects(a.request("register", { sessionId: betaId }), /identity/);
+  assert.equal((await a.request("list")).selfAddress, before.selfAddress);
+  await a.request("send", { to: "dev brian", body: "Fixture coordination across isolated workspaces" });
+  const inbox = await b.request("poll");
+  assert.equal(inbox.messages[0].body, "Fixture coordination across isolated workspaces");
+  await b.request("ack", { id: inbox.messages[0].id });
+  assert.equal((await b.request("poll")).messages.length, 0);
+  for (const spawn of f.spawns) {
+    assert.equal(spawn.options.env.PI_POST_BROKER_FD, "5");
+    assert.equal(spawn.options.env.PI_POST_BROKER_SOCKET, undefined);
+    assert.equal(spawn.options.stdio[5], "pipe");
+    assert.ok(!spawn.args.includes(f.postRoot));
+  }
+  await writeFile(join(profiles.beta.sessionDir, `.archived-${betaId}`), "");
+  assert.ok(!(await a.request("list", { all: true })).sessions.some((entry) => entry.sessionId === betaId));
+  await assert.rejects(a.request("send", { to: "dev brian", body: "Do not wake archive" }), /archived/);
+});
 
 for (const missing of [true, false]) test(`resume ${missing ? "rebases missing" : "retains existing"} project cwd before spawning Pi`, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-missing-cwd-"));
@@ -2050,7 +2097,7 @@ for (const enabled of [false, true]) test(`browser fd is exclusively supervisor-
   } else assert.equal(result.body.error.code, "browser_unavailable");
 });
 
-test("sandbox browser launch keeps only the intended bridge fd", { skip: process.platform !== "linux" }, async (t) => {
+test("sandbox browser launch keeps only the intended browser and messaging bridge fds", { skip: process.platform !== "linux" }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-browser-fd-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cwd = join(root, "project"); await mkdir(cwd);
@@ -2060,7 +2107,9 @@ test("sandbox browser launch keeps only the intended bridge fd", { skip: process
   const args = f.spawns[0].args;
   assert.equal(args.includes("--preserve-fds"), false);
   assert.equal(args[args.indexOf("pi-rpc-sandbox-bootstrap") + 4], "1");
-  assert.equal(f.spawns[0].options.stdio.length, 4);
+  assert.equal(f.spawns[0].options.stdio.length, 6);
+  assert.equal(f.spawns[0].options.stdio[4], "ignore");
+  assert.equal(f.spawns[0].options.env.PI_POST_BROKER_FD, "5");
 });
 
 test("browser routes require explicit scopes, profile rights, native binding and control Origin", async (t) => {
