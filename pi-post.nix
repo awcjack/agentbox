@@ -22,6 +22,7 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     ./patches/pi-post-session-roots.patch
     ./patches/pi-post-archived-sessions.patch
     ./patches/pi-post-message-rate-limit.patch
+    ./patches/pi-post-broker.patch
   ];
   dontBuild = true;
 
@@ -29,6 +30,10 @@ stdenvNoCC.mkDerivation (finalAttrs: {
     runHook preInstall
     mkdir -p $out/share/pi-post $out/bin
     cp -R extensions src bin package.json LICENSE $out/share/pi-post/
+    mkdir -p $out/share/pi-post/rpc-runtime
+    cp ${./extensions/pi-post-broker.ts} $out/share/pi-post/extensions/pi-post-broker.ts
+    cp ${./rpc-runtime/post-client.mjs} $out/share/pi-post/rpc-runtime/post-client.mjs
+    cp ${./rpc-runtime/post-cli.mjs} $out/share/pi-post/rpc-runtime/post-cli.mjs
     makeWrapper ${nodejs_22}/bin/node $out/bin/pi-post \
       --add-flags $out/share/pi-post/bin/pi-post.mjs
     runHook postInstall

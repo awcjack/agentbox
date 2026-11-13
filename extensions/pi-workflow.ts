@@ -766,6 +766,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
             // Only the current managed browser extension can delegate its root.
             // Never let a stale shell/inherited variable join unrelated sessions.
             const childEnv: NodeJS.ProcessEnv = { ...process.env, PI_WORKFLOW_CHILD: "1", PI_WORKFLOW_FAST_MODE: fastMode ? "on" : "off", [APPROVAL_ENV]: APPROVAL_VERSION }
+            delete childEnv.PI_POST_BROKER_FD // Parent-only broker channel; preserve the scoped private relay socket.
             delete childEnv.PI_BROWSER_ROOT
             delete childEnv.PI_BROWSER_RPC_FD // Parent-only supervisor channel; fd3 may carry child approvals.
             delete childEnv.PI_BROWSER_TASK_ID

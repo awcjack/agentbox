@@ -102,6 +102,7 @@ jobs:
             pi-browser-extension-test \
             pi-workflow-extension-test \
             pi-policy-extension-test \
+            pi-post-test \
             pi-goal-extension-test \
             pi-agentsmd-test \
             pi-codex-wrapper-test \

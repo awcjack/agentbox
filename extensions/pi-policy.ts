@@ -6,6 +6,34 @@ import { basename, dirname, isAbsolute, resolve } from "node:path"
 import { APPROVAL_ENV, openApprovalClient, selectApproval } from "./pi-approval.ts"
 import { commandInspectionVariants, isSensitivePath, shellPathTokens, shellTokens } from "./path-policy.ts"
 
+// Local pi-post replies synchronously; sandbox broker mode explicitly defers.
+// An unavailable/slow broker must never turn an unrelated send into same-main.
+export function sessionMessageSameMain(pi: Pick<ExtensionAPI, "events">, to: unknown, signal?: AbortSignal, timeout = 2000): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false)
+  return new Promise(resolve => {
+    let deferred = false, settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const finish = (value: boolean) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      signal?.removeEventListener("abort", abort)
+      resolve(value === true)
+    }
+    const abort = () => finish(false)
+    signal?.addEventListener("abort", abort, { once: true })
+    try {
+      pi.events.emit("agentbox:session-message-scope", {
+        to, defer: () => { deferred = true }, reply: finish,
+      })
+    } catch { finish(false) }
+    if (!settled) {
+      if (!deferred) finish(false)
+      else timer = setTimeout(() => finish(false), timeout)
+    }
+  })
+}
+
 const DEFAULT_CONFIG_PATH = "/etc/pi/agentbox-policy.json"
 const SIGNAL_PATH = "/home/agent/.local/bin/agent-signal.sh"
 const MAX_CONFIG_BYTES = 1024 * 1024
@@ -934,20 +962,12 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         if (decision === "defaultAsk") {
           if (event.toolName === "list_sessions") return
           if (event.toolName === "send_message") {
-            let sameMain = false
-            pi.events.emit("agentbox:session-message-scope", {
-              to: input.to,
-              reply: (allowed: boolean) => { sameMain = allowed === true },
-            })
+            const sameMain = await sessionMessageSameMain(pi, input.to, ctx.signal)
             if (sameMain) return
             crossMainSend = true
           }
         } else if (decision === "ask" && event.toolName === "send_message") {
-          let sameMain = false
-          pi.events.emit("agentbox:session-message-scope", {
-            to: input.to,
-            reply: (allowed: boolean) => { sameMain = allowed === true },
-          })
+          const sameMain = await sessionMessageSameMain(pi, input.to, ctx.signal)
           crossMainSend = !sameMain
         }
         // Like OpenCode auto mode: both explicit and default asks are approved.

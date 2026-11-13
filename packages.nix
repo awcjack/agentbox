@@ -356,6 +356,10 @@ in
         node --experimental-strip-types ${./tests/pi-post.ts} \
           ${pi-post}/share/pi-post \
           ${pi-coding-agent}/lib/node_modules/pi-monorepo
+        node --experimental-strip-types ${./tests/pi-post-broker.ts} \
+          ${pi-post}/share/pi-post \
+          ${pi-coding-agent}/lib/node_modules/pi-monorepo \
+          ${./rpc-runtime}
         touch $out
       '';
 }

@@ -615,6 +615,10 @@ try {
 // Browser ownership comes only from the live managed extension, not shell env.
 const previousBrowserRoot = process.env.PI_BROWSER_ROOT
 const previousBrowserRpcFd = process.env.PI_BROWSER_RPC_FD
+const previousPostFd = process.env.PI_POST_BROKER_FD
+const previousPostSocket = process.env.PI_POST_BROKER_SOCKET
+process.env.PI_POST_BROKER_FD = "5"
+process.env.PI_POST_BROKER_SOCKET = "/tmp/fixture-scoped-post.sock"
 process.env.PI_BROWSER_ROOT = "/tmp/stale-unrelated-browser"
 process.env.PI_BROWSER_RPC_FD = "3"
 try {
@@ -622,6 +626,8 @@ try {
     getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }) })
   const invoke = (params: any) => delegated.tools.get("task").execute("browser-delegation", params, undefined, undefined, context())
   await invoke({ role: "scout", prompt: "no browser extension" })
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_POST_BROKER_FD, undefined)
+  assert.equal(spawnCalls.at(-1)!.options.env.PI_POST_BROKER_SOCKET, "/tmp/fixture-scoped-post.sock")
   assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_ROOT, undefined)
   assert.equal(spawnCalls.at(-1)!.options.env.PI_BROWSER_RPC_FD, undefined)
   let root = "/tmp/agentbox-browser-parent"
@@ -649,6 +655,10 @@ try {
   else process.env.PI_BROWSER_ROOT = previousBrowserRoot
   if (previousBrowserRpcFd === undefined) delete process.env.PI_BROWSER_RPC_FD
   else process.env.PI_BROWSER_RPC_FD = previousBrowserRpcFd
+  if (previousPostFd === undefined) delete process.env.PI_POST_BROKER_FD
+  else process.env.PI_POST_BROKER_FD = previousPostFd
+  if (previousPostSocket === undefined) delete process.env.PI_POST_BROKER_SOCKET
+  else process.env.PI_POST_BROKER_SOCKET = previousPostSocket
 }
 
 // Real files, with the same metadata shape supplied by Pi's discovered commands.

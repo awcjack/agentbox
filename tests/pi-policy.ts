@@ -2,7 +2,16 @@ import { strict as assert } from "node:assert"
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createPiPolicyExtension } from "../extensions/pi-policy.ts"
+import { createPiPolicyExtension, sessionMessageSameMain } from "../extensions/pi-policy.ts"
+
+const scopePi = (handler?: (event: any) => void) => ({ events: { emit: (_name: string, event: any) => handler?.(event) } }) as any
+assert.equal(await sessionMessageSameMain(scopePi(event => event.reply(true)), "child"), true)
+assert.equal(await sessionMessageSameMain(scopePi(), "missing"), false)
+assert.equal(await sessionMessageSameMain(scopePi(event => { event.defer(); queueMicrotask(() => event.reply(true)) }), "child"), true)
+assert.equal(await sessionMessageSameMain(scopePi(event => { event.defer(); queueMicrotask(() => event.reply(false)) }), "other-main"), false)
+assert.equal(await sessionMessageSameMain(scopePi(event => event.defer()), "offline", undefined, 5), false)
+const scopeAbort = new AbortController()
+assert.equal(await sessionMessageSameMain(scopePi(event => { event.defer(); queueMicrotask(() => scopeAbort.abort()) }), "child", scopeAbort.signal), false)
 
 type Handler = (event: any, ctx: any) => Promise<any> | any
 

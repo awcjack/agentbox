@@ -1,0 +1,59 @@
+--- a/extensions/pi-post.ts
++++ b/extensions/pi-post.ts
+@@ -2,6 +2,7 @@
+  * pi-post — asynchronous message passing where the delivery endpoint is a
+  * model's context window. See DESIGN.md for the contracts and invariants.
+  */
++import brokerPost from "./pi-post-broker.ts";
+ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+ import { Text } from "@earendil-works/pi-tui";
+ import { Type } from "typebox";
+@@ -41,5 +42,8 @@
+ const CLI_TARGET = resolve(dirname(fileURLToPath(import.meta.url)), "../bin/pi-post.mjs");
+-
++
+ export default function (pi: ExtensionAPI) {
++  if (process.env.PI_POST_BROKER_FD !== undefined || process.env.PI_POST_BROKER_SOCKET !== undefined) {
++    return brokerPost(pi);
++  }
+   const root = postRoot();
+   const guard = new LoopGuard();
+--- a/bin/pi-post.mjs
++++ b/bin/pi-post.mjs
+@@ -30,7 +30,19 @@
+ import { homedir } from "node:os";
+ import { basename, isAbsolute, join, resolve } from "node:path";
+ import { isArchived } from "../src/archive.mjs";
+-
++
++// Select before even computing a local registry root. Broker failures must
++// never fall through into the legacy home-directory mailbox transport.
++if (process.env.PI_POST_BROKER_FD !== undefined || process.env.PI_POST_BROKER_SOCKET !== undefined) {
++  try {
++    const { main } = await import("../rpc-runtime/post-cli.mjs");
++    console.log(await main());
++    process.exit(0);
++  } catch {
++    console.error("pi-post: broker request failed");
++    process.exit(1);
++  }
++}
+ const MAX_BODY_BYTES = 32 * 1024;
+ const BACKLOG_CAP = 50;
+ const MAX_TARGETS = 8;
+--- a/src/archive.mjs
++++ b/src/archive.mjs
+@@ -7,2 +7,13 @@
+ export function isArchived(record) {
++  // Broker children have no history file; their trusted root archive still wins.
++  if (record.brokerVersion === 1) {
++    const dir = record.archiveDir, root = record.rootSessionId;
++    const validId = value => typeof value === "string" && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
++    if (typeof dir !== "string" || !isAbsolute(dir) || !validId(root) || !validId(record.sessionId)) return true;
++    for (const id of [record.sessionId, root]) {
++      try { lstatSync(join(dir, `.archived-${id.toLowerCase()}`)); return true; }
++      catch (error) { if (error.code !== "ENOENT") return true; }
++    }
++    return false;
++  }
+   if (record.sessionFile === null) return false; // Explicitly ephemeral.
