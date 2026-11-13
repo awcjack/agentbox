@@ -214,6 +214,56 @@ test in the actual deployment environment before relying on the boundary.
 Disabling `sandbox.enable` explicitly restores the previous shared-filesystem
 behavior. Independently launched interactive Pi sessions are not covered.
 
+### Opt-in ephemeral Nix builds
+
+RPC children cannot use the outer container's Nix daemon. To allow Nix builds
+inside the filesystem sandbox, opt in explicitly:
+
+```nix
+services.agentbox.settings = {
+  enableNix = true;
+  piRpcApi.sandbox = {
+    enable = true;
+    nixBuilds = true;
+  };
+};
+```
+
+`nixBuilds` defaults to `false` and requires both `sandbox.enable` and an image
+built with `enableNix`. On Darwin, rebuild the image on Linux with Nix enabled.
+Each RPC child gets an ephemeral private writable `/nix/store` and private Nix
+database. Image package paths are mounted individually read-only; neither the
+outer daemon nor its socket is exposed. The private store and installed packages
+are lost when the child exits, and are not shared with other RPC children.
+
+Nix's inner build sandbox is disabled; the existing Bubblewrap filesystem
+boundary still applies to builds and their descendants. Builds can consume
+substantial memory, disk space, and network bandwidth, and repeated sessions may
+repeat downloads and builds. This option adds **no resource or network
+isolation**: networking remains inherited, and there are no per-child resource
+limits. Builds have the same project files and explicitly granted credentials
+as the RPC child; they are not isolated from that child's work. `/nix` uses
+private temporary storage, so large builds can exhaust container memory.
+Exceptionally large image closures can exceed Bubblewrap's 9,000-argument limit
+(each projected store path uses three entries); launch fails closed with a
+smaller-image diagnostic rather than dropping isolation.
+This is not a replacement for host/container resource or network controls.
+Consumers pinned to an older Agentbox revision must update their input before
+using this option; changing a sibling checkout does not update that pin.
+
+Before enabling on a host, rebuild the image and run the image integration test
+**outside an existing RPC sandbox**, from this checkout inside the new container:
+
+```sh
+node --test rpc-runtime/test/nix-builds.test.mjs
+```
+
+The image integration test must pass, not skip. It exercises closure registration,
+private store writes and an offline build sourcing a new `stdenv.sh`, without a
+daemon socket. Without a built image seed, only the planner tests run; those are
+not proof that builds work on the deployment host. No extra namespace/seccomp
+permissions are requested by this feature.
+
 ### Opt-in SSH-agent forwarding
 
 Forwarding is disabled by default and must be granted per profile. First arrange
