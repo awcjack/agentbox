@@ -1650,6 +1650,20 @@ in
               separately launched interactive Pi processes or external MCP services.
             '';
           };
+          nixBuilds = lib.mkOption {
+            type = lib.types.bool;
+            default = false;
+            description = ''
+              Opt in to an ephemeral private writable /nix/store and private Nix
+              database per RPC child. Image package paths are mounted individually
+              read-only; the outer Nix daemon and its socket are not exposed.
+              Nix's inner sandbox is disabled, while the existing Bubblewrap
+              filesystem boundary remains. The private store is lost on exit.
+              Builds can consume substantial memory, disk, and network resources;
+              this provides no resource or network isolation. Requires
+              piRpcApi.sandbox.enable and an image with settings.enableNix enabled.
+            '';
+          };
           sshAgentSocket = lib.mkOption {
             type = lib.types.nullOr (lib.types.strMatching "/.*");
             default = null;
@@ -2246,6 +2260,12 @@ in
   config = lib.mkMerge [
     (lib.mkIf (cfg.enable && cfg.settings.piRpcApi.enable) {
       assertions = [
+        {
+          assertion =
+            !cfg.settings.piRpcApi.sandbox.nixBuilds
+            || (cfg.settings.piRpcApi.sandbox.enable && cfg.settings.enableNix);
+          message = "Agentbox RPC Nix builds require sandbox.enable and settings.enableNix";
+        }
         {
           assertion =
             !(

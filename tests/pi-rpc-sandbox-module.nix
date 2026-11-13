@@ -90,6 +90,7 @@ let
         forwarding = true;
         discoveryForwarding = true;
         sandbox = {
+          nixBuilds = true;
           readOnlyPaths = [ "/opt/project-reference" ];
           readWritePaths = [ "/var/cache/project" ];
           sshAgentSocket = "/run/dedicated-agent.sock";
@@ -100,6 +101,7 @@ let
     assert
       defaults.sandbox == {
         enable = true;
+        nixBuilds = false;
         readOnlyPaths = [ ];
         readWritePaths = [ ];
         sshAgentSocket = null;
@@ -108,6 +110,7 @@ let
     assert defaults.profiles.project.sshAgentForwarding == false;
     assert defaults.autoDiscoverProfiles.sshAgentForwarding == false;
     assert off.sandbox.enable == false;
+    assert custom.sandbox.nixBuilds == true;
     assert custom.profiles.project.sshAgentForwarding == true;
     assert custom.autoDiscoverProfiles.sshAgentForwarding == true;
     assert custom.sandbox.sshAgentSocket == "/run/dedicated-agent.sock";
