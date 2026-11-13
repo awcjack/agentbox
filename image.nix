@@ -40,6 +40,7 @@
   sudo,
   linux-pam,
   nix,
+  closureInfo,
   # Development tools
   git,
   tmux,
@@ -2402,6 +2403,16 @@ let
     mkdir -p $out/contexts
   '';
 
+  # Seed a sandbox-private Nix DB without exposing the outer DB or daemon.
+  # Keep these roots in sync with contents below; the seed itself is not a root.
+  sandboxNixClosure = closureInfo {
+    rootPaths = [
+      packageEnv
+      entrypointScript
+      entrypointUserScript
+    ];
+  };
+
   # CA certificate path for use in extraCommands
   caCertPath = cacert;
 
@@ -2454,6 +2465,10 @@ in
       # nix: daemon config (the nix-daemon itself is started by the entrypoint).
       mkdir -p etc/nix
       cp ${nixConfFile} etc/nix/nix.conf
+      mkdir -p etc/agentbox/nix-builds
+      cp ${sandboxNixClosure}/registration etc/agentbox/nix-builds/registration
+      cp ${sandboxNixClosure}/store-paths etc/agentbox/nix-builds/store-paths
+      printf '%s\n' '${nix}/bin/nix-store' > etc/agentbox/nix-builds/nix-store
     ''}
 
     # Copy skeleton (use cp -rT to copy contents, not the directory itself)
