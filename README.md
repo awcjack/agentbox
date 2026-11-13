@@ -1074,6 +1074,38 @@ covering `hardening`, `enableDocker`, `enableNotification`, cloud creds, the
 `dockerProxy`, `autoCloneRepos`, …). Each platform module adds only its
 OS-specific top-level options and config body (systemd vs launchd/manual).
 
+## Host Codex hooks
+
+The scripts under `scripts/` also support the native Codex desktop app and CLI:
+`codex-hooks.json` declares a Bash `PreToolUse` guard and a `Stop` test runner.
+`codex-hooks.py` adapts the shared dangerous-command blocker, staged-secret
+scanner, and Go/Rust/JavaScript/TypeScript test runner. The container and host
+share the scanner and test-runner sources; host installation does not depend on
+the container running.
+
+The host sync tool in `nix-config/pkgs/codex-hook-sync` installs these sources in
+`~/.codex/agentbox-hooks` and merges only its own handlers into
+`~/.codex/hooks.json`. It leaves `config.toml`, its `notify` program, unrelated
+hooks, and hook trust decisions alone. It reads the local Agentbox checkout,
+not the pinned remote flake. Local edits sync during the next Nix/Home Manager
+rebuild, without publishing or rebuilding the container. There is no background
+watcher. Installations use atomic generation swaps and retain
+the previous generation; the first existing hooks file is backed up as
+`~/.codex/agentbox-hooks/hooks.before-agentbox.json`.
+
+Codex must review and trust new or changed hook definitions before they run.
+Start a new chat after installing or changing definitions. Use `/hooks` in the
+Codex CLI to review them. Syncing script edits does not itself grant hook trust.
+
+The test hook checks staged, unstaged, and untracked source files in the current
+Git repository, running each package's suite once. It asks for one repair pass
+after a test failure and skips the repeated Stop event to avoid a loop. Tests
+require the project's toolchain and dependencies. The command guards retain
+the existing best-effort shell matching and scanner behavior; they are not a
+replacement for the Codex sandbox or server-side branch protection.
+
+Run adapter tests with `python3 tests/codex-hooks.py`.
+
 ## Selective conversation archive requests
 
 Agentbox can expose an opt-in request inbox for a separate host delivery
