@@ -230,9 +230,15 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   const raw = assertObject(root.piRpcApi, "piRpcApi");
   assertKnownKeys(raw, new Set(["host", "port", "executable", "allowedOrigins", "auth", "allowedCommands", "profiles", "autoDiscoverProfiles", "limits", "sandbox"]), "piRpcApi");
   const sandboxRaw = raw.sandbox === undefined ? {} : assertObject(raw.sandbox, "piRpcApi.sandbox");
-  assertKnownKeys(sandboxRaw, new Set(["enable", "executable", "readOnlyPaths", "readWritePaths", "sshAgentSocket", "sshKnownHostsPath"]), "piRpcApi.sandbox");
+  assertKnownKeys(sandboxRaw, new Set(["enable", "nixBuilds", "executable", "readOnlyPaths", "readWritePaths", "sshAgentSocket", "sshKnownHostsPath"]), "piRpcApi.sandbox");
   if (sandboxRaw.enable !== undefined && typeof sandboxRaw.enable !== "boolean") {
     throw new Error("piRpcApi.sandbox.enable must be a boolean");
+  }
+  if (sandboxRaw.nixBuilds !== undefined && typeof sandboxRaw.nixBuilds !== "boolean") {
+    throw new Error("piRpcApi.sandbox.nixBuilds must be a boolean");
+  }
+  if (sandboxRaw.nixBuilds && !sandboxRaw.enable) {
+    throw new Error("piRpcApi.sandbox.nixBuilds requires sandbox.enable");
   }
   for (const key of ["readOnlyPaths", "readWritePaths"]) {
     if (sandboxRaw[key] !== undefined && !Array.isArray(sandboxRaw[key])) {
@@ -241,6 +247,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   }
   const sandbox = {
     enable: sandboxRaw.enable ?? false,
+    nixBuilds: sandboxRaw.nixBuilds ?? false,
     executable: sandboxRaw.executable ?? environment.PI_RPC_SANDBOX_EXECUTABLE,
     readOnlyPaths: stringArray(sandboxRaw.readOnlyPaths, [], "piRpcApi.sandbox.readOnlyPaths"),
     readWritePaths: stringArray(sandboxRaw.readWritePaths, [], "piRpcApi.sandbox.readWritePaths"),
@@ -752,7 +759,9 @@ class Session extends EventEmitter {
     this.child = spawnProcess(launch.executable, launch.args, {
       cwd: profile.cwd,
       env,
-      stdio: browserRpcFd === 3 ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
+      stdio: launch.argumentData
+        ? ["pipe", "pipe", "pipe", browserRpcFd === 3 ? "pipe" : "ignore", "pipe"]
+        : browserRpcFd === 3 ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true,
     });
@@ -775,6 +784,12 @@ class Session extends EventEmitter {
     );
     this.child.once("error", (error) => this.onExit(null, null, error));
     this.child.once("exit", (code, signal) => this.onExit(code, signal, null));
+    if (launch.argumentData) {
+      // Bubblewrap consumes and closes this pipe before executing bootstrap.
+      // EPIPE is expected if it fails to start; child error/exit handles that.
+      this.child.stdio[4].on("error", () => {});
+      this.child.stdio[4].end(launch.argumentData);
+    }
     this.publish({ type: "supervisor", event: "session_started", sessionId: id });
   }
 

@@ -33,7 +33,7 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/libexec/agentbox-pi-rpc-runtime $out/bin
-    cp main.mjs runtime.mjs sandbox.mjs browser-channel.mjs history.mjs folders.mjs discover-profiles.mjs package.json supervise.sh $out/libexec/agentbox-pi-rpc-runtime/
+    cp main.mjs runtime.mjs sandbox.mjs nix-builds.mjs browser-channel.mjs history.mjs folders.mjs discover-profiles.mjs package.json supervise.sh $out/libexec/agentbox-pi-rpc-runtime/
     cp -r web $out/libexec/agentbox-pi-rpc-runtime/web
     makeWrapper ${nodejs_22}/bin/node $out/bin/pi-rpc-runtime \
       --add-flags $out/libexec/agentbox-pi-rpc-runtime/main.mjs

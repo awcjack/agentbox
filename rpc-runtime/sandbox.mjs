@@ -1,5 +1,6 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, normalize } from "node:path";
+import { nixBuildStoreMounts, privateNixEnvironment } from "./nix-builds.mjs";
 
 // This is filesystem/process isolation, not a network or credential boundary:
 // networking is inherited, private auth/config copies remain readable by the agent,
@@ -42,9 +43,17 @@ const configNames = ["auth.json", "settings.json", "models.json"];
 // providers rotating refresh tokens may require re-authentication afterwards.
 // Bubblewrap keeps inherited descriptors; it has no --preserve-fds. Close extras
 // inside this trusted bootstrap so only stdio (and optional bridge fd 3) remain.
-const bootstrap = `seed=$1; agent=$2; tools=$3; keep_bridge=$4; shift 4
+const bootstrap = `seed=$1; agent=$2; tools=$3; keep_bridge=$4; nix_store=$5; shift 5
 export PI_CODING_AGENT_DIR="$agent"
 umask 077
+if [ -n "$nix_store" ]; then
+  "$tools/mkdir" -p /nix/var/nix /nix/var/log/nix /run/pi-nix-conf
+  "$nix_store" --load-db < /etc/agentbox/nix-builds/registration
+  "$tools/mkdir" -p /nix/var/nix/gcroots/image
+  while IFS= read -r path; do
+    "$tools/ln" -s -- "$path" "/nix/var/nix/gcroots/image/\${path##*/}"
+  done < /etc/agentbox/nix-builds/store-paths
+fi
 "$tools/mkdir" -p -- "$agent"
 for name in auth.json settings.json models.json; do
   if [ -f "$seed/$name" ]; then
@@ -93,7 +102,7 @@ function canonical(path, label) {
 }
 
 function restricted(path, label) {
-  if (broadPaths.has(path) || overlaps(path, forwardedAgentSocket) || overlaps(path, "/home/agent/.ssh") || overlaps(path, managedGitConfig) || path.startsWith(`${managedGitConfig}.`) || overlaps(path, seedDir) || configNames.some((name) => overlaps(path, `${agentHome}/${name}`) || path.startsWith(`${agentHome}/${name}.`)) || ["/proc", "/dev", "/sys", "/etc", "/nix/store", "/usr", "/bin", "/sbin", "/lib", "/lib64"].some((root) => contains(root, path))) {
+  if (broadPaths.has(path) || overlaps(path, forwardedAgentSocket) || overlaps(path, "/home/agent/.ssh") || overlaps(path, managedGitConfig) || path.startsWith(`${managedGitConfig}.`) || overlaps(path, seedDir) || configNames.some((name) => overlaps(path, `${agentHome}/${name}`) || path.startsWith(`${agentHome}/${name}.`)) || ["/proc", "/dev", "/sys", "/etc", "/nix", "/usr", "/bin", "/sbin", "/lib", "/lib64"].some((root) => contains(root, path))) {
     throw new Error(`sandbox ${label} is too broad or reserved: ${path}`);
   }
 }
@@ -104,13 +113,15 @@ function restricted(path, label) {
  * As with all pathname-based mounts, trusted host administrators must not rename
  * or replace these directories between validation and exec (TOCTOU).
  */
-export function buildSandboxLaunch({ executable, args, profile, sandbox, browserRpcFd }) {
+export function buildSandboxLaunch({ executable, args, profile, sandbox, browserRpcFd }, { nixStoreMounts = nixBuildStoreMounts } = {}) {
   // Never accept arbitrary descriptor ranges: fd 3 is the sole private bridge.
   if (browserRpcFd !== undefined && browserRpcFd !== 3) throw new Error("sandbox browserRpcFd must be 3");
   if (profile?.sshAgentForwarding !== undefined && typeof profile.sshAgentForwarding !== "boolean") {
     throw new Error("sandbox profile.sshAgentForwarding must be a boolean");
   }
   if (profile?.sshAgentForwarding && !sandbox?.enable) throw new Error("SSH agent forwarding requires the filesystem sandbox");
+  if (sandbox?.nixBuilds !== undefined && typeof sandbox.nixBuilds !== "boolean") throw new Error("sandbox nixBuilds must be a boolean");
+  if (sandbox?.nixBuilds && !sandbox.enable) throw new Error("sandbox nixBuilds requires filesystem sandboxing");
   if (!sandbox?.enable) return { executable, args };
   if (process.platform !== "linux") throw new Error("Pi RPC sandbox requires Linux bubblewrap");
   absolute(sandbox.executable, "executable");
@@ -181,9 +192,20 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
     "--proc", "/proc", "--dev", "/dev",
     "--unsetenv", "SSH_AUTH_SOCK",
   ];
+  let nixStore = "";
   const bound = new Set();
+  if (sandbox.nixBuilds) {
+    const projection = nixStoreMounts(); // Missing image seed fails closed.
+    nixStore = projection.nixStore;
+    launchArgs.push("--tmpfs", "/nix", "--dir", "/nix/store", ...projection.args);
+    for (const [name, value] of Object.entries(privateNixEnvironment)) launchArgs.push("--setenv", name, value);
+    // Prevent later runtime binds from replacing the private store root.
+    // Individual immutable paths not in the seed (e.g. managed config files)
+    // can still be mounted by the normal runtime-file rules below.
+  }
   const aliases = [];
   for (const path of optionalReadOnly) {
+    if (sandbox.nixBuilds && path === "/nix/store") continue;
     let target;
     try { target = realpathSync(path); }
     catch (error) {
@@ -232,7 +254,24 @@ export function buildSandboxLaunch({ executable, args, profile, sandbox, browser
   // this trusted bootstrap, even if configured child environment contains them.
   launchArgs.push(
     "--chdir", cwd, "--", shell, "-peu", "-c", bootstrap, "pi-rpc-sandbox-bootstrap",
-    seedDir, agentHome, tools, browserRpcFd === 3 ? "1" : "0", executable, ...args,
+    seedDir, agentHome, tools, browserRpcFd === 3 ? "1" : "0", nixStore, executable, ...args,
   );
+  if (sandbox.nixBuilds) {
+    // Image closures can exceed execve's argv limit. Feed NUL-delimited argv
+    // over a parent-owned pipe, never an agent-writable argument file. fd 3
+    // remains exclusively the browser bridge; bootstrap closes other extras.
+    if (launchArgs.some((arg) => typeof arg !== "string" || arg.includes("\0"))) {
+      throw new Error("sandbox arguments must be NUL-free strings");
+    }
+    // Bubblewrap's --args parser accepts OPTIONS only; the command must stay
+    // in outer argv. Its 9000-argument limit also includes argument-file entries.
+    if (launchArgs.length + 3 > 9000) throw new Error("sandbox Nix image closure exceeds Bubblewrap's 9000-argument limit; use a smaller image");
+    const commandIndex = launchArgs.indexOf("--");
+    return {
+      executable: sandbox.executable,
+      args: ["--args", "4", ...launchArgs.slice(commandIndex)],
+      argumentData: Buffer.from(`${launchArgs.slice(0, commandIndex).join("\0")}\0`),
+    };
+  }
   return { executable: sandbox.executable, args: launchArgs };
 }

@@ -288,6 +288,7 @@ in
         mkdir -p $out/test
         cp ${./rpc-runtime/runtime.mjs} $out/runtime.mjs
         cp ${./rpc-runtime/sandbox.mjs} $out/sandbox.mjs
+        cp ${./rpc-runtime/nix-builds.mjs} $out/nix-builds.mjs
         cp ${./rpc-runtime/browser-channel.mjs} $out/browser-channel.mjs
         cp ${./rpc-runtime/browser-config.test.mjs} $out/browser-config.test.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs

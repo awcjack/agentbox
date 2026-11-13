@@ -18,16 +18,19 @@ const RESUME_ID = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
 
 test("sandbox schema defaults disabled and validates keys, types and paths", () => {
   assert.deepEqual(normalizeConfig(config(), {}).sandbox, {
-    enable: false, executable: undefined, readOnlyPaths: [], readWritePaths: [],
+    enable: false, nixBuilds: false, executable: undefined, readOnlyPaths: [], readWritePaths: [],
     sshAgentSocket: null, sshKnownHostsPath: "/home/agent/.ssh/known_hosts",
   });
-  const sandbox = { enable: true, executable: "/bin/bwrap", readOnlyPaths: ["/opt/tools"], readWritePaths: ["/var/cache/tool"], sshAgentSocket: null, sshKnownHostsPath: "/home/agent/.ssh/known_hosts" };
+  const sandbox = { enable: true, nixBuilds: true, executable: "/bin/bwrap", readOnlyPaths: ["/opt/tools"], readWritePaths: ["/var/cache/tool"], sshAgentSocket: null, sshKnownHostsPath: "/home/agent/.ssh/known_hosts" };
   assert.deepEqual(normalizeConfig(config({ sandbox }), {}).sandbox, sandbox);
   assert.equal(normalizeConfig(config({ sandbox: { enable: true } }), { PI_RPC_SANDBOX_EXECUTABLE: "/bin/bwrap" }).sandbox.executable, "/bin/bwrap");
   for (const [value, pattern] of [
     [null, /must be an object/],
     [{ extra: true }, /unknown key extra/],
     [{ enable: "true" }, /enable must be a boolean/],
+    [{ nixBuilds: "true" }, /nixBuilds must be a boolean/],
+    [{ nixBuilds: true }, /nixBuilds requires sandbox.enable/],
+    [{ enable: false, nixBuilds: true }, /nixBuilds requires sandbox.enable/],
     [{ enable: true }, /executable must be an absolute path/],
     [{ executable: 42 }, /executable must be an absolute path/],
     [{ executable: "bwrap" }, /executable must be an absolute path/],
