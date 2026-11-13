@@ -264,6 +264,40 @@ daemon socket. Without a built image seed, only the planner tests run; those are
 not proof that builds work on the deployment host. No extra namespace/seccomp
 permissions are requested by this feature.
 
+### Messaging across sandboxed sessions
+
+Sandboxed RPC sessions use a supervisor-owned `pi-post` broker, automatically.
+The supervisor persists metadata and queues in its `~/.pi/agent/post` (or
+`PI_POST_DIR`). Each Pi receives only its authenticated duplex channel on fd 5;
+fd 3 remains browser-only and fd 4 remains Bubblewrap argument transport. The
+bootstrap closes all other inherited descriptors. The registry, mailbox tree,
+sibling projects, and sibling histories are never mounted into the sandbox.
+
+The supervisor fixes the principal from the launch/resume identity, not from
+child stdout or request-supplied roots, PIDs, sender fields, or paths. Presence
+tracks live channels. It validates archive markers outside the sandbox before
+discovery, resolution, enqueue, and delivery checks; unknown/unreadable archive
+state fails closed. Message bodies remain explicitly untrusted peer context.
+Queues survive supervisor restarts and are scoped to the recipient; polling and
+acknowledgment retain at-least-once delivery behavior.
+
+A private per-sandbox relay lets delegated descendants register under their
+supervisor-authorized main session and lets the CLI act as its owning session.
+Workflow children inherit the relay socket, never the supervisor fd. Relay sends
+are limited to same-main targets: shell/child code cannot use it to bypass the
+main tool's cross-main human approval. A main session's `send_message` tool can
+reach another main after the existing policy approval. Central byte, backlog,
+frame, peer, and root-wide rate limits apply to tools and relay clients alike.
+The broker does not offer arbitrary file access, raw history reads, automatic
+unarchiving, or remote session startup.
+
+Restart the supervisor and reopen both sessions after rollout so they register
+in the shared broker. An old sandbox's private registration cannot be recovered
+after its tmpfs disappears. Broker/relay errors never fall back to the isolated
+home-directory registry. Unsandboxed/interactive Pi retains local `pi-post`
+behavior; legacy records with a validated history location can remain discoverable
+as offline records, but only broker-attached sessions have broker live leases.
+
 ### Opt-in SSH-agent forwarding
 
 Forwarding is disabled by default and must be granted per profile. First arrange

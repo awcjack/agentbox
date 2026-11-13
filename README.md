@@ -175,8 +175,23 @@ re-registers, so unknown archive state cannot bypass this rule.
 
 `/sessions` lists peers and `/inbox` previews queued messages. Shell tools and
 hooks can use the bundled `pi-post` CLI. Registry and mailbox data persist in
-`~/.pi/agent/post` on the existing Pi volume, shared by sessions in the same
-container. Messaging does not create subagents.
+`~/.pi/agent/post` on the existing Pi volume (or the supervisor's `PI_POST_DIR`).
+For sandboxed RPC sessions, a supervisor-owned broker accesses that storage via a
+private inherited channel. No shared messaging directory or sibling history is
+mounted into the agent sandbox. Presence uses supervisor connection leases, not
+PIDs from isolated namespaces. A sandbox-local relay supports child agents and
+the CLI; its raw sends are restricted to the same main session. Cross-main
+messages must use the main session's `send_message` tool and its approval path.
+Interactive/unsandboxed sessions retain the original local backend. Messaging
+does not create subagents.
+
+After upgrading, restart the RPC service and open each affected session once to
+register it with the broker. A name absent from the isolated pre-upgrade registry
+is not evidence that its session is archived. Private tmpfs-only registrations
+from old sandbox processes cannot be recovered after those processes exit.
+Archived sessions remain excluded; the broker never opens/unarchives or resumes
+a session just to send mail. Broker failure is an error, not a fallback to a
+private local registry.
 
 Agentbox's Pi instructions allow a main session and its child, sibling, and
 nested subagents to communicate and reply without asking for approval by
