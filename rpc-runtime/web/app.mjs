@@ -13,7 +13,7 @@ import { sessionTitle } from "./session-title.mjs";
 import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
 import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
 import { mountBrowserPanel } from "./browser-panel.mjs";
-import { extractDownloadPaths, fetchDownload } from "./downloads.mjs";
+import { fetchDownload } from "./downloads.mjs";
 
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
@@ -963,10 +963,10 @@ function refreshThinkingLevels(ctx, force = false) {
   });
 }
 
-function renderContent(parent, content) {
-  if (typeof content === "string") { parent.append(renderMarkdown(content)); return; }
+function renderContent(parent, content, markdownOptions) {
+  if (typeof content === "string") { parent.append(renderMarkdown(content, markdownOptions)); return; }
   for (const block of Array.isArray(content) ? content : []) {
-    if (block.type === "text") parent.append(renderMarkdown(block.text || ""));
+    if (block.type === "text") parent.append(renderMarkdown(block.text || "", markdownOptions));
     if (block.type === "image") {
       const src = imageSource(block);
       if (src) { const img = element("img", "message-image"); img.src = src; img.alt = "Conversation attachment"; img.loading = "lazy"; parent.append(img); }
@@ -1206,7 +1206,7 @@ function patchTranscript(parent, next) {
     } else if (old.nodeType === 1) {
       // These controls have closures over the rendered message/code. Use fresh
       // handlers rather than retaining ones that would copy an earlier delta.
-      if (fresh.classList.contains("message-actions") || fresh.classList.contains("changes-card") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
+      if (fresh.classList.contains("message-actions") || fresh.classList.contains("file-download") || fresh.classList.contains("changes-card") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
         parent.replaceChild(fresh, old);
         continue;
       }
@@ -1266,7 +1266,9 @@ function renderMessages() {
         const change = changeFromTool(block, result);
         if (change) accumulateChange(turnChanges, change);
         body.append(renderTool(block, result, block.id));
-      } else renderContent(body, [block]);
+      } else renderContent(body, [block], message.role === "assistant" ? {
+        onFileDownload: (filePath) => downloadWorkspaceFile(ctx, filePath),
+      } : undefined);
     }
     if (message.summary) body.append(renderMarkdown(message.summary));
     if (message.role === "bashExecution") {
@@ -1295,13 +1297,6 @@ function renderMessages() {
           }
         });
         actions.append(copy);
-      }
-      if (message.role === "assistant") for (const filePath of extractDownloadPaths(text)) {
-        const download = element("button", "text-button", `Download ${filePath}`);
-        download.type = "button"; download.title = `Download workspace file: ${filePath} (maximum 16 MiB)`;
-        download.disabled = !canDownloadFile(ctx) || Boolean(ctx.record.downloading);
-        download.addEventListener("click", () => downloadWorkspaceFile(ctx, filePath));
-        actions.append(download);
       }
       if (message.role === "user") for (const action of ["revert", "fork"]) {
         const button = element("button", "text-button", action === "revert" ? "Revert" : "Fork");

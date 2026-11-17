@@ -1,28 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractDownloadPaths, downloadFilename, downloadBlob, saveDownload, fetchDownload, MAX_DOWNLOAD_BYTES } from "./downloads.mjs";
+import { localDownloadPath, downloadFilename, downloadBlob, saveDownload, fetchDownload, MAX_DOWNLOAD_BYTES } from "./downloads.mjs";
 
-test("suggestions preserve filenames and spaces, deduplicate, and cap actions", () => {
-  assert.deepEqual(extractDownloadPaths('Saved `reports/final draft.csv`, `"report two.pdf"`, `README.md` and `reports/final draft.csv`.'),
-    ["reports/final draft.csv", "report two.pdf", "README.md"]);
-  assert.equal(extractDownloadPaths(Array.from({ length: 20 }, (_, i) => `\`file${i}.zip\``).join(" ")).length, 6);
-  assert.deepEqual(extractDownloadPaths("`a.zip`", 0), []);
+test("inline file classification preserves paths and spaces without collecting a button list", () => {
+  for (const path of ["reports/final draft.csv", "README.md", "/workspace/output.pdf", "./out/file.zip"]) {
+    assert.equal(localDownloadPath(path), path);
+  }
+  assert.equal(localDownloadPath('"report two.pdf"'), "report two.pdf");
+  for (const text of [null, "", "npm install", "plainword", "dir/"]) assert.equal(localDownloadPath(text), null);
+  assert.equal(localDownloadPath("LICENSE", { explicit: true }), "LICENSE");
 });
 
-test("local markdown links support encoded/angle spaces, balanced parentheses, titles and escapes", () => {
-  assert.deepEqual(extractDownloadPaths('[CSV](reports/final%20draft.csv) [PDF](<reports/annual report.pdf> "title") [zip](out/report(1).zip) [escaped](out/my\\ file.txt) [quote](out/a.zip \'title\')'),
-    ["reports/final draft.csv", "reports/annual report.pdf", "out/report(1).zip", "out/my file.txt", "out/a.zip"]);
+test("local link targets decode once and discard URL fragments, not encoded filename characters", () => {
+  const options = { encoded: true, explicit: true };
+  assert.equal(localDownloadPath("reports/final%20draft.csv#L42", options), "reports/final draft.csv");
+  assert.equal(localDownloadPath("report.md?view=1#part", options), "report.md");
+  assert.equal(localDownloadPath("out/report(1).zip", options), "out/report(1).zip");
+  assert.equal(localDownloadPath("out/a%23b%3Fc.txt", options), "out/a#b?c.txt");
+  assert.equal(localDownloadPath("out/100%25.txt", options), "out/100%.txt");
 });
 
-test("ignore remote links, images, schemes, controls, prose and fenced code", () => {
-  const text = '[remote](https://host/file.zip) ![image](/images/a.png) [anchor](#part) [bad](file:///etc/passwd) [bad](%00bad.zip) [bad](%2F%2Fevil/a.zip) `https://host/x.zip` `npm install`\n```sh\ncat /workspace/example.txt\n```';
-  assert.deepEqual(extractDownloadPaths(text), []);
-});
-
-test("bare absolute paths trim prose punctuation but do not split code paths", () => {
-  assert.deepEqual(extractDownloadPaths('See /workspace/result.csv, (/workspace/archive.zip). Also `/workspace/spaced name.txt`.'),
-    ["/workspace/spaced name.txt", "/workspace/result.csv", "/workspace/archive.zip"]);
-  assert.deepEqual(extractDownloadPaths('[unicode 📦](<out/my file.zip>) /workspace/other.txt'), ["out/my file.zip", "/workspace/other.txt"]);
+test("download classification never captures external, unsafe, anchor or ambiguous URL targets", () => {
+  for (const value of ["https://host/file.zip", "mailto:x@y.com", "//host/file.zip", "#part", "file:///etc/passwd", "javascript:evil", "%00bad.zip", "%2F%2Fevil/a.zip", "%5Cevil/file.zip", "%6Aavascript:evil", "bad%XX.txt", "~/file.zip"]) {
+    assert.equal(localDownloadPath(value, { encoded: true, explicit: true }), null, value);
+  }
 });
 
 test("download filenames cannot introduce directories or control characters", () => {

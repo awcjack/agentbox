@@ -1,4 +1,5 @@
 import { createMermaidPreview } from "./mermaid-preview.mjs";
+import { localDownloadPath } from "./downloads.mjs";
 
 export function safeHref(value) {
   if (typeof value !== "string" || /[\u0000-\u0020\u007f]/.test(value)) return null;
@@ -8,21 +9,45 @@ export function safeHref(value) {
   } catch { return null; }
 }
 
+// Read a Markdown link destination without truncating balanced parentheses,
+// escaped spaces, or angle-bracket paths. Never interpret HTML/entities.
+function linkDestination(text, start) {
+  let i = start;
+  const angle = text[i] === "<";
+  if (angle) i++;
+  let href = "", depth = 0;
+  for (; i < text.length && text[i] !== "\n"; i++) {
+    const char = text[i];
+    if (char === "\\" && i + 1 < text.length && /[\\ ()\[\]]/.test(text[i + 1])) { href += text[++i]; continue; }
+    if (angle ? char === ">" : (char === ")" && depth === 0) || /\s/.test(char)) break;
+    if (!angle && char === "(") depth++;
+    if (!angle && char === ")") depth--;
+    href += char;
+  }
+  const close = text.slice(i).match(angle ? /^>\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)/ : /^\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)/);
+  if (!href || !close) return null;
+  // Literal spaces are allowed only through explicit angle/escaped syntax.
+  return { href: href.replace(/ /g, "%20"), end: i + close[0].length };
+}
+
 export function inlineTokens(text) {
   text = String(text ?? "");
   const tokens = [];
-  const pattern = /(`+)([^`]*?)\1|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|_([^_\n]+)_|\[([^\]\n]+)\]\(([^\s)]+)\)/g;
+  const pattern = /(`+)([^`]*?)\1|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|_([^_\n]+)_|\[([^\]\n]+)\]\(/g;
   let offset = 0;
-  for (const match of String(text).matchAll(pattern)) {
+  for (let match; (match = pattern.exec(text));) {
+    const destination = match[7] ? linkDestination(text, pattern.lastIndex) : null;
+    if (match[7] && !destination) continue;
+    if (destination) pattern.lastIndex = destination.end;
     if (match.index > offset) tokens.push({ type: "text", text: text.slice(offset, match.index) });
     if (match[1]) tokens.push({ type: "code", text: match[2] });
     else if (match[3] || match[4]) tokens.push({ type: "strong", text: match[3] || match[4] });
     else if (match[5] || match[6]) tokens.push({ type: "em", text: match[5] || match[6] });
     else {
-      const href = safeHref(match[8]);
-      tokens.push(href ? { type: "a", text: match[7], href } : { type: "text", text: match[0] });
+      const href = safeHref(destination.href);
+      tokens.push(href ? { type: "a", text: match[7], href } : { type: "text", text: text.slice(match.index, pattern.lastIndex) });
     }
-    offset = match.index + match[0].length;
+    offset = pattern.lastIndex;
   }
   if (offset < text.length) tokens.push({ type: "text", text: text.slice(offset) });
   return tokens;
@@ -137,14 +162,28 @@ export async function copyText(text) {
 // Preview fenced Markdown through the same text-node-only renderer, never HTML.
 // Nested fences stay source-only to keep preview rendering bounded.
 // ```mermaid fences get an opt-in chart preview that renders to a data: SVG image.
-export function renderMarkdown(source, { previewFences = true, renderMermaidPreview = createMermaidPreview } = {}) {
+export function renderMarkdown(source, { previewFences = true, renderMermaidPreview = createMermaidPreview, onFileDownload } = {}) {
   const root = element("div", "markdown");
   function inline(parent, text) {
     for (const token of inlineTokens(text)) {
       if (token.type === "text") { parent.append(document.createTextNode(token.text)); continue; }
-      const child = element(token.type, "", token.text);
-      if (token.type === "a") { child.href = token.href; child.target = "_blank"; child.rel = "noopener noreferrer"; }
-      parent.append(child);
+      const filePath = onFileDownload && (token.type === "a"
+        ? localDownloadPath(token.href, { encoded: true, explicit: true })
+        : token.type === "code" ? localDownloadPath(token.text) : null);
+      if (filePath) {
+        const button = element("button", "file-download");
+        button.type = "button";
+        button.title = `Download workspace file: ${filePath} (maximum 16 MiB)`;
+        button.setAttribute("aria-label", `Download ${token.text}`);
+        if (token.type === "code") button.append(element("code", "", token.text));
+        else button.textContent = token.text;
+        button.addEventListener("click", () => onFileDownload(filePath));
+        parent.append(button);
+      } else {
+        const child = element(token.type, "", token.text);
+        if (token.type === "a") { child.href = token.href; child.target = "_blank"; child.rel = "noopener noreferrer"; }
+        parent.append(child);
+      }
     }
   }
   for (const block of markdownBlocks(source)) {
@@ -174,7 +213,7 @@ export function renderMarkdown(source, { previewFences = true, renderMermaidPrev
         let preview;
         toggle.addEventListener("click", () => {
           if (!preview) {
-            preview = renderMarkdown(block.text, { previewFences: false, renderMermaidPreview });
+            preview = renderMarkdown(block.text, { previewFences: false, renderMermaidPreview, onFileDownload });
             preview.classList.add("markdown-preview");
             wrapper.append(preview);
           }
