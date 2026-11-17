@@ -295,6 +295,7 @@ in
         cp ${./rpc-runtime/post-cli.mjs} $out/post-cli.mjs
         cp ${./rpc-runtime/browser-config.test.mjs} $out/browser-config.test.mjs
         cp ${./rpc-runtime/history.mjs} $out/history.mjs
+        cp ${./rpc-runtime/downloads.mjs} $out/downloads.mjs
         cp ${./rpc-runtime/folders.mjs} $out/folders.mjs
         cp ${./rpc-runtime/discover-profiles.mjs} $out/discover-profiles.mjs
         cp ${./rpc-runtime/supervise.sh} $out/supervise.sh

@@ -10,6 +10,7 @@ import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, lis
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
 import { buildSandboxLaunch } from "./sandbox.mjs";
+import { DownloadError, readWorkspaceDownload } from "./downloads.mjs";
 import { createBrowserClient } from "./browser-channel.mjs";
 import { createPostBroker } from "./post-broker.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
@@ -1643,7 +1644,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads|browser(?:\/frame|\/control)?))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads|downloads|browser(?:\/frame|\/control)?))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
@@ -1885,6 +1886,36 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         sessions.delete(session.id);
         response.statusCode = 204;
         return response.end();
+      }
+      if (action === "downloads" && request.method === "POST") {
+        authenticate(request, config, "sessions:read");
+        authenticate(request, config, "sessions:write");
+        const child = session.child, nativeSessionId = session.nativeSessionId;
+        const validate = () => {
+          if (!request.headers["x-pi-session-id"]) throw new HttpError(400, "invalid_session_precondition", "X-Pi-Session-Id is required for downloads");
+          checkNativePrecondition(request, session, sessions.get(session.id));
+          if (session.child !== child || session.nativeSessionId !== nativeSessionId) throw new HttpError(409, "conversation_stale", "native session changed; refresh before downloading");
+          if (session.status !== "running") throw new HttpError(409, "session_not_running", "session is not running");
+          if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
+          if (!session.profile.allowedCommands.has("prompt")) throw new HttpError(403, "command_forbidden", "downloads require allowed command prompt");
+        };
+        validate();
+        const body = await readJson(request, Math.min(config.limits.maxBodyBytes, 16 * 1024));
+        validate();
+        if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.path !== "string") {
+          throw new HttpError(400, "invalid_download", "Download requires exactly {path: string}");
+        }
+        let result;
+        try { result = await readWorkspaceDownload(session.profile.cwd, body.path); }
+        catch (error) {
+          if (error instanceof DownloadError) throw new HttpError(error.status, error.code, error.message);
+          throw new HttpError(503, "download_unavailable", "Secure workspace downloads are unavailable");
+        }
+        // No headers or bytes are sent until the complete bounded read and a
+        // second identity/lifecycle check have succeeded.
+        validate();
+        session.touch();
+        return json(response, 200, { ...result, nativeSessionId });
       }
       if (action === "uploads" && request.method === "POST") {
         authenticate(request, config, "sessions:write");

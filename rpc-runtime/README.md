@@ -553,6 +553,7 @@ security boundaries and remaining live acceptance requirements.
 | `POST /v1/sessions/:id/ui` | `sessions:write` | Answer one pending extension dialog |
 | `POST /v1/sessions/:id/auto` | `sessions:write` | Set session auto mode using exactly `{"enabled":true}` or `{"enabled":false}` |
 | `GET /v1/sessions/:id/events` | `sessions:read` | SSE stream with bounded replay |
+| `POST /v1/sessions/:id/downloads` | `sessions:read` **and** `sessions:write` | Download one regular workspace file, at most 16 MiB; requires allowed `prompt` and a matching `X-Pi-Session-Id` |
 
 The read-command set is `get_available_models`,
 `get_available_thinking_levels`, `get_commands`, `get_entries`,
@@ -850,6 +851,54 @@ from the Agentbox root, substituting the desired system. The full
 covers Settings commands, native write headers, draft preservation, unchanged
 live model/auto, confirmation/decline, concurrent-write locks, missing command
 support, and keyboard dismissal, alongside the existing chat flows.
+
+### Workspace file downloads
+
+`POST /v1/sessions/:id/downloads` accepts exactly `{"path":"output/report.pdf"}`.
+The bearer token must grant **both** `sessions:read` and `sessions:write`
+(filesystem access is more sensitive than reading a transcript), and the session
+profile must allow `prompt`. The `X-Pi-Session-Id` header is mandatory and must
+match the native conversation UUID, not merely the supervisor API session ID.
+Normal Origin policy applies. The session must be running and its conversation
+unlocked; identity and lifecycle are rechecked after awaiting the body and file.
+
+A successful response is JSON:
+
+```json
+{"data":"<base64>","filename":"report.pdf","mimeType":"application/octet-stream","nativeSessionId":"<native UUID>"}
+```
+
+Paths may be absolute or relative to **the session's `profile.cwd`**, but their
+normalized target must be a file strictly inside that workspace. Parent traversal
+outside it, arbitrary host paths, and private sandbox `/tmp` paths are not
+supported. This endpoint does not enter a child process's mount namespace or read
+its `/proc/<pid>/root`. To download sandbox-generated output, write it into the
+shared workspace first. Uploads in runtime temporary storage are not downloadable
+through this endpoint either.
+
+All symlinks are denied, including internal symlinks and symlink components in
+the configured workspace path. Linux directory traversal uses `O_NOFOLLOW`
+directory handles and `/proc/self/fd` to pin each directory before opening its
+child; swapping an intermediate path for a symlink cannot redirect a later open.
+Only regular files with exactly one hard link are accepted, excluding directories,
+FIFOs, devices, and hardlinked files. Non-Linux systems (or environments without
+usable procfs) fail closed rather than falling back to a racy realpath/open pair.
+
+The decoded limit is **16 MiB per file**, including growth during the read.
+Reads are bounded and buffered: no partial file data is returned on errors.
+Detected size/metadata changes fail with `download_changed` (409); oversize files
+fail with `download_too_large` (413), forbidden paths/types with
+`download_forbidden` (403), missing files with `download_not_found` (404), and
+unsupported secure access with `download_unavailable` (503). OS error details and
+host paths are not included in error messages. This is not a transactional
+snapshot of an actively written file; finish writing before downloading.
+Request JSON is limited to the smaller of `maxBodyBytes` and 16 KiB. There is no
+per-user ownership model or filename-based secret filter: authorized writers can
+read regular single-link files anywhere within the selected workspace, so keep
+credentials and other private host data outside workspace roots.
+
+Focused backend tests (Node 22, from `rpc-runtime/`):
+`node --test test/downloads.test.mjs`.
 
 ### Browser file attachments
 
