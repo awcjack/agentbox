@@ -1829,12 +1829,15 @@ in
             type = lib.types.bool;
             default = false;
             description = ''
-              At pi-rpc startup, scan autoDiscoverProfiles.root for immediate
-              child directories and synthesize one profile per directory. This is
-              workspace selection. With piRpcApi.sandbox.enable, each session's
-              filesystem is restricted to the selected cwd, sessionDir, runtime
-              files, and explicit extra mounts. Otherwise profiles provide soft
-              selection only and share the container filesystem.
+              At pi-rpc startup and on authenticated profile-list refreshes, scan
+              autoDiscoverProfiles.root for immediate child directories and add
+              one profile per directory without restarting active sessions.
+              Previously registered profiles remain until restart even if their
+              directories disappear. This is workspace selection. With
+              piRpcApi.sandbox.enable, each session's filesystem is restricted to
+              the selected cwd, sessionDir, runtime files, and explicit extra
+              mounts. Otherwise profiles provide soft selection only and share
+              the container filesystem.
             '';
           };
           sshAgentForwarding = lib.mkOption {
@@ -1874,7 +1877,7 @@ in
           maxProfiles = lib.mkOption {
             type = lib.types.ints.between 1 1000;
             default = 64;
-            description = "Fail startup if discovery would create more than this many profiles.";
+            description = "Maximum discovered profiles, including projects retained until restart. Exceeding it fails startup or rejects a live refresh without changing existing profiles.";
           };
           args = lib.mkOption {
             type = lib.types.listOf lib.types.str;

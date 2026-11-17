@@ -118,13 +118,26 @@ credentials in environment variables must be explicitly mapped into the profile,
 separate from the browser's RPC password.
 
 Optional `autoDiscoverProfiles` scans one absolute root at supervisor startup and
-synthesizes a profile for each immediate child directory (`cwd=<root>/<name>`,
-`sessionDir=<sessionDirPrefix>/--<name>--`). Those discovered profiles become
-Projects in the sidebar automatically. Explicit `profiles` entries always win on
-name conflicts. Discovery skips invalid profile names, excluded names,
-`excludePrefixes` (default `tmp-`), non-directories, and symlink targets outside
-the root. It fails closed when the root is missing or discovery would exceed
-`maxProfiles`. Keep the explicit default `sessionDir` as a sibling path such as
+on authenticated `GET /v1/profiles` requests, synthesizing a profile for each
+immediate child directory (`cwd=<root>/<name>`,
+`sessionDir=<sessionDirPrefix>/--<name>--`). In the browser, click **Refresh** (or
+reload the page) after creating `/workspace/<project>` to show it as a Project
+without restarting Pi RPC or Agentbox. Existing sessions and drafts are preserved;
+the lightweight session-status poll does not rescan projects. Explicit `profiles`
+entries always win on name conflicts. Discovery skips invalid profile names,
+excluded names, `excludePrefixes` (default `tmp-`), non-directories, and symlink
+targets outside the root. Live discovery only adds profiles: previously registered
+projects remain available until supervisor restart even if their directory is
+removed, preserving session/history ownership. These retained projects count
+toward `maxProfiles`.
+
+Discovery fails closed when the root is missing, the profile limit is exceeded,
+or directory/security validation fails. At startup this prevents launch; a failed
+live scan returns `503 profile_discovery_failed` without changing the existing
+project list or orphan-history assignments. Restore the workspace or resolve the
+limit/validation problem, then retry **Refresh**. The discovery policy and
+credentials are fixed at startup; this is not configuration hot reload.
+Keep the explicit default `sessionDir` as a sibling path such as
 `.../sessions/--workspace--`, not the shared prefix directory itself, or overlap
 checks reject startup. Pi still loads each project's `AGENTS.md` / `CLAUDE.md`
 from that profile's cwd. Filesystem isolation is controlled separately below.
@@ -535,7 +548,7 @@ security boundaries and remaining live acceptance requirements.
 | `GET /` | public | Bundled native Pi chat UI shell |
 | `GET /health/live` | public | Process liveness |
 | `GET /health/ready` | public | Readiness; returns 503 during shutdown |
-| `GET /v1/profiles` | `profiles:read` | Configured profile names |
+| `GET /v1/profiles` | `profiles:read` | Profile names; rescans enabled workspace discovery and adds new projects atomically |
 | `GET /v1/folders` | `profiles:read` | Approved workspace roots as `{roots:[{profile,path}]}` |
 | `GET /v1/folders?path=...` | `profiles:read` | Folder path, root, parent, child directories and truncation flag |
 | `DELETE /v1/history/:nativeId?profile=default` | `sessions:delete` | Archive saved history without starting Pi; rejects an active session |

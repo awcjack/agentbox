@@ -12,7 +12,7 @@ pkgs.runCommand "agentbox-pi-workspace-test"
     node --check runtime.mjs
     node --check downloads.mjs
     node --check web/app.mjs
-    node --test browser-config.test.mjs test/folders.test.mjs web/*.test.mjs
-    node --test --test-name-pattern='folder sessions|session folder creation|saved history archive' test/runtime.test.mjs
+    node --test browser-config.test.mjs test/discover-profiles.test.mjs test/folders.test.mjs web/*.test.mjs
+    node --test --test-name-pattern='live profile discovery|folder sessions|session folder creation|saved history archive' test/runtime.test.mjs
     touch $out
   ''

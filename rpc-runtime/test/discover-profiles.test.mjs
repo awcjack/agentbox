@@ -139,6 +139,36 @@ test("normalizeConfig merges discovered profiles and keeps explicit overrides", 
   assert.equal(normalized.profiles.get("default").extraSessionDirs, undefined);
 });
 
+test("live discovery uses its validated startup policy and resolved environment", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-discover-frozen-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessions = join(root, "history");
+  await mkdir(workspace);
+  const environment = { PROJECT_VALUE: "original-value" };
+  const discovery = {
+    enable: true, root: workspace, sessionDirPrefix: sessions,
+    exclude: ["ignored"], excludePrefixes: ["scratch-"], args: ["--approve"],
+    allowedCommands: ["get_state"], envReferences: { PROJECT_VALUE: "PROJECT_VALUE" },
+  };
+  const normalized = normalizeConfig(baseConfig({
+    profiles: { default: { cwd: workspace, sessionDir: join(sessions, "--workspace--") } },
+    autoDiscoverProfiles: discovery,
+  }), environment);
+  discovery.exclude.length = 0;
+  discovery.excludePrefixes.length = 0;
+  discovery.args.push("--no-context-files");
+  discovery.allowedCommands.push("prompt");
+  discovery.root = "/does-not-exist";
+  environment.PROJECT_VALUE = "changed-value";
+  for (const name of ["ignored", "scratch-temp", "project"]) await mkdir(join(workspace, name));
+  normalized.refreshProfiles();
+  assert.deepEqual(normalized.discoveredProfiles, ["project"]);
+  const project = normalized.profiles.get("project");
+  assert.deepEqual(project.args, ["--approve"]);
+  assert.deepEqual([...project.allowedCommands], ["get_state"]);
+  assert.equal(project.env.PROJECT_VALUE, "original-value");
+});
+
 test("normalizeConfig leaves discovery disabled and rejects bad discovery config", () => {
   const disabled = normalizeConfig(baseConfig({
     autoDiscoverProfiles: { enable: false, root: "/workspace", sessionDirPrefix: "/sessions" },

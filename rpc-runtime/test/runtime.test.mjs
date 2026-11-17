@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex, PassThrough } from "node:stream";
@@ -268,6 +268,169 @@ async function fixture(t, customConfig = config(), options = {}) {
   });
   return { runtime, children, spawns, baseUrl, postRoot };
 }
+
+test("live profile discovery adds projects without restarting sessions and respects exclusions", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-live-profiles-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessionDirPrefix = join(root, "history");
+  await mkdir(workspace);
+  await mkdir(join(root, "outside"));
+  const f = await fixture(t, config({
+    profiles: { default: { cwd: workspace, sessionDir: join(sessionDirPrefix, "--workspace--") },
+      custom: { cwd: root, sessionDir: join(root, "custom-history"), args: ["--no-context-files"] } },
+    autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix, exclude: ["ignored"],
+      args: ["--approve"], env: { LIVE_PROJECT: "yes" }, allowedCommands: ["get_state"] },
+  }));
+  const original = await createSession(f.baseUrl);
+  const profileMap = f.runtime.config.profiles;
+  const defaultProfile = profileMap.get("default");
+  for (const name of ["alpha", "custom", "ignored", "tmp-scratch", ".hidden"]) await mkdir(join(workspace, name));
+  await writeFile(join(workspace, "regular-file"), "not a project");
+  await symlink(join(root, "outside"), join(workspace, "escaped"));
+  const result = await request(f.baseUrl, "/v1/profiles");
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.body.profiles, ["default", "custom", "alpha"]);
+  assert.equal(f.runtime.config.profiles, profileMap);
+  assert.equal(profileMap.get("default"), defaultProfile);
+  assert.deepEqual(profileMap.get("custom").args, ["--no-context-files"]);
+  assert.deepEqual(profileMap.get("alpha").args, ["--approve"]);
+  assert.deepEqual([...profileMap.get("alpha").allowedCommands], ["get_state"]);
+  const folders = await request(f.baseUrl, "/v1/folders");
+  assert.ok(folders.body.roots.some((item) => item.profile === "alpha" && item.path === join(workspace, "alpha")));
+  await createSession(f.baseUrl, { profile: "alpha" });
+  assert.equal(f.spawns[1].options.cwd, join(workspace, "alpha"));
+  assert.equal(f.spawns[1].options.env.LIVE_PROJECT, "yes");
+  assert.ok(f.spawns[1].args.includes(join(sessionDirPrefix, "--alpha--")));
+  assert.ok((await request(f.baseUrl, "/v1/sessions")).body.sessions.some((item) => item.id === original));
+  assert.deepEqual(f.children[0].signals, []);
+  await request(f.baseUrl, "/v1/profiles");
+  assert.equal(f.spawns.length, 2, "profile reads never spawn or restart Pi");
+  assert.deepEqual(f.runtime.config.discoveredProfiles, ["alpha"]);
+});
+
+test("live profile discovery fails atomically and recovers without restarting", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-live-profiles-failure-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessionDirPrefix = join(root, "history");
+  await mkdir(join(workspace, "first"), { recursive: true });
+  const limited = "profile-probe-no-scope";
+  const f = await fixture(t, config({
+    auth: { tokens: [{ sha256: TOKEN_HASH, scopes: ALL_SCOPES },
+      { sha256: createHash("sha256").update(limited).digest("hex"), scopes: ["sessions:read"] }] },
+    profiles: { default: { cwd: workspace, sessionDir: join(sessionDirPrefix, "--workspace--") } },
+    autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix, maxProfiles: 1 },
+  }));
+  const first = f.runtime.config.profiles.get("first");
+  await mkdir(join(workspace, "second"));
+  assert.equal((await request(f.baseUrl, "/v1/profiles", { auth: false })).response.status, 401);
+  assert.equal((await request(f.baseUrl, "/v1/profiles", { token: limited })).response.status, 403);
+  let result = await request(f.baseUrl, "/v1/profiles");
+  assert.equal(result.response.status, 503);
+  assert.equal(result.body.error.code, "profile_discovery_failed");
+  assert.deepEqual([...f.runtime.config.profiles.keys()], ["default", "first"]);
+  await rm(join(workspace, "first"), { recursive: true });
+  // Missing projects remain owned and count toward the limit until restart.
+  assert.equal((await request(f.baseUrl, "/v1/profiles")).response.status, 503);
+  await rm(join(workspace, "second"), { recursive: true });
+  await rename(workspace, `${workspace}-offline`);
+  assert.equal((await request(f.baseUrl, "/v1/profiles")).response.status, 503);
+  await rename(`${workspace}-offline`, workspace);
+  result = await request(f.baseUrl, "/v1/profiles");
+  assert.equal(result.response.status, 200);
+  assert.deepEqual(result.body.profiles, ["default", "first"]);
+  assert.equal(f.runtime.config.profiles.get("first"), first);
+});
+
+test("live profile discovery reclaims orphan history when a project returns", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-live-profiles-orphan-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessionDirPrefix = join(root, "history");
+  const orphanDir = join(sessionDirPrefix, "--returned--");
+  await mkdir(workspace);
+  await mkdir(orphanDir, { recursive: true });
+  await writeFile(join(orphanDir, `${RESUME_ID}.jsonl`), JSON.stringify({
+    type: "session", version: 3, id: RESUME_ID, cwd: join(workspace, "returned"), timestamp: "2026-01-01T00:00:00Z",
+  }) + "\n");
+  const f = await fixture(t, config({
+    profiles: { default: { cwd: workspace, sessionDir: join(sessionDirPrefix, "--workspace--") } },
+    autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix },
+  }));
+  const defaultProfile = f.runtime.config.profiles.get("default");
+  assert.deepEqual(defaultProfile.extraSessionDirs, [orphanDir]);
+  await mkdir(join(workspace, "returned"));
+  await rename(sessionDirPrefix, `${sessionDirPrefix}-offline`);
+  await writeFile(sessionDirPrefix, "not a directory");
+  assert.equal((await request(f.baseUrl, "/v1/profiles")).response.status, 503);
+  assert.deepEqual([...f.runtime.config.profiles.keys()], ["default"]);
+  assert.equal(f.runtime.config.profiles.get("default"), defaultProfile);
+  assert.deepEqual(defaultProfile.extraSessionDirs, [orphanDir]);
+  assert.deepEqual(f.runtime.config.discoveredProfiles, []);
+  await rm(sessionDirPrefix);
+  await rename(`${sessionDirPrefix}-offline`, sessionDirPrefix);
+  assert.equal((await request(f.baseUrl, "/v1/profiles")).response.status, 200);
+  assert.equal(f.runtime.config.profiles.get("default").extraSessionDirs, undefined);
+  assert.equal(f.runtime.config.profiles.get("returned").sessionDir, orphanDir);
+  assert.ok((await request(f.baseUrl, "/v1/history?profile=returned")).body.sessions.some((item) => item.id === RESUME_ID));
+  assert.ok(!(await request(f.baseUrl, "/v1/history?profile=default")).body.sessions.some((item) => item.id === RESUME_ID));
+});
+
+test("live profile discovery preserves history ownership for an active orphan fallback session", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-live-profiles-active-orphan-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace"), sessionDirPrefix = join(root, "history");
+  const orphanDir = join(sessionDirPrefix, "--returned--");
+  await mkdir(workspace);
+  await mkdir(orphanDir, { recursive: true });
+  await writeFile(join(orphanDir, `${RESUME_ID}.jsonl`), JSON.stringify({
+    type: "session", version: 3, id: RESUME_ID, cwd: join(workspace, "returned"), timestamp: "2026-01-01T00:00:00Z",
+  }) + "\n");
+  const f = await fixture(t, config({
+    profiles: { default: { cwd: workspace, sessionDir: join(sessionDirPrefix, "--workspace--") } },
+    autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix },
+  }));
+  const originalProfile = f.runtime.config.profiles.get("default");
+  const resumed = await createSession(f.baseUrl, { profile: "default", resume: RESUME_ID });
+  await mkdir(join(workspace, "returned"));
+  assert.equal((await request(f.baseUrl, "/v1/profiles")).response.status, 200);
+  assert.deepEqual(originalProfile.extraSessionDirs, [orphanDir], "running session history roots are immutable snapshots");
+  assert.equal(f.runtime.config.profiles.get("default").extraSessionDirs, undefined);
+  assert.deepEqual(f.children[0].signals, []);
+  assert.equal((await request(f.baseUrl, `/v1/sessions/${resumed}`, { method: "DELETE" })).response.status, 204);
+  assert.ok((await stat(join(orphanDir, `.archived-${RESUME_ID}`))).isFile());
+});
+
+test("live profile discovery revalidates session-directory overlap and SSH source boundaries", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-live-profiles-security-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const ssh of [false, true]) {
+    const workspace = join(root, ssh ? "ssh" : "overlap"), sessionDirPrefix = join(root, ssh ? "ssh-history" : "history");
+    const name = ssh ? "agent-source" : "workspace";
+    await mkdir(workspace);
+    const f = await fixture(t, config({
+      profiles: { default: { cwd: root, sessionDir: join(sessionDirPrefix, "--workspace--") } },
+      ...(ssh ? { sandbox: { enable: true, executable: "/bin/bwrap", sshAgentSocket: join(workspace, name, "agent.sock") } } : {}),
+      autoDiscoverProfiles: { enable: true, root: workspace, sessionDirPrefix, sshAgentForwarding: ssh },
+    }), { realpath: sandboxRealpath });
+    await mkdir(join(workspace, name));
+    const result = await request(f.baseUrl, "/v1/profiles");
+    assert.equal(result.response.status, 503);
+    assert.equal(result.body.error.code, "profile_discovery_failed");
+    assert.deepEqual([...f.runtime.config.profiles.keys()], ["default"]);
+    assert.deepEqual(f.runtime.config.discoveredProfiles, []);
+    assert.equal(f.spawns.length, 0);
+  }
+});
+
+test("live profile discovery remains opt-in", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-live-profiles-disabled-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const f = await fixture(t, config({
+    profiles: { default: { cwd: root } },
+    autoDiscoverProfiles: { enable: false, root, sessionDirPrefix: join(root, "history") },
+  }));
+  await mkdir(join(root, "not-discovered"));
+  assert.deepEqual((await request(f.baseUrl, "/v1/profiles")).body.profiles, ["default"]);
+});
 
 test("sandboxed RPC sessions communicate through the supervisor without sharing registry or histories", { skip: process.platform !== "linux" }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-post-separated-"));

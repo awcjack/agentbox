@@ -225,6 +225,37 @@ function normalizeCommands(value, fallback, label) {
   return new Set(commands);
 }
 
+function validateProfileDirectories(profiles, sandbox) {
+  if (profiles.size === 0) throw new Error("piRpcApi.profiles must define at least one profile");
+  if ([...profiles.values()].some((profile) => profile.sshAgentForwarding)) {
+    for (const owner of profiles.values()) {
+      for (const source of [sandbox.sshAgentSocket, sandbox.sshKnownHostsPath]) {
+        if (typeof source === "string" && (containsFolder(source, normalizePath(owner.cwd)) ||
+            (owner.sessionDir !== undefined && containsFolder(source, owner.sessionDir)))) {
+          throw new Error("SSH sources must not be inside any profile workspace or session directory");
+        }
+      }
+    }
+  }
+  const ownedSessionDirs = [];
+  for (const [name, profile] of profiles) {
+    if (profile.sshAgentForwarding && (!sandbox.enable || sandbox.sshAgentSocket === null)) {
+      throw new Error(`profile ${name} SSH forwarding requires sandbox.enable and sandbox.sshAgentSocket`);
+    }
+    if (sandbox.enable && (typeof profile.sessionDir !== "string" || !profile.sessionDir.startsWith("/") ||
+        profile.sessionDir.includes("\0") || normalizePath(profile.sessionDir) !== profile.sessionDir)) {
+      throw new Error(`piRpcApi.profiles.${name}.sessionDir must be a normalized absolute path when sandbox is enabled`);
+    }
+    if (profile.sessionDir === undefined) continue;
+    for (const owner of ownedSessionDirs) {
+      if (profile.sessionDir === owner.path || profile.sessionDir.startsWith(`${owner.path}/`) || owner.path.startsWith(`${profile.sessionDir}/`)) {
+        throw new Error(`profile session directories must not overlap (${owner.name} and ${name})`);
+      }
+    }
+    ownedSessionDirs.push({ name, path: profile.sessionDir });
+  }
+}
+
 export function normalizeConfig(runtimeConfig, environment = process.env, dependencies = {}) {
   const root = assertObject(runtimeConfig, "runtime config");
   // The managed browser extension owns validation of the browser section.
@@ -405,6 +436,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
   }
 
   const discoveredProfiles = [];
+  let refreshProfiles;
   if (raw.autoDiscoverProfiles !== undefined) {
     const discovery = assertObject(raw.autoDiscoverProfiles, "piRpcApi.autoDiscoverProfiles");
     assertKnownKeys(discovery, new Set([
@@ -473,83 +505,77 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
         if (profile.sessionDir === undefined) continue;
         ownedBeforeDiscovery.push({ name, path: profile.sessionDir });
       }
-      // Do not reuse dependencies.realpath: createRuntime uses that hook for the
-      // Pi executable store-path check, which is unrelated to workspace scanning.
-      const discovered = discoverWorkspaceProfiles({
+      // Freeze the validated discovery policy, not the filesystem snapshot. Do
+      // not reuse dependencies.realpath: that hook resolves the Pi executable.
+      const discoveryOptions = {
         root: discovery.root,
         sessionDirPrefix: discovery.sessionDirPrefix,
-        exclude: discovery.exclude ?? [],
-        excludePrefixes: discovery.excludePrefixes ?? ["tmp-"],
+        exclude: Array.isArray(discovery.exclude) ? [...discovery.exclude] : discovery.exclude ?? [],
+        excludePrefixes: Array.isArray(discovery.excludePrefixes) ? [...discovery.excludePrefixes] : discovery.excludePrefixes ?? ["tmp-"],
         maxProfiles: discovery.maxProfiles ?? 64,
         existingNames: new Set(profiles.keys()),
         existingSessionDirs: ownedBeforeDiscovery,
         ...(dependencies.readdirSync ? { readdirSync: dependencies.readdirSync } : {}),
         ...(dependencies.statSync ? { statSync: dependencies.statSync } : {}),
         ...(dependencies.discoverRealpathSync ? { realpathSync: dependencies.discoverRealpathSync } : {}),
-      });
-      for (const entry of discovered) {
-        profiles.set(entry.name, {
-          cwd: entry.cwd,
-          allowSubdirectories: true,
-          sessionDir: entry.sessionDir,
-          args: templateArgs,
-          env: resolvedTemplateEnv,
-          sshAgentForwarding: discovery.sshAgentForwarding ?? false,
-          allowedCommands: templateCommands,
-        });
-        discoveredProfiles.push(entry.name);
-      }
+      };
+      const sshAgentForwarding = discovery.sshAgentForwarding ?? false;
+      refreshProfiles = () => {
+        const discovered = discoverWorkspaceProfiles(discoveryOptions);
+        const nextProfiles = new Map(profiles);
+        const added = [];
+        for (const entry of discovered) {
+          // Keep existing profile objects, including profiles whose directories
+          // disappeared. Running sessions and their history retain ownership.
+          if (nextProfiles.has(entry.name)) continue;
+          nextProfiles.set(entry.name, {
+            cwd: entry.cwd,
+            allowSubdirectories: true,
+            sessionDir: entry.sessionDir,
+            args: templateArgs,
+            env: resolvedTemplateEnv,
+            sshAgentForwarding,
+            allowedCommands: templateCommands,
+          });
+          added.push(entry.name);
+        }
+        if (discoveredProfiles.length + added.length > discoveryOptions.maxProfiles) {
+          throw new Error(`autoDiscoverProfiles retained profiles would exceed maxProfiles ${discoveryOptions.maxProfiles}`);
+        }
+        validateProfileDirectories(nextProfiles, sandbox);
 
-      // History folders for projects whose cwd is temporarily missing stay visible
-      // under default instead of disappearing from the session list.
-      const defaultProfile = profiles.get("default");
-      if (defaultProfile?.sessionDir) {
-        const ownedForOrphans = [];
-        for (const [name, profile] of profiles) {
-          if (profile.sessionDir === undefined) continue;
-          ownedForOrphans.push({ name, path: profile.sessionDir });
+        // Reclaim orphan history when its workspace returns. Compute everything
+        // before publishing so a failed scan leaves profiles and history intact.
+        const defaultProfile = nextProfiles.get("default");
+        let extraSessionDirs;
+        if (defaultProfile?.sessionDir) {
+          const ownedForOrphans = [...nextProfiles].filter(([, profile]) => profile.sessionDir !== undefined)
+            .map(([name, profile]) => ({ name, path: profile.sessionDir }));
+          extraSessionDirs = discoverOrphanSessionDirs({
+            sessionDirPrefix: discoveryOptions.sessionDirPrefix,
+            existingSessionDirs: ownedForOrphans,
+            ...(dependencies.readdirSync ? { readdirSync: dependencies.readdirSync } : {}),
+            ...(dependencies.statSync ? { statSync: dependencies.statSync } : {}),
+          }).map((item) => item.sessionDir);
         }
-        const orphans = discoverOrphanSessionDirs({
-          sessionDirPrefix: discovery.sessionDirPrefix,
-          existingSessionDirs: ownedForOrphans,
-          ...(dependencies.readdirSync ? { readdirSync: dependencies.readdirSync } : {}),
-          ...(dependencies.statSync ? { statSync: dependencies.statSync } : {}),
-        });
-        if (orphans.length) {
-          defaultProfile.extraSessionDirs = orphans.map((item) => item.sessionDir);
+        // Preserve the Map identity used by the supervisor-owned post broker.
+        for (const name of added) profiles.set(name, nextProfiles.get(name));
+        discoveredProfiles.push(...added);
+        if (extraSessionDirs !== undefined &&
+            JSON.stringify(extraSessionDirs) !== JSON.stringify(defaultProfile.extraSessionDirs ?? [])) {
+          // Active sessions (and in-flight resumes) keep their original history
+          // roots even when the catalog hands an orphan directory to a project.
+          const updatedDefault = { ...defaultProfile };
+          if (extraSessionDirs.length) updatedDefault.extraSessionDirs = extraSessionDirs;
+          else delete updatedDefault.extraSessionDirs;
+          profiles.set("default", updatedDefault);
         }
-      }
+      };
+      refreshProfiles();
     }
   }
 
-  if (profiles.size === 0) throw new Error("piRpcApi.profiles must define at least one profile");
-  if ([...profiles.values()].some((profile) => profile.sshAgentForwarding)) {
-    for (const owner of profiles.values()) {
-      for (const source of [sandbox.sshAgentSocket, sandbox.sshKnownHostsPath]) {
-        if (typeof source === "string" && (containsFolder(source, normalizePath(owner.cwd)) ||
-            (owner.sessionDir !== undefined && containsFolder(source, owner.sessionDir)))) {
-          throw new Error("SSH sources must not be inside any profile workspace or session directory");
-        }
-      }
-    }
-  }
-  const ownedSessionDirs = [];
-  for (const [name, profile] of profiles) {
-    if (profile.sshAgentForwarding && (!sandbox.enable || sandbox.sshAgentSocket === null)) {
-      throw new Error(`profile ${name} SSH forwarding requires sandbox.enable and sandbox.sshAgentSocket`);
-    }
-    if (sandbox.enable && (typeof profile.sessionDir !== "string" || !profile.sessionDir.startsWith("/") ||
-        profile.sessionDir.includes("\0") || normalizePath(profile.sessionDir) !== profile.sessionDir)) {
-      throw new Error(`piRpcApi.profiles.${name}.sessionDir must be a normalized absolute path when sandbox is enabled`);
-    }
-    if (profile.sessionDir === undefined) continue;
-    for (const owner of ownedSessionDirs) {
-      if (profile.sessionDir === owner.path || profile.sessionDir.startsWith(`${owner.path}/`) || owner.path.startsWith(`${profile.sessionDir}/`)) {
-        throw new Error(`profile session directories must not overlap (${owner.name} and ${name})`);
-      }
-    }
-    ownedSessionDirs.push({ name, path: profile.sessionDir });
-  }
+  validateProfileDirectories(profiles, sandbox);
 
   const limitsRaw = raw.limits === undefined ? {} : assertObject(raw.limits, "piRpcApi.limits");
   assertKnownKeys(limitsRaw, new Set(Object.keys(DEFAULT_LIMITS)), "piRpcApi.limits");
@@ -594,6 +620,7 @@ export function normalizeConfig(runtimeConfig, environment = process.env, depend
     tokens,
     profiles,
     discoveredProfiles,
+    refreshProfiles,
     limits,
     allowedOrigins: new Set(allowedOrigins),
   };
@@ -1395,6 +1422,8 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
 
       if (url.pathname === "/v1/profiles" && request.method === "GET") {
         authenticate(request, config, "profiles:read");
+        try { config.refreshProfiles?.(); }
+        catch { throw new HttpError(503, "profile_discovery_failed", "Project discovery failed. Existing projects remain available; retry Refresh after checking the workspace and discovery limit."); }
         return json(response, 200, { profiles: [...config.profiles.keys()] });
       }
       if (url.pathname === "/v1/folders" && request.method === "GET") {
