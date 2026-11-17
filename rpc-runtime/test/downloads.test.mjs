@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { execFileSync } from "node:child_process";
-import { link, mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, open, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { Worker } from "node:worker_threads";
 import test from "node:test";
-import { DownloadError, MAX_DOWNLOAD_BYTES, downloadInternals, readWorkspaceDownload } from "../downloads.mjs";
+import { DownloadError, MAX_DOWNLOAD_BYTES, MAX_CHECKOUT_SCAN_ENTRIES, downloadInternals, readWorkspaceDownload } from "../downloads.mjs";
 import { createRuntime } from "../runtime.mjs";
 
 const linux = { skip: process.platform !== "linux" };
@@ -147,6 +147,142 @@ test("intermediate directory swaps cannot redirect reads outside the workspace",
   } finally { await worker.terminate(); }
 });
 
+async function checkoutFile(cwd, name, path, data, { worktree = false } = {}) {
+  const checkout = join(cwd, name);
+  await mkdir(checkout, { recursive: true });
+  if (worktree) await writeFile(join(checkout, ".git"), "gitdir: /outside/never-follow-this-pointer\n");
+  else await mkdir(join(checkout, ".git"));
+  const target = join(checkout, path);
+  await mkdir(join(target, ".."), { recursive: true });
+  await writeFile(target, data);
+  return target;
+}
+
+test("missing relative paths resolve in a unique immediate Git checkout", linux, async (t) => {
+  const { cwd } = await workspace(t);
+  const path = "apps/app-web/AGENTS.md";
+  const target = await checkoutFile(cwd, "use-brian", path, "fixture instructions");
+  const relative = await readWorkspaceDownload(cwd, path);
+  assert.equal(Buffer.from(relative.data, "base64").toString(), "fixture instructions");
+  assert.equal(relative.filename, "AGENTS.md");
+  assert.deepEqual(await readWorkspaceDownload(cwd, `use-brian/${path}`), relative);
+  assert.deepEqual(await readWorkspaceDownload(cwd, target), relative);
+  assert.deepEqual(await readWorkspaceDownload(join(cwd, "use-brian"), path), relative);
+  // Explicit absolute paths are never reinterpreted, even with a valid fallback.
+  await assert.rejects(readWorkspaceDownload(cwd, join(cwd, path)), code("download_not_found"));
+  await assert.rejects(readWorkspaceDownload(cwd, "../apps/app-web/AGENTS.md"), code("download_forbidden"));
+});
+
+test("exact workspace files win and duplicate checkout matches require an explicit path", linux, async (t) => {
+  const { cwd } = await workspace(t);
+  const a = await checkoutFile(cwd, "first", "report.md", "first");
+  const b = await checkoutFile(cwd, "second", "report.md", "second", { worktree: true });
+  await assert.rejects(readWorkspaceDownload(cwd, "report.md"), code("download_ambiguous"));
+  assert.equal(Buffer.from((await readWorkspaceDownload(cwd, a)).data, "base64").toString(), "first");
+  assert.equal(Buffer.from((await readWorkspaceDownload(cwd, b)).data, "base64").toString(), "second");
+  await writeFile(join(cwd, "report.md"), "workspace");
+  assert.equal(Buffer.from((await readWorkspaceDownload(cwd, "report.md")).data, "base64").toString(), "workspace");
+  // Invalid exact files must not trigger a different checkout lookup.
+  await rm(join(cwd, "report.md"));
+  await symlink(a, join(cwd, "report.md"));
+  await assert.rejects(readWorkspaceDownload(cwd, "report.md"), code("download_forbidden"));
+});
+
+test("checkout fallback is shallow and never follows symlinks, gitdir pointers, or arbitrary directories", linux, async (t) => {
+  const { root, cwd } = await workspace(t);
+  await checkoutFile(root, "outside", "secret.md", "PRIVATE");
+  await symlink(join(root, "outside"), join(cwd, "symlink-checkout"));
+  await checkoutFile(cwd, "container/deeper", "secret.md", "deep");
+  await checkoutFile(cwd, ".hidden", "secret.md", "hidden");
+  await mkdir(join(cwd, "ordinary"));
+  await writeFile(join(cwd, "ordinary", "secret.md"), "not a checkout");
+  await mkdir(join(cwd, "marker-symlink"));
+  await symlink(join(root, "outside", ".git"), join(cwd, "marker-symlink", ".git"));
+  await writeFile(join(cwd, "marker-symlink", "secret.md"), "symlink marker");
+  await checkoutFile(cwd, "worktree", "public.md", "worktree", { worktree: true });
+  // The worktree marker's external gitdir is not read or searched.
+  await assert.rejects(readWorkspaceDownload(cwd, "secret.md"), code("download_not_found"));
+  assert.equal(Buffer.from((await readWorkspaceDownload(cwd, "public.md")).data, "base64").toString(), "worktree");
+  await symlink(join(root, "outside", "secret.md"), join(cwd, "worktree", "leaf.md"));
+  await assert.rejects(readWorkspaceDownload(cwd, "leaf.md"), code("download_not_found"));
+  await symlink(join(root, "outside"), join(cwd, "worktree", "escape"));
+  await assert.rejects(readWorkspaceDownload(cwd, "escape/secret.md"), code("download_not_found"));
+});
+
+test("checkout fallback retains file-type, hardlink, and size restrictions", linux, async (t) => {
+  const { root, cwd } = await workspace(t);
+  const target = await checkoutFile(cwd, "repo", "huge.bin", "");
+  const large = await open(target, "w");
+  await large.truncate(MAX_DOWNLOAD_BYTES + 1); await large.close();
+  await assert.rejects(readWorkspaceDownload(cwd, "huge.bin"), code("download_too_large"));
+  await writeFile(join(root, "outside"), "PRIVATE");
+  await link(join(root, "outside"), join(cwd, "repo", "hardlink"));
+  await assert.rejects(readWorkspaceDownload(cwd, "hardlink"), code("download_forbidden"));
+  execFileSync("mkfifo", [join(cwd, "repo", "fifo")]);
+  await assert.rejects(readWorkspaceDownload(cwd, "fifo"), code("download_forbidden"));
+});
+
+test("incomplete checkout scans never claim a unique match and exact paths bypass the scan", linux, async (t) => {
+  const { cwd } = await workspace(t);
+  const target = await checkoutFile(cwd, "repo", "file.txt", "exact");
+  for (let i = 0; i < MAX_CHECKOUT_SCAN_ENTRIES - 1; i++) await writeFile(join(cwd, `filler-${i}`), "");
+  assert.equal(Buffer.from((await readWorkspaceDownload(cwd, "file.txt")).data, "base64").toString(), "exact");
+  await writeFile(join(cwd, "one-too-many"), "");
+  await assert.rejects(readWorkspaceDownload(cwd, "file.txt"), code("download_search_limit"));
+  assert.equal(Buffer.from((await readWorkspaceDownload(cwd, target)).data, "base64").toString(), "exact");
+});
+
+test("inaccessible checkout candidates prevent an unverified unique fallback", { skip: process.platform !== "linux" || process.getuid?.() === 0 }, async (t) => {
+  const { cwd } = await workspace(t);
+  await checkoutFile(cwd, "valid", "file.txt", "public");
+  await checkoutFile(cwd, "inaccessible", "file.txt", "not readable");
+  await chmod(join(cwd, "inaccessible"), 0);
+  try {
+    await assert.rejects(readWorkspaceDownload(cwd, "file.txt"), code("download_forbidden"));
+    // Exact requests do not scan unrelated checkouts.
+    assert.equal(Buffer.from((await readWorkspaceDownload(cwd, "valid/file.txt")).data, "base64").toString(), "public");
+  } finally { await chmod(join(cwd, "inaccessible"), 0o700); }
+});
+
+test("repeated ambiguous checkout lookups close their pinned directory and file handles", linux, async (t) => {
+  const { cwd } = await workspace(t);
+  await checkoutFile(cwd, "one", "file.txt", "one");
+  await checkoutFile(cwd, "two", "file.txt", "two");
+  const before = (await readdir("/proc/self/fd")).length;
+  for (let i = 0; i < 30; i++) await assert.rejects(readWorkspaceDownload(cwd, "file.txt"), code("download_ambiguous"));
+  assert.equal((await readdir("/proc/self/fd")).length, before);
+});
+
+test("checkout directory swaps cannot redirect fallback reads outside the workspace", linux, async (t) => {
+  const { root, cwd } = await workspace(t);
+  await checkoutFile(cwd, "repo", "report.md", "public");
+  await checkoutFile(root, "outside", "report.md", "PRIVATE");
+  const worker = new Worker(`
+    const { workerData, parentPort } = require('node:worker_threads');
+    const { renameSync, symlinkSync, unlinkSync } = require('node:fs');
+    const { cwd, outside } = workerData;
+    parentPort.postMessage('ready');
+    while (true) {
+      renameSync(cwd + '/repo', cwd + '/.held');
+      symlinkSync(outside, cwd + '/repo');
+      unlinkSync(cwd + '/repo');
+      renameSync(cwd + '/.held', cwd + '/repo');
+    }
+  `, { eval: true, workerData: { cwd, outside: join(root, "outside") } });
+  try {
+    await new Promise((resolve, reject) => { worker.once("message", resolve); worker.once("error", reject); });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try {
+        const result = await readWorkspaceDownload(cwd, "report.md");
+        assert.equal(Buffer.from(result.data, "base64").toString(), "public");
+      } catch (error) {
+        assert.ok(error instanceof DownloadError);
+        assert.ok(["download_forbidden", "download_not_found"].includes(error.code));
+      }
+    }
+  } finally { await worker.terminate(); }
+});
+
 test("unsupported platforms fail closed", { skip: process.platform === "linux" }, async () => {
   await assert.rejects(readWorkspaceDownload("/workspace", "file"), code("download_unavailable"));
 });
@@ -219,6 +355,24 @@ test("HTTP downloads require both scopes, prompt, identity, running and unlocked
   const result = await download();
   assert.equal(result.status, 200);
   assert.deepEqual(result.body, { data: "AP8B", filename: "file.bin", mimeType: "application/octet-stream", nativeSessionId: session.nativeSessionId });
+});
+
+test("HTTP resolves repository-relative paths without changing workspace confinement", linux, async (t) => {
+  const { cwd, download } = await fixture(t);
+  const path = "apps/app-web/AGENTS.md";
+  const target = await checkoutFile(cwd, "use-brian", path, "checkout document");
+  const result = await download({ path });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.filename, "AGENTS.md");
+  assert.equal(Buffer.from(result.body.data, "base64").toString(), "checkout document");
+  assert.equal((await download({ path: target })).status, 200);
+  assert.equal((await download({ path: join(cwd, path) })).status, 404);
+  await checkoutFile(cwd, "other-checkout", path, "different document");
+  const ambiguous = await download({ path });
+  assert.equal(ambiguous.status, 409);
+  assert.equal(ambiguous.body.error.code, "download_ambiguous");
+  assert.equal(ambiguous.body.data, undefined);
+  assert.equal((await download({ path: `use-brian/${path}` })).status, 200);
 });
 
 test("HTTP validates JSON, workspace boundary and security errors without partial data", linux, async (t) => {

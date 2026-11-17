@@ -127,6 +127,11 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   history. Referenced external files are not bundled. Exports can contain secrets.
 - **Download file…** beside Export JSON prompts for a workspace file path, relative
   to the selected session's working directory or absolute within its workspace.
+  If a relative file is absent, the server also checks immediate Git checkout
+  directories for a unique match. For example, `apps/app-web/AGENTS.md` can resolve
+  inside `use-brian/` when that checkout is beneath the selected workspace.
+  Multiple matches or an over-limit checkout scan ask you to include the checkout
+  directory or enter an absolute workspace path; absolute paths stay exact.
   Local file links in assistant responses download **in place**: click the original
   label (for example, **Audit** in a document table) instead of finding a separate
   button below the response. Likely file paths in inline code are clickable too.

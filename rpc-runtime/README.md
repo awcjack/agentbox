@@ -882,9 +882,23 @@ A successful response is JSON:
 ```
 
 Paths may be absolute or relative to **the session's `profile.cwd`**, but their
-normalized target must be a file strictly inside that workspace. Parent traversal
-outside it, arbitrary host paths, and private sandbox `/tmp` paths are not
-supported. This endpoint does not enter a child process's mount namespace or read
+normalized target must be a file strictly inside that workspace. Exact workspace
+paths take precedence. If a **relative** path is missing, the runtime also tries
+that path inside immediate, non-hidden checkout directories with a `.git`
+directory or regular worktree marker file. For example, with cwd
+`/workspace/brian`, `apps/app-web/AGENTS.md` can resolve to
+`/workspace/brian/use-brian/apps/app-web/AGENTS.md`. The lookup is shallow and
+bounded to 256 workspace directory entries; it does not run Git, read marker
+contents, follow gitdir pointers, or recursively search by filename.
+
+A fallback must find exactly one matching checkout during the scan. Multiple
+matches fail with `download_ambiguous` (409); an incomplete scan fails with
+`download_search_limit` (409). Include the checkout directory (`use-brian/apps/...`)
+or use an absolute workspace path to disambiguate or bypass the fallback.
+Absolute paths are always exact. Like the file read itself, checkout enumeration
+is not a transactional filesystem snapshot; concurrent workspace changes can
+alter which candidates are observed. Parent traversal outside the workspace,
+arbitrary host paths, and private sandbox `/tmp` paths are not supported. This endpoint does not enter a child process's mount namespace or read
 its `/proc/<pid>/root`. To download sandbox-generated output, write it into the
 shared workspace first. Uploads in runtime temporary storage are not downloadable
 through this endpoint either.
@@ -893,6 +907,8 @@ All symlinks are denied, including internal symlinks and symlink components in
 the configured workspace path. Linux directory traversal uses `O_NOFOLLOW`
 directory handles and `/proc/self/fd` to pin each directory before opening its
 child; swapping an intermediate path for a symlink cannot redirect a later open.
+The same pinned workspace root is retained through exact and checkout lookups;
+symlinked checkouts and symlinked `.git` markers are not fallback candidates.
 Only regular files with exactly one hard link are accepted, excluding directories,
 FIFOs, devices, and hardlinked files. Non-Linux systems (or environments without
 usable procfs) fail closed rather than falling back to a racy realpath/open pair.
