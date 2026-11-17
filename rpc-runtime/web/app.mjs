@@ -806,10 +806,46 @@ function scheduleSessionPoll() {
     } finally { if (ownEpoch === epoch) scheduleSessionPoll(); }
   }, 1500);
 }
-async function refreshSessions() {
-  const version = ++listVersion, ownEpoch = epoch;
-  refreshFolders();
+// Commit the catalog and its directories together, only for the latest list
+// request. A failed/denied read leaves the last usable project data intact.
+async function refreshProjects(isCurrent) {
   try {
+    const result = await api.request("/v1/profiles", { signal: auth.signal });
+    if (!isCurrent()) return;
+    const roots = await api.request("/v1/folders", { signal: auth.signal });
+    if (!isCurrent()) return;
+    const nextProfiles = [...new Set((result.profiles || []).filter((profile) => typeof profile === "string"))];
+    const nextRoots = new Map();
+    for (const root of roots.roots || []) {
+      if (typeof root?.profile === "string" && typeof root?.path === "string" && root.path.startsWith("/")) {
+        nextRoots.set(root.profile, root.path);
+      }
+    }
+    const filter = $("profile-filter"), selected = filter.value;
+    const all = element("option", "", "All profiles"); all.value = "";
+    filter.replaceChildren(all);
+    for (const profile of nextProfiles) {
+      const option = element("option", "", profile); option.value = profile;
+      filter.append(option);
+    }
+    filter.value = nextProfiles.includes(selected) ? selected : "";
+    profiles = nextProfiles;
+    profileRoots.clear();
+    for (const [profile, path] of nextRoots) profileRoots.set(profile, path);
+    updateControls(); renderSessions();
+  } catch (error) {
+    if (!isCurrent()) return;
+    if (error.status === 401) report(error);
+    else showNotice(`Projects could not be refreshed: ${error.message} Previous project data is unchanged; existing sessions can still be opened.`, true);
+  }
+}
+async function refreshSessions({ refreshProjects: projects = false } = {}) {
+  const version = ++listVersion, ownEpoch = epoch;
+  const isCurrent = () => ownEpoch === epoch && version === listVersion;
+  try {
+    if (projects) await refreshProjects(isCurrent);
+    if (!isCurrent()) return;
+    refreshFolders();
     const result = await api.request("/v1/sessions", { signal: auth.signal });
     if (ownEpoch !== epoch || version !== listVersion) return;
     sessions = result.sessions || []; renderSessions();
@@ -2337,28 +2373,9 @@ async function connectWithToken(nextToken, { remember = false } = {}) {
     const result = await api.request("/v1/sessions", { signal: auth.signal });
     if (ownEpoch !== epoch) return;
     sessions = result.sessions || [];
-    try { const result = await api.request("/v1/profiles", { signal: auth.signal }); if (ownEpoch === epoch) profiles = result.profiles || []; }
-    catch (error) { if (error.status === 401) throw error; if (ownEpoch === epoch) showNotice(`Profiles unavailable: ${error.message} Existing sessions can still be opened.`, true); }
+    const version = listVersion;
+    await refreshProjects(() => ownEpoch === epoch && version === listVersion);
     if (ownEpoch !== epoch) return;
-    profileRoots.clear();
-    try {
-      const roots = await api.request("/v1/folders", { signal: auth.signal });
-      if (ownEpoch === epoch) {
-        for (const root of roots.roots || []) {
-          if (typeof root?.profile === "string" && typeof root?.path === "string" && root.path.startsWith("/")) {
-            profileRoots.set(root.profile, root.path);
-          }
-        }
-      }
-    } catch (error) {
-      if (error.status === 401) throw error;
-      if (ownEpoch === epoch) showNotice(`Project directories unavailable: ${error.message} Projects still appear by name.`, true);
-    }
-    if (ownEpoch !== epoch) return;
-    for (const profile of profiles) {
-      const option = element("option", "", profile); option.value = profile;
-      $("profile-filter").append(option);
-    }
     if (remember) saveRememberedToken(preferenceStorage, token);
     else clearRememberedToken(preferenceStorage);
     $("login-dialog").close(); setNetwork("online", "Connected"); updateControls(); renderSessions(); refreshFolders(true); refreshSessions(); scheduleSessionPoll();
@@ -2400,7 +2417,7 @@ $("folder-form").addEventListener("submit", (event) => {
 });
 $("refresh-sessions").addEventListener("click", () => {
   if (current) { current.commands = undefined; current.commandError = null; current.thinkingCatalog = null; current.modelsRequested = true; current.forceModelsRequested = true; cancelModels(current); }
-  refreshSessions();
+  void refreshSessions({ refreshProjects: true });
   if (current?.online && current.ready) requestRefresh(current);
   else if (current) activate(current.meta, { reconnect: true });
 });

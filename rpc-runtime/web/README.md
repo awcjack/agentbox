@@ -32,6 +32,14 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   Pick an existing folder label, choose **Create new folder…** for a name such as
   `Work/Project`, or leave **Ungrouped**. A folder heading's **+** preselects that
   group without toggling collapse. Creation expands the chosen project and group.
+  **Refresh** rescans available workspace projects, then reloads their directory
+  roots before refreshing the sidebar and history. Newly discovered projects appear
+  without reloading the page. The selected profile filter is kept if still available
+  (otherwise it resets to All profiles); open conversations and drafts are preserved.
+  Failed or scope-denied project reads retain the previous project list/directories
+  and show a notice; existing sessions remain accessible to restricted tokens without
+  `profiles:read`. Project discovery also runs at login, not on the lightweight
+  1.5-second session-status poll.
 - Each opened session has a tab. Switch tabs with the mouse or Left/Right,
   Home/End keys; drafts and approvals remain independent. Closing a tab leaves
   Pi running and its draft available when reopened from the sidebar. End & archive
