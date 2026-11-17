@@ -127,12 +127,15 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   history. Referenced external files are not bundled. Exports can contain secrets.
 - **Download file…** beside Export JSON prompts for a workspace file path, relative
   to the selected session's working directory or absolute within its workspace.
-  Assistant responses also offer up to six **Download path** buttons alongside
-  Copy for likely inline-code paths, local Markdown links, and bare absolute paths.
-  Use the manual action for paths the heuristic misses; code/angle-link paths can
-  contain spaces. Suggestions do not check whether files exist. Downloads happen
-  only on explicit clicks, never while rendering or following a Markdown link;
-  the safe Markdown renderer is unchanged. Requests use the authenticated API
+  Local file links in assistant responses download **in place**: click the original
+  label (for example, **Audit** in a document table) instead of finding a separate
+  button below the response. Likely file paths in inline code are clickable too.
+  These controls keep their text, expose a download label to assistive technology,
+  and show the destination path on hover. There is no six-file cap or extra download
+  action row. Ordinary HTTP(S), mail and anchor links retain their normal behavior.
+  Use the manual action for bare/unrecognized paths; code/angle-link paths can
+  contain spaces. Paths are not checked for existence until clicked. Rendering
+  never fetches or downloads files; local controls use the authenticated API
   transport, never bearer-bearing links. The server limits files to **16 MiB**,
   rejects symlinks and paths outside the workspace, and does not support private
   `/tmp` files. No model prompt is sent and no workspace file is changed.
