@@ -117,6 +117,21 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   session; it neither prompts the model nor changes the conversation. Runtime
   record-size limits still apply; failures are shown without downloading partial
   history. Referenced external files are not bundled. Exports can contain secrets.
+- **Download file…** beside Export JSON prompts for a workspace file path, relative
+  to the selected session's working directory or absolute within its workspace.
+  Assistant responses also offer up to six **Download path** buttons alongside
+  Copy for likely inline-code paths, local Markdown links, and bare absolute paths.
+  Use the manual action for paths the heuristic misses; code/angle-link paths can
+  contain spaces. Suggestions do not check whether files exist. Downloads happen
+  only on explicit clicks, never while rendering or following a Markdown link;
+  the safe Markdown renderer is unchanged. Requests use the authenticated API
+  transport, never bearer-bearing links. The server limits files to **16 MiB**,
+  rejects symlinks and paths outside the workspace, and does not support private
+  `/tmp` files. No model prompt is sent and no workspace file is changed.
+  Switching sessions/conversations or logging out before the response arrives
+  discards the pending save. Errors appear in the workspace notice. Files are
+  saved as binary attachments through temporary, revoked Blob URLs and may contain
+  sensitive data. Browser download settings may ask where to save them.
 - Raster image and file attachments from file selection, clipboard paste, or
   drag-and-drop onto the conversation transcript or composer, up to 5 MiB
   combined before base64 encoding, with previews, removal, and a 7.5 MiB

@@ -13,6 +13,7 @@ import { sessionTitle } from "./session-title.mjs";
 import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
 import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
 import { mountBrowserPanel } from "./browser-panel.mjs";
+import { extractDownloadPaths, fetchDownload } from "./downloads.mjs";
 
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
@@ -156,8 +157,12 @@ function browserViewAvailable(ctx) {
     && ctx.meta.nativeSessionId && !ctx.record.ending && !ctx.record.conversationBusy
     && !ctx.replacing && !ctx.meta.conversationReplacing && !document.hidden);
 }
+function canDownloadFile(ctx) {
+  return canWrite(ctx, "prompt") && Boolean(ctx.meta.nativeSessionId);
+}
 function updateControls() {
   const ctx = current;
+  $("download-file").disabled = !canDownloadFile(ctx) || Boolean(ctx?.record.downloading);
   $("open-browser").disabled = !browserViewAvailable(ctx);
   if (browserPanel && (!browserViewAvailable(ctx) || browserBinding?.ctx !== ctx || browserBinding?.nativeId !== ctx?.meta.nativeSessionId)) closeContextPane();
   $("export-conversation").disabled = !canExportConversation(ctx);
@@ -1255,6 +1260,13 @@ function renderMessages() {
         });
         actions.append(copy);
       }
+      if (message.role === "assistant") for (const filePath of extractDownloadPaths(text)) {
+        const download = element("button", "text-button", `Download ${filePath}`);
+        download.type = "button"; download.title = `Download workspace file: ${filePath} (maximum 16 MiB)`;
+        download.disabled = !canDownloadFile(ctx) || Boolean(ctx.record.downloading);
+        download.addEventListener("click", () => downloadWorkspaceFile(ctx, filePath));
+        actions.append(download);
+      }
       if (message.role === "user") for (const action of ["revert", "fork"]) {
         const button = element("button", "text-button", action === "revert" ? "Revert" : "Fork");
         button.type = "button"; button.dataset.conversationAction = action;
@@ -1603,6 +1615,34 @@ async function openConversationAction(ctx, message, action) {
     $("conversation-action-dialog").showModal(); $("cancel-conversation-action").focus();
   } catch (error) { report(error, ctx); }
   finally { ctx.record.conversationBusy = false; if (active(ctx)) { updateControls(); requestRefresh(ctx); } }
+}
+
+// Keep the manual action next to Export without changing the static HTML contract.
+const downloadFileButton = element("button", "text-button", "Download file…");
+downloadFileButton.id = "download-file"; downloadFileButton.type = "button"; downloadFileButton.disabled = true;
+downloadFileButton.title = "Download a workspace file by relative or absolute path (maximum 16 MiB; no symlinks or private /tmp files)";
+$("export-conversation").before(downloadFileButton);
+downloadFileButton.addEventListener("click", () => {
+  const ctx = current;
+  if (!canDownloadFile(ctx) || ctx.record.downloading) return;
+  const filePath = window.prompt("Download workspace file (maximum 16 MiB). Enter a relative path from this session's working directory or an absolute workspace path. Symlinks and private /tmp files are not supported:");
+  if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim());
+});
+async function downloadWorkspaceFile(ctx, filePath) {
+  if (!canDownloadFile(ctx) || ctx.record.downloading) return;
+  const nativeId = ctx.meta.nativeSessionId, ownSelection = selection, ownEpoch = epoch;
+  const valid = () => active(ctx) && selection === ownSelection && epoch === ownEpoch
+    && ctx.meta.nativeSessionId === nativeId && canDownloadFile(ctx);
+  ctx.record.downloading = true; updateControls(); scheduleRender();
+  try {
+    const saved = await fetchDownload({ request: (url, options) => api.request(url, options),
+      sessionId: ctx.id, nativeSessionId: nativeId, path: filePath, signal: ctx.controller.signal, valid });
+    if (saved) showNotice("File downloaded. Workspace files may contain sensitive data.");
+  } catch (error) { if (valid()) report(error, ctx); }
+  finally {
+    ctx.record.downloading = false;
+    if (active(ctx)) { updateControls(); scheduleRender(); }
+  }
 }
 
 $("export-conversation").addEventListener("click", async () => {
