@@ -712,7 +712,11 @@ Screenshots render inline in chat. The RPC **Browser** pane adds bounded main-ta
 preview and explicit, expiring human takeover; it never starts an unopened browser.
 Viewing requires `browser:read`; takeover also requires `browser:control`, alongside
 session scopes and profile permissions. There are no public CDP/stream/download
-endpoints.
+endpoints. Optional `settings.browser.decisions.enable` adds bounded OpenAI
+Decisions runs using a server-side API-key environment reference. Pi supplies
+permitted actions; Decisions selects among them without a main-model round trip
+per step. Managed policy and takeover checks still apply. It sends page text to
+OpenAI and is disabled by default; see [setup and limits](docs/browser.md#bounded-decisions-runs-opt-in).
 
 See [Managed Pi browser](docs/browser.md) for all settings, mandatory namespace
 sandbox prerequisites, session/authentication limits, the versioned result

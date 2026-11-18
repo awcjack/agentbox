@@ -32,6 +32,11 @@ services.agentbox.settings.browser = {
 | `commandTimeoutMs` | `30000` | Per-command deadline, range 1000–120000 ms. |
 | `idleTimeoutMs` | `300000` | Idle browser cleanup, range 10000–3600000 ms. |
 | `shmSize` | `"1g"` | Private container `/dev/shm` size; positive integer with optional `k`, `m`, or `g` suffix. `desktop.shmSize` takes precedence when desktop is also enabled. |
+| `decisions.enable` | `false` | Opt in to bounded OpenAI Decisions `run` actions. |
+| `decisions.apiKeyEnv` | `"OPENAI_API_KEY"` | Environment-variable **name**, matching `[A-Za-z_][A-Za-z0-9_]{0,127}`, not a key value. |
+| `decisions.timeoutMs` | `10000` | Per-API-request timeout, integer range 1000–30000 ms. |
+| `decisions.maxSteps` | `8` | Maximum API calls per run (including final checks), integer range 1–20. |
+| `decisions.minConfidence` | `0.85` | Minimum action-selection confidence, numeric range 0–1 inclusive. |
 
 The module generates the read-only runtime `browser` section. `shmSize` is a
 container setting, not a browser extension option. The MCP parser tolerates the
@@ -50,6 +55,99 @@ pin deliberately, rebuild the consuming configuration/image, and recreate the
 container and Pi processes to pick up the new image and mounted configuration.
 A UI refresh alone is insufficient. Builds/tests are not deployment or activation;
 perform any host rollout separately under the host's operational procedure.
+
+## Bounded Decisions runs (opt-in)
+
+This is a conservative bounded workflow helper, **not a fully autonomous browser**.
+Performance has not been benchmarked. It uses the fixed OpenAI endpoint
+`https://api.openai.com/v1/decisions` and model `gpt-6-luna`; neither is a
+model-supplied URL or configurable provider. See the
+[OpenAI Decisions guide](https://developers.openai.com/api/docs/guides/decisions).
+
+Enable it explicitly and, for RPC sessions, opt in to forwarding the required
+runtime environment reference in each relevant profile:
+
+```nix
+services.agentbox.settings = {
+  browser = {
+    enable = true;
+    decisions.enable = true;
+  };
+  piRpcApi.profiles.default.env = {
+    OPENAI_API_KEY = "OPENAI_API_KEY";
+  };
+};
+```
+
+The two `OPENAI_API_KEY` strings are environment-variable identifiers, **not secret
+values**. Supply the actual key through the existing secret `environmentFile`
+mechanism, never a Nix literal or generated runtime JSON. Enabling Decisions does
+not automatically forward any credentials. Existing
+`piRpcApi.profiles.<profile>.env` mappings resolve source environment references
+from that runtime environment. The key enters the Pi process and its inherited
+workflow environment, **not Chromium**, whose launch environment is filtered.
+For CLI use, the configured variable must likewise be present in the Pi process.
+There is no key-entry UI or localStorage credential storage.
+
+**Privacy and cost:** opting in sends the goal, allowed action templates, their
+predetermined fill text, the current text page snapshot, and URL to OpenAI.
+Treat page text, URLs, and fill text as potentially sensitive; do not put secrets
+in the goal or templates. Screenshots, conversation history, and browser
+credentials/cookies are not sent as decision context. The API key is used for
+request authentication, not included in that context. Each decision call can
+incur API cost, including final checks; enabling this feature does not establish
+that it is faster or cheaper than ordinary browser calls. Reported token usage is
+included in Pi totals, but Decisions dollar costs are **not priced** in this
+integration (`costTracked: false`); consult OpenAI billing for actual spend.
+Results report decision attempts, completed actions, and elapsed milliseconds.
+
+Open the browser normally with `open` before requesting `action: "run"`. A run
+supplies a `goal` string of at most 2000 characters, an optional `maxSteps` no
+greater than the configured cap, and at most 16 exact action templates:
+
+- `click` and `fill`: exact snapshot `role` and `name`, requiring a unique match
+  in the fresh snapshot. `fill` also supplies predetermined `text` of at most
+  2000 characters; the decision model cannot invent replacement text.
+- `scroll`: a fixed `direction` and optional `amount` (defaults to 500 pixels).
+- `wait`: a fixed `milliseconds` value no greater than 1000.
+
+For example, after opening an authorized test form and inspecting its controls:
+
+```json
+{
+  "action": "run",
+  "goal": "Set the Name field to Alice, save it, and stop when saved Alice is visible.",
+  "maxSteps": 4,
+  "actions": [
+    { "action": "fill", "role": "textbox", "name": "Name", "text": "Alice" },
+    { "action": "click", "role": "button", "name": "Save" }
+  ]
+}
+```
+
+Text snapshots are bounded to the smaller of `maxOutputChars` and 16000 characters,
+with at most 256 references. Oversized evidence hands off rather than expanding
+limits. Dynamic pages can also hand off when revalidation finds changed content.
+The snapshot check reduces stale actions but cannot freeze a website's own scripts.
+
+At every step, the API chooses a freshly resolved candidate, `done`, or
+`handoff`; it cannot invent arbitrary browser actions. The default budget is
+**eight API calls, including final checks**, with a **120-second total run
+limit**. Low confidence, repeating the same action on an unchanged snapshot,
+a stale snapshot or control generation, timeout, refusal, or error stops the
+run and hands control back to the main model. There is no automatic API retry.
+
+Every selected concrete action rechecks the existing managed policy and approval
+path; enabling Decisions is not an approval bypass. The outer `run` remains an
+ordinary Pi tool call; nested actions use Agentbox's managed-policy handler, not
+additional third-party extension `tool_call` hooks. Do not rely on such hooks to
+authorize individual nested actions. `done` is the decision model's assessment,
+not independent proof of task completion. No browser lock is held
+while awaiting the API or approval. State is revalidated before execution rather
+than assuming the page or human-control state remained unchanged during a wait.
+A handoff is not a rollback: completed website actions remain in effect.
+See the [Decisions verification report](browser-decisions-verification.md) for
+executed checks and the outstanding native/API acceptance work.
 
 ## Session ownership and limits
 
@@ -338,6 +436,7 @@ the native daemon. HTTP/fd authorization and UI lifecycle have separate tests. I
 With Node 22, from `agentbox/`:
 
 ```sh
+node --experimental-strip-types --test tests/pi-browser.ts tests/browser-decisions.ts
 node --test runtime/tests/pi-mcp.test.mjs
 node --test rpc-runtime/browser-config.test.mjs
 node --test rpc-runtime/web/browser-result.test.mjs
