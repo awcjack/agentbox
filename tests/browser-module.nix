@@ -68,6 +68,13 @@ let
         ];
       }).config;
   defaults = {
+    decisions = {
+      enable = false;
+      apiKeyEnv = "OPENAI_API_KEY";
+      timeoutMs = 10000;
+      maxSteps = 8;
+      minConfidence = 0.85;
+    };
     enable = false;
     delegation = "tabs";
     allowedDomains = [ ];
@@ -76,6 +83,13 @@ let
     idleTimeoutMs = 300000;
   };
   customBrowser = {
+    decisions = {
+      enable = true;
+      apiKeyEnv = "_BROWSER_OPENAI_KEY2";
+      timeoutMs = 30000;
+      maxSteps = 20;
+      minConfidence = 0.95;
+    };
     enable = true;
     delegation = "isolated";
     allowedDomains = [
@@ -154,6 +168,9 @@ let
           shmSize = "2g";
         };
         settings.piRpcApi.enable = true;
+        settings.piRpcApi.profiles.default.env = {
+          OPENAI_API_KEY = "OPENAI_API_KEY";
+        };
         settings.piRpcApi.auth.tokens = [
           {
             tokenEnv = "TEST_TOKEN";
@@ -276,6 +293,19 @@ let
       runtimeDefaults = (runtime off).browser == defaults;
       runtimeEnabled = (runtime on).browser == defaults // { enable = true; };
       runtimeCustom = (runtime custom).browser == customBrowser;
+      decisionsNoImplicitCredentialForwarding =
+        (runtime rpcOnly).piRpcApi.profiles.default.envReferences == { };
+      decisionsEnabledNoImplicitCredentialForwarding =
+        (runtime (
+          evaluate platform {
+            settings.browser.decisions.enable = true;
+            settings.piRpcApi.enable = true;
+          }
+        )).piRpcApi.profiles.default.envReferences == { };
+      decisionsExplicitCredentialReference =
+        (runtime custom).piRpcApi.profiles.default.envReferences == {
+          OPENAI_API_KEY = "OPENAI_API_KEY";
+        };
       runtimeBrowserScopes =
         (builtins.head (runtime custom).piRpcApi.auth.tokens).scopes == [
           "sessions:read"
@@ -295,6 +325,44 @@ let
         lib.hasInfix "--shm-size=3g" (options both) && !lib.hasInfix "--shm-size=2g" (options both);
       noDesktopDependency =
         !on.services.agentbox.settings.desktop.enable && on.services.agentbox.onDemandScripts == { };
+      decisionsAcceptsLowerBounds =
+        !rejected {
+          decisions = {
+            timeoutMs = 1000;
+            maxSteps = 1;
+            minConfidence = 0;
+          };
+        };
+      decisionsAcceptsUpperBounds =
+        !rejected {
+          decisions = {
+            timeoutMs = 30000;
+            maxSteps = 20;
+            minConfidence = 1;
+          };
+        };
+      decisionsAcceptsFloatBounds = lib.all (value: !rejected { decisions.minConfidence = value; }) [
+        0.0
+        1.0
+      ];
+      decisionsRejectsEnableType = rejected { decisions.enable = "true"; };
+      decisionsRejectsApiKeyEnv = lib.all (value: rejected { decisions.apiKeyEnv = value; }) [
+        ""
+        "1KEY"
+        "OPENAI-API-KEY"
+        "OPENAI_API_KEY=value"
+        "KEY\n"
+      ];
+      decisionsRejectsTimeoutLow = rejected { decisions.timeoutMs = 999; };
+      decisionsRejectsTimeoutHigh = rejected { decisions.timeoutMs = 30001; };
+      decisionsRejectsTimeoutFloat = rejected { decisions.timeoutMs = 1000.5; };
+      decisionsRejectsStepsLow = rejected { decisions.maxSteps = 0; };
+      decisionsRejectsStepsHigh = rejected { decisions.maxSteps = 21; };
+      decisionsRejectsStepsFloat = rejected { decisions.maxSteps = 1.5; };
+      decisionsRejectsConfidenceLow = rejected { decisions.minConfidence = -0.01; };
+      decisionsRejectsConfidenceHigh = rejected { decisions.minConfidence = 1.01; };
+      decisionsRejectsConfidenceString = rejected { decisions.minConfidence = "0.85"; };
+      decisionsRejectsConfidenceBool = rejected { decisions.minConfidence = true; };
       rejectsDelegation = rejected { delegation = "shared"; };
       rejectsDomainUrl = rejected { allowedDomains = [ "https://example.com" ]; };
       rejectsDomainType = rejected { allowedDomains = [ 1 ]; };

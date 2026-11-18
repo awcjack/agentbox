@@ -208,6 +208,36 @@ in
           '';
         };
 
+        decisions = {
+          enable = lib.mkEnableOption "bounded OpenAI Decisions browser runs";
+
+          apiKeyEnv = lib.mkOption {
+            type = lib.types.strMatching "[A-Za-z_][A-Za-z0-9_]{0,127}";
+            default = "OPENAI_API_KEY";
+            description = "Name of the Pi process environment variable containing the OpenAI API key, never the key itself. Credentials are not forwarded automatically; configure RPC profile environment references explicitly and supply secrets through environmentFile.";
+          };
+
+          timeoutMs = lib.mkOption {
+            type = lib.types.ints.between 1000 30000;
+            default = 10000;
+            description = "Per-request Decisions API timeout in milliseconds; timeouts hand control back without automatic retries.";
+          };
+
+          maxSteps = lib.mkOption {
+            type = lib.types.ints.between 1 20;
+            default = 8;
+            description = "Maximum Decisions API calls per browser run, including final checks. Individual runs may request a smaller budget.";
+          };
+
+          minConfidence = lib.mkOption {
+            type = lib.types.addCheck (lib.types.either lib.types.int lib.types.float) (
+              value: value >= 0 && value <= 1
+            );
+            default = 0.85;
+            description = "Minimum confidence required to execute a selected browser action, from 0 to 1.";
+          };
+        };
+
         delegation = lib.mkOption {
           type = lib.types.enum [
             "tabs"

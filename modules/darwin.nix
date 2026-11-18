@@ -271,6 +271,7 @@ let
         browser = {
           inherit (cfg.settings.browser)
             enable
+            decisions
             delegation
             allowedDomains
             maxOutputChars
