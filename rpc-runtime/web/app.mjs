@@ -14,6 +14,7 @@ import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./m
 import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
 import { mountBrowserPanel } from "./browser-panel.mjs";
 import { fetchDownload } from "./downloads.mjs";
+import { canNavigatePromptHistory, createPromptHistory } from "./prompt-history.mjs";
 
 let preferenceStorage;
 try { preferenceStorage = window.localStorage; } catch { /* Browser storage may be blocked. */ }
@@ -109,7 +110,7 @@ new ResizeObserver(() => {
 }).observe(composeArea);
 
 function record(id) {
-  if (!records.has(id)) records.set(id, { draft: { text: "", images: [], version: 0 }, messages: [], models: [], uiDrafts: new Map(), forbidden: new Set(), sending: false, notice: null });
+  if (!records.has(id)) records.set(id, { draft: { text: "", images: [], version: 0 }, messages: [], messagesNativeId: null, models: [], uiDrafts: new Map(), forbidden: new Set(), sending: false, notice: null });
   return records.get(id);
 }
 function active(ctx) { return current === ctx && !ctx.controller.signal.aborted && Boolean(token); }
@@ -227,7 +228,7 @@ function updateControls() {
     : "Ask anything, type / for commands, or ! for shell...";
   $("composer-foot-left").innerHTML = shellMode
     ? "<kbd>Enter</kbd> run <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>Esc</kbd> clear !"
-    : "<kbd>Enter</kbd> send <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>/</kbd> commands";
+    : "<kbd>Enter</kbd> send <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>↑↓</kbd> history <span class=\"foot-divider\">/</span> <kbd>/</kbd> commands";
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
   const bashRunning = Boolean(ctx?.bash?.running);
   const downloadDraft = Boolean(downloadCommand(draft?.text?.trim()));
@@ -328,6 +329,7 @@ function renderCommandSuggestions() {
 function chooseCommand(index) {
   const ctx = current, command = commandItems[index];
   if (!canWrite(ctx) || !command) return;
+  ctx.record.promptRecall?.history.resetNavigation();
   ctx.record.draft.text = `/${command.name} `; ctx.record.draft.version++;
   dismissedCommands = null; restoreDraft(); $("prompt").focus();
   $("prompt").setSelectionRange($("prompt").value.length, $("prompt").value.length);
@@ -1347,6 +1349,32 @@ function scheduleRender() {
   renderPending = true;
   requestAnimationFrame(() => { renderPending = false; renderMessages(); updateControls(); });
 }
+function promptHistory(ctx) {
+  const nativeId = ctx.meta.nativeSessionId;
+  if (!ctx.record.promptRecall || ctx.record.promptRecall.nativeId !== nativeId) {
+    ctx.record.promptRecall = { nativeId, history: createPromptHistory() };
+  }
+  const history = ctx.record.promptRecall.history;
+  // A reactivated runtime can have new metadata but an old cached transcript
+  // until its initial snapshot settles. Never seed recall across that boundary.
+  if (ctx.record.messagesNativeId === nativeId) history.sync(ctx.record.messages);
+  return history;
+}
+function recallPrompt(event) {
+  const ctx = current, input = $("prompt");
+  if (!ctx || !ctx.ready || $("composer").hidden || !$("command-suggestions").hidden
+    || ctx.record.sending || ctx.record.readingImages || !canNavigatePromptHistory(event, input)) return false;
+  const text = promptHistory(ctx).navigate(event.key === "ArrowUp" ? "older" : "newer", input.value);
+  if (text === null) return false;
+  event.preventDefault();
+  ctx.record.draft.text = text; ctx.record.draft.version++;
+  // Recalled slash commands remain editable text, not a new menu selection.
+  dismissedCommands = `${ctx.id}:${text}`;
+  setComposerCompact(false); restoreDraft();
+  const caret = event.key === "ArrowUp" ? 0 : text.length;
+  input.setSelectionRange(caret, caret);
+  return true;
+}
 function restoreDraft() {
   $("prompt").value = current?.record.draft.text || "";
   $("attachments").replaceChildren();
@@ -1437,7 +1465,8 @@ function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
     if (browserBinding?.ctx === ctx) closeContextPane();
     cancelModels(ctx); ctx.modelsRequested = true; ctx.record.models = [];
-    ctx.record.messages = []; ctx.partial = null; ctx.bash = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
+    ctx.record.messages = []; ctx.record.messagesNativeId = null; delete ctx.record.promptRecall;
+    ctx.partial = null; ctx.bash = null; ctx.tools.clear(); ctx.record.uiDrafts.clear();
     ctx.state = {}; ctx.stateRevision++; ctx.uiRevision++;
     ctx.commands = undefined; ctx.commandError = null; ctx.thinkingCatalog = null;
     renderMessages();
@@ -1470,10 +1499,11 @@ async function snapshot(ctx, initial = false) {
   applyMeta(ctx, meta);
   if (initial && meta.status === "running") setNetwork("reconnecting", meta.activity === "starting" ? "Starting agent" : "Syncing conversation");
   if (meta.status !== "running") { ctx.ready = true; ctx.state.isStreaming = false; renderMessages(); updateControls(); return cursor; }
-  const revision = ctx.stateRevision;
+  const revision = ctx.stateRevision, messagesNativeId = ctx.meta.nativeSessionId;
   const [messages, state] = await Promise.all([rpc(ctx, { type: "get_messages" }), rpc(ctx, { type: "get_state" })]);
   if (!active(ctx) || ctx.replacing) return null;
   ctx.record.messages = messages?.messages || [];
+  ctx.record.messagesNativeId = messagesNativeId;
   const freshState = initial || revision === ctx.stateRevision;
   if (freshState) ctx.state = state || {};
   if (ctx.partial && ctx.record.messages.some((message) => messageKey(message) && messageKey(message) === messageKey(ctx.partial))) ctx.partial = null;
@@ -2049,6 +2079,7 @@ $("composer").addEventListener("submit", async (event) => {
     if (!token || deleteDenied) { showNotice("This profile cannot archive sessions.", true); return; }
     if (ctx.record.ending) return;
     draft.text = ""; draft.images = []; draft.version++;
+    ctx.record.promptRecall?.history.resetNavigation();
     restoreDraft(); hideCommandSuggestions();
     requestArchive(ctx.meta);
     return;
@@ -2063,6 +2094,7 @@ $("composer").addEventListener("submit", async (event) => {
     const saved = await downloadWorkspaceFile(ctx, download.path);
     if (saved && active(ctx) && ownEpoch === epoch && draft.version === version) {
       draft.text = ""; draft.images = []; draft.version++;
+      ctx.record.promptRecall?.history.resetNavigation();
       if (current?.record === ctx.record) restoreDraft();
     }
     return;
@@ -2081,7 +2113,10 @@ $("composer").addEventListener("submit", async (event) => {
       if (bang.excludeFromContext) command.excludeFromContext = true;
       await rpc(ctx, command, true);
       if (ownEpoch !== epoch) return;
-      if (draft.version === version) { draft.text = ""; draft.images = []; draft.version++; }
+      if (draft.version === version) {
+        draft.text = ""; draft.images = []; draft.version++;
+        ctx.record.promptRecall?.history.resetNavigation();
+      }
       ctx.record.notice = null;
       if (current?.record === ctx.record) { restoreDraft(); showNotice(""); requestRefresh(current); }
     } catch (error) {
@@ -2102,6 +2137,9 @@ $("composer").addEventListener("submit", async (event) => {
   if (images.length && ctx.state.model?.input && !ctx.state.model.input.includes("image")) { showNotice("The selected model does not accept images. Choose a vision-capable model or remove the attachments.", true); return; }
   const nativeId = ctx.state.sessionId || ctx.meta.nativeSessionId;
   const streamingBehavior = $("send-mode").value;
+  // Capture known transcript entries before dispatch, so an early server echo
+  // reconciles with the accepted prompt instead of creating a duplicate.
+  const recall = promptHistory(ctx);
   ctx.record.sending = true; updateControls();
   try {
     await uploadAttachments(attachments, nativeId, (data) => api.request(path(ctx, "/uploads"), {
@@ -2112,6 +2150,7 @@ $("composer").addEventListener("submit", async (event) => {
     if (new TextEncoder().encode(JSON.stringify(command)).length > 7.5 * 1024 * 1024) throw new Error("This message is too large. Keep text and encoded attachments below 7.5 MiB.");
     await rpc(ctx, command, true);
     if (ownEpoch !== epoch) return;
+    if (ctx.meta.nativeSessionId === nativeId) recall.remember(text, command.message);
     if (draft.version === version) { draft.text = ""; draft.images = []; draft.version++; }
     ctx.record.notice = null;
     if (current?.record === ctx.record) { restoreDraft(); showNotice(""); requestRefresh(current); }
@@ -2121,15 +2160,22 @@ $("composer").addEventListener("submit", async (event) => {
     else ctx.record.notice = { message: `${error.message} Your draft was kept. The message may have been accepted; inspect this session before resending.`, error: true };
   } finally { if (ownEpoch === epoch) { ctx.record.sending = false; if (current?.record === ctx.record) { updateControls(); requestRefresh(current); } } }
 });
-$("prompt").addEventListener("input", () => { setComposerCompact(false); dismissedCommands = null; if (current) { current.record.draft.text = $("prompt").value; current.record.draft.version++; updateControls(); } });
+$("prompt").addEventListener("input", () => {
+  setComposerCompact(false); dismissedCommands = null;
+  if (current) {
+    current.record.promptRecall?.history.resetNavigation();
+    current.record.draft.text = $("prompt").value; current.record.draft.version++; updateControls();
+  }
+});
 $("prompt").addEventListener("focus", () => { setComposerCompact(false); renderCommandSuggestions(); });
 $("prompt").addEventListener("click", () => { setComposerCompact(false); renderCommandSuggestions(); });
 $("prompt").addEventListener("blur", () => hideCommandSuggestions());
 $("prompt").addEventListener("keydown", (event) => {
-  if (commandKeydown(event)) return;
+  if (commandKeydown(event) || recallPrompt(event)) return;
   if (event.key === "Escape" && bangCommand(($("prompt").value || "").trim()) && !event.isComposing) {
     event.preventDefault();
     if (!current || current.record.sending) return;
+    current.record.promptRecall?.history.resetNavigation();
     current.record.draft.text = ""; current.record.draft.version++;
     restoreDraft(); return;
   }
@@ -2454,6 +2500,7 @@ conversation.addEventListener("scroll", () => {
 $("jump-latest").addEventListener("click", () => { setComposerCompact(false); followBottom = true; conversation.scrollTop = conversation.scrollHeight; $("jump-latest").hidden = true; });
 for (const button of document.querySelectorAll(".starter")) button.addEventListener("click", () => {
   if (!current) { openNew(); return; }
+  current.record.promptRecall?.history.resetNavigation();
   current.record.draft.text = button.dataset.prompt; current.record.draft.version++; restoreDraft(); $("prompt").focus();
 });
 $("close-context-pane").addEventListener("click", () => closeContextPane());
