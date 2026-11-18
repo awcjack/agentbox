@@ -17,6 +17,8 @@ const models = [
 ];
 const sessions = new Map(), saved = new Map(), archived = new Set(), calls = [], serverErrors = [];
 const serverFolders = new Map();
+const downloadBytes = Buffer.from([0x00, 0xff, 0x7f, 0x0a, 0x22, 0x80, 0x41]);
+const downloadPath = "/workspace/project/artifacts/smoke result.bin";
 const availableThinking = (session) => session.model?.id === "pi-reasoning" ? ["off", "minimal", "low", "medium", "high", "xhigh", "max"] : ["off"];
 const entryIds = new WeakMap();
 function conversationSnapshot(session) {
@@ -121,9 +123,18 @@ const server = createServer(async (request, response) => {
       archived.add(historical[1]);
       response.writeHead(204); response.end(); return;
     }
-    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|export|auto))?$/.exec(url.pathname);
+    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|export|auto|downloads))?$/.exec(url.pathname);
     const session = match && sessions.get(match[1]);
     if (!session) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
+    if (match[2] === "downloads") {
+      assert.equal(request.method, "POST");
+      assert.deepEqual(body, { path: downloadPath }, "download sends only the literal workspace path");
+      assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "download carries the current native session ID");
+      calls.push({ id: session.id, download: body });
+      if (session.failDownload) return json(response, 503, { error: { code: "fixture_failure", message: "Fixture download failed." } });
+      if (session.holdDownload) await new Promise((resolve) => { session.releaseDownload = resolve; });
+      return json(response, 200, { nativeSessionId: session.nativeSessionId, filename: "smoke result.bin", mimeType: "application/octet-stream", data: downloadBytes.toString("base64") });
+    }
     if (match[2] === "export") {
       const snapshot = conversationSnapshot(session);
       return json(response, 200, { format: "agentbox-conversation", version: 1,
@@ -820,6 +831,55 @@ try {
       assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "get_commands").length, 1, "command catalog is cached for the selected session");
       assert.equal(promptCalls(), promptsBeforeCompletion);
       await noOverflow(page);
+
+      // /download is local even though the fixture's Pi command catalog omits it.
+      const downloadCalls = () => calls.filter((call) => call.id === session.id && call.download);
+      const modelOrShellCalls = () => calls.filter((call) => call.id === session.id && ["prompt", "bash"].includes(call.command?.type)).length;
+      const beforeDownloadCommands = modelOrShellCalls();
+      await page.locator("#prompt").fill("/down");
+      await until(() => page.locator(".command-option strong").evaluateAll((nodes) => nodes.some((node) => node.textContent === "/download")), "local /download suggestion without Pi registration");
+      await page.locator("#prompt").press("Tab");
+      assert.equal(await page.locator("#prompt").inputValue(), "/download ");
+      assert.equal(downloadCalls().length, 0, "completion does not download");
+      const downloadDraft = `/download ${downloadPath}`;
+      await page.locator("#prompt").fill(downloadDraft);
+      const filePromise = page.waitForEvent("download");
+      await page.locator("#prompt").press("Enter");
+      const file = await filePromise;
+      assert.equal(file.suggestedFilename(), "smoke result.bin");
+      assert.deepEqual(await readFile(await file.path()), downloadBytes, "binary file bytes survive JSON/base64 and browser download");
+      await file.delete();
+      await until(() => page.locator("#prompt").inputValue().then((value) => value === ""), "successful local download clears unchanged draft");
+      assert.equal(downloadCalls().length, 1);
+      for (const invalid of ["/download", "/download relative.bin", '/download "/workspace/unclosed', "/download /workspace/project/"]) {
+        await page.locator("#prompt").fill(invalid);
+        // Bare /download first offers completion; dismiss it to submit usage.
+        await page.locator("#prompt").press("Escape");
+        await page.locator("#prompt").press("Enter");
+        await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Usage: /download")), "invalid local download shows usage");
+        assert.equal(await page.locator("#prompt").inputValue(), invalid, "invalid download retains draft");
+        assert.equal(downloadCalls().length, 1, "invalid download never calls the API");
+      }
+      session.failDownload = true;
+      await page.locator("#prompt").fill(downloadDraft);
+      await page.locator("#prompt").press("Enter");
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Fixture download failed")), "download API failure is visible");
+      assert.equal(await page.locator("#prompt").inputValue(), downloadDraft, "failed download retains draft");
+      assert.equal(downloadCalls().length, 2, "failed download is not retried");
+      session.failDownload = false;
+      session.holdDownload = true;
+      const heldFilePromise = page.waitForEvent("download");
+      await page.locator("#prompt").press("Enter");
+      await until(() => Boolean(session.releaseDownload), "download reply held");
+      await page.locator("#prompt").fill("Keep the draft edited during download");
+      session.holdDownload = false; session.releaseDownload();
+      const heldFile = await heldFilePromise;
+      assert.deepEqual(await readFile(await heldFile.path()), downloadBytes);
+      await heldFile.delete();
+      assert.equal(await page.locator("#prompt").inputValue(), "Keep the draft edited during download", "late successful download preserves edited draft");
+      assert.equal(downloadCalls().length, 3);
+      assert.equal(modelOrShellCalls(), beforeDownloadCommands, "local downloads, including invalid and failed attempts, never prompt the model or run bash");
+      await page.locator("#prompt").fill("");
       session.autoMode = null;
       emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: "" });
       await until(() => page.locator("#auto-mode").textContent().then((text) => text === "Auto: unknown"), "legacy session mode is not misreported as off");
