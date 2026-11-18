@@ -102,6 +102,20 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   assignments are removed after import).
 - Model selection, Enter to send, Shift+Enter for a newline, IME-safe input,
   streaming steering/follow-up selection, queue counts, and stop-current-run.
+- **Up/Down prompt history:** with the composer focused, press **Up** on the
+  first line to recall older user messages and **Down** on the last line for
+  newer messages. Down past the newest entry restores the original unsent text.
+  The last 100 text-bearing user messages/accepted composer prompts are available
+  per native conversation; other sessions, assistant replies, and image-only
+  messages are excluded. Loaded transcript text seeds recall after a page reload;
+  extra recall/navigation state stays in page memory and clears on logout/reload.
+  Arrow keys only fill the composer; edit the text and press **Enter** to send it
+  again. Typing starts a new navigation run using the edited text as its draft.
+  Old images/files are not reattached, and current draft attachments are left
+  untouched. Already-expanded file-reference text in loaded transcripts remains
+  plain text; a new local send recalls its original composer text. Slash-command
+  suggestions retain arrow-key priority. Modified arrows, IME composition,
+  selected text, and arrows inside multiline messages retain native editing.
 - A row's Archive button opens confirmation for that row without selecting it.
   Running sessions use the same end/archive flow as the header; saved history uses
   `DELETE /v1/history/:nativeId?profile=...` and never starts a Pi process.

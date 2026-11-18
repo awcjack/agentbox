@@ -47,6 +47,16 @@ are cached per selection, and can be reloaded with Refresh. TUI-only built-ins
 are not advertised. `/auto on`, `/auto off`, and `/auto status` are suggested only
 when the process actually registers `auto`.
 
+To reuse a user message, focus the composer and press **Up** on its first line
+for older messages or **Down** on its last line for newer ones. Down past the
+newest entry restores the unsent draft. Recall is text-only, scoped to the
+selected native conversation, and limited to 100 entries seeded from its loaded
+messages plus newly accepted composer prompts. Existing draft attachments are
+unchanged; previous attachments are not restored. Nothing is sent until you
+press **Enter**. Slash-command suggestions take precedence, and normal multiline
+editing, selections, modified arrows, and IME input are preserved. Recall state
+stays in page memory; no prompt history is added to browser storage.
+
 Prefix a message with `!` to run a shell command immediately through Pi's RPC
 `bash` command (OpenCode / Pi TUI parity). The composer enters a green shell theme
 (`>` prompt, Shell badge, Run) while drafting; the transcript shows a Shell tool
