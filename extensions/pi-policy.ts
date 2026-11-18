@@ -164,6 +164,33 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
+/** Only the run loop's concrete fast-path actions cross this seam. Never run
+ * another loop or import the executor; policy also loads without browser.
+ */
+function nestedBrowserInput(value: unknown): Record<string, unknown> {
+  if (!isObject(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new Error("Invalid browser input")
+  const input: Record<string, unknown> = {}
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)!
+    if (typeof key !== "string" || !descriptor.enumerable || !("value" in descriptor)) throw new Error("Invalid browser input")
+    Object.defineProperty(input, key, { value: descriptor.value, enumerable: true })
+  }
+  const fields: Record<string, string[]> = {
+    click: ["ref"], fill: ["ref", "text"], scroll: ["direction", "amount"], wait: ["milliseconds"],
+  }
+  const action = input.action
+  if (typeof action !== "string" || !Object.hasOwn(fields, action)
+    || Object.keys(input).some(key => key !== "action" && !fields[action].includes(key))) throw new Error("Invalid browser action")
+  const integer = (key: string, min: number, max: number) =>
+    Number.isInteger(input[key]) && (input[key] as number) >= min && (input[key] as number) <= max
+  if ((action === "click" || action === "fill") && (typeof input.ref !== "string" || !/^@e[1-9][0-9]{0,8}$/.test(input.ref))) throw new Error("Invalid browser reference")
+  if (action === "fill" && (typeof input.text !== "string" || input.text.length > 10000 || input.text.includes("\0"))) throw new Error("Invalid browser text")
+  if (action === "scroll" && ((input.direction !== undefined && !["up", "down", "left", "right"].includes(input.direction as string))
+    || (input.amount !== undefined && !integer("amount", 1, 2000)))) throw new Error("Invalid browser scroll")
+  if (action === "wait" && !integer("milliseconds", 1, 10000)) throw new Error("Invalid browser wait")
+  return Object.freeze(input)
+}
+
 function savedDefaultModel(settings: Record<string, unknown>) {
   const value = settings.agentboxDefaultModel
   return isObject(value) && typeof value.provider === "string" && value.provider.trim()
@@ -705,9 +732,11 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     let modeRequest = 0
     let autoAttempt = new AbortController()
     let session = new AbortController()
+    let activeSessionId: string | undefined
     let queue = Promise.resolve()
     const reset = (shutdown = false) => {
       session.abort()
+      activeSessionId = undefined
       session = new AbortController()
       if (shutdown) session.abort()
       autoAttempt.abort()
@@ -855,6 +884,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     })
     pi.on("session_start", async (event, ctx) => {
       reset()
+      activeSessionId = ctx.sessionManager?.getSessionId?.()
       const epoch = session, request = modeRequest
       const available = await publishAuto(ctx)
       if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
@@ -899,6 +929,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     })
     pi.on("session_tree", async (_event, ctx) => {
       reset()
+      activeSessionId = ctx.sessionManager?.getSessionId?.()
       const epoch = session, request = modeRequest
       const available = await publishAuto(ctx)
       if (epoch === session && !epoch.signal.aborted && request === modeRequest) restoreAuto(ctx, available)
@@ -929,7 +960,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       }
     }
 
-    pi.on("tool_call", (event, context) => {
+    function authorizeToolCall(event: { toolName: string; input: unknown; toolCallId: string }, context: ExtensionContext) {
       const ctx = { ...context, signal: context.signal ? AbortSignal.any([context.signal, session.signal]) : session.signal }
       const cancelled = { block: true, reason: "Pi policy approval cancelled or session changed" }
       // Serialize decisions so concurrent tool calls never overlap human prompts.
@@ -994,6 +1025,32 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       }).then((result) => ctx.signal.aborted ? cancelled : result, () => ({ block: true, reason: "Pi policy check failed; failing closed" }))
       queue = pending.then(() => undefined)
       return pending
+    }
+    pi.on("tool_call", authorizeToolCall)
+
+    // EventBus does not await handlers. Reply synchronously with the decision
+    // promise; absence of a reply is a denial at the browser caller. This is an
+    // authorization seam only, never a browser executor or another run loop.
+    pi.events.on("agentbox:browser-authorize", (request: unknown) => {
+      if (!isObject(request) || typeof request.reply !== "function") return
+      const denied = { block: true, reason: "Invalid or stale nested browser authorization; failing closed" }
+      let answer: Promise<{ block?: boolean; reason?: string } | undefined>
+      try {
+        const input = nestedBrowserInput(request.input)
+        if (!isObject(request.context) || typeof request.toolCallId !== "string"
+          || !request.toolCallId.trim() || request.toolCallId.length > 4096) throw new Error("Missing browser context")
+        const context = request.context as unknown as ExtensionContext
+        const id = context.sessionManager?.getSessionId()
+        if (typeof id !== "string" || !id || id !== activeSessionId || typeof context.cwd !== "string" || !context.cwd
+          || typeof context.hasUI !== "boolean" || !isObject(context.ui)
+          || (context.signal !== undefined && !(context.signal instanceof AbortSignal))) throw new Error("Invalid browser context")
+        answer = authorizeToolCall({ toolName: "browser", input, toolCallId: request.toolCallId }, context)
+          .then(result => id === activeSessionId && id === context.sessionManager.getSessionId() ? result : denied)
+          .catch(() => denied)
+      } catch {
+        answer = Promise.resolve(denied)
+      }
+      request.reply(answer)
     })
   }
 }

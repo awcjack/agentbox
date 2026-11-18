@@ -62,6 +62,19 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
       return handlers.get("tool_call")![0](event, ctx)
     },
     command, reads, signals,
+    requestBrowser(input: unknown, ctx: any = context(), extra: any = {}) {
+      let answer: Promise<any> | undefined
+      events.get("agentbox:browser-authorize")?.({
+        input, context: ctx, toolCallId: "nested-browser-1", ...extra,
+        reply: (value: Promise<any>) => {
+          assert.equal(answer, undefined, "nested authorization replies once")
+          assert.ok(value instanceof Promise, "nested authorization replies synchronously with a promise")
+          answer = value
+        },
+      })
+      assert.ok(answer, "nested authorization must reply synchronously")
+      return answer
+    },
     setSameMain(value: boolean) { sameMain = value },
     requestApproval(ctx: any, summary = "MCP tool: docs/search", timeout = 1000) {
       let answer = Promise.resolve(false)
@@ -1045,5 +1058,110 @@ await forwarding.lifecycle("session_shutdown")
 assert.equal(await forwarding.requestApproval(context()), false)
 assert.equal(forwardedApprovals, 1)
 assert.equal(await harness(autoPolicy(), {}, false).requestApproval(context()), false, "main MCP keeps its local approval UI")
+
+// Nested browser selections use the exact managed tool-call decision pipeline.
+const browserClick = { action: "click", ref: "@e1" }
+const browserAllow = harness(allowConfig, {}, false)
+assert.equal((await browserAllow.requestBrowser(browserClick)).block, true, "no active session fails closed")
+await browserAllow.lifecycle("session_start")
+for (const input of [browserClick, { action: "fill", ref: "@e2", text: "hello" },
+  { action: "scroll" }, { action: "scroll", direction: "up", amount: 2000 }, { action: "wait", milliseconds: 1 }]) {
+  assert.equal(await browserAllow.requestBrowser(input), undefined)
+}
+for (const input of [null, [], {}, { action: "run" }, { action: "open", url: "https://example.com" },
+  { action: "unknown" }, { action: "toString" }, { action: "click" }, { action: "click", ref: "#submit" },
+  { ...browserClick, toolName: "read" }, { action: "fill", ref: "@e1" },
+  { action: "fill", ref: "@e1", text: "x".repeat(10001) }, { action: "fill", ref: "@e1", text: "\u0000" },
+  { action: "scroll", direction: "sideways" }, { action: "scroll", amount: 0 }, { action: "scroll", amount: 1.5 },
+  { action: "wait", milliseconds: 10001 }, { action: "wait", milliseconds: "1" },
+  Object.defineProperty({}, "action", { enumerable: true, get() { throw new Error("must not read getter") } })]) {
+  assert.equal((await browserAllow.requestBrowser(input)).block, true)
+}
+for (const extra of [{ context: undefined }, { context: {} }, { toolCallId: "" }, { toolCallId: 1 },
+  { context: context({ sessionManager: { getSessionId: undefined } }) },
+  { context: context({ sessionManager: { getSessionId: () => "other-session" } }) },
+  { context: context({ signal: {} }) }]) {
+  assert.equal((await browserAllow.requestBrowser(browserClick, context(), extra)).block, true)
+}
+
+const browserDeny = harness(autoPolicy({ rules: [{ tools: ["browser"], patterns: ["click"], decision: "deny" }] }), {}, false)
+await browserDeny.lifecycle("session_start")
+await browserDeny.command("on")
+assert.match((await browserDeny.requestBrowser(browserClick, context(), { toolName: "read" })).reason, /Denied/)
+assert.match((await browserDeny.requestBrowser({ action: "fill", ref: "@e1", text: "/workspace/project/.env" })).reason, /sensitive path/)
+assert.equal(await browserDeny.requestBrowser({ action: "wait", milliseconds: 1 }), undefined, "Auto approves asks, not denies")
+await browserDeny.command("off")
+assert.equal((await browserDeny.requestBrowser({ action: "wait", milliseconds: 1 })).block, true)
+
+for (const decision of ["ask", "defaultAsk"]) {
+  const browserAsk = harness(autoPolicy({ rules: decision === "ask" ? [{ tools: ["browser"], patterns: ["*"], decision: "ask" }] : [] }), {}, false)
+  await browserAsk.lifecycle("session_start")
+  let prompts = 0
+  const askCtx = context({ ui: { select: async (title: string) => { prompts++; assert.match(title, /browser: click/); return "Allow once" } } })
+  assert.equal(await browserAsk.requestBrowser(browserClick, askCtx), undefined)
+  assert.equal(prompts, 1)
+  assert.deepEqual(browserAsk.signals, ["waiting", "working"])
+  assert.equal((await browserAsk.requestBrowser(browserClick)).block, true)
+  assert.match((await browserAsk.requestBrowser(browserClick, context({ hasUI: false }))).reason, /no UI/)
+  await browserAsk.command("on")
+  assert.equal(await browserAsk.requestBrowser(browserClick, context({ hasUI: false })), undefined)
+}
+
+for (const classifierDecision of ["allow", "deny"]) {
+  const browserReview = harness(autoPolicy(), {}, false)
+  await browserReview.lifecycle("session_start")
+  await browserReview.command("review")
+  let reviewed = 0, asked = 0
+  const ctx = autoContext(async (_model: any, request: any) => {
+    reviewed++
+    const evidence = JSON.parse(request.messages[0].content[0].text)
+    assert.equal(evidence.toolName, "browser")
+    assert.deepEqual(evidence.input, browserClick)
+    return verdict(classifierDecision)
+  })
+  ctx.hasUI = true
+  ctx.ui.select = async () => { asked++; return "Allow once" }
+  assert.equal(await browserReview.requestBrowser(browserClick, ctx), undefined)
+  assert.equal(reviewed, 1)
+  assert.equal(asked, classifierDecision === "deny" ? 1 : 0, "review rejection falls back to human approval")
+}
+
+// Nested and ordinary calls share one prompt queue, and both inherit lifecycle
+// cancellation. Late affirmative UI/provider replies must never authorize work.
+for (const cancellation of ["signal", "session_start", "session_tree", "session_shutdown"]) {
+  for (const stage of ["human", "model"]) {
+    const instance = harness(autoPolicy({ timeout: 5000, auto: { ...autoSettings, timeout: 5000 } }), {}, false)
+    await instance.lifecycle("session_start")
+    if (stage === "model") await instance.command("review")
+    const controller = new AbortController(), entered = deferred<AbortSignal>(), late = deferred<any>()
+    let prompts = 0
+    const ctx = autoContext(async (_model: any, _request: any, options: any) => { entered.resolve(options.signal); return late.promise })
+    ctx.hasUI = true
+    ctx.signal = controller.signal
+    ctx.ui.select = async (_title: string, _choices: any, options: any) => { prompts++; entered.resolve(options.signal); return late.promise }
+    const pending = instance.requestBrowser(browserClick, ctx)
+    const signal = await bounded(entered.promise)
+    const queued = call(instance.toolCall, "browser", browserClick, ctx)
+    await nextTurn()
+    assert.equal(prompts, stage === "human" ? 1 : 0, "ordinary and nested calls never overlap prompts")
+    if (cancellation === "signal") controller.abort()
+    else await instance.lifecycle(cancellation)
+    assert.equal(signal.aborted, true)
+    assert.equal((await bounded(pending)).block, true)
+    assert.equal((await bounded(queued)).block, true)
+    late.resolve(stage === "model" ? verdict("allow") : "Allow once")
+    await nextTurn()
+  }
+}
+const alreadyAborted = context({ signal: AbortSignal.abort() })
+assert.equal((await browserAllow.requestBrowser(browserClick, alreadyAborted)).block, true)
+for (const config of [new Error("missing"), "invalid"]) {
+  const instance = harness(config, {}, false)
+  await instance.lifecycle("session_start")
+  assert.match((await instance.requestBrowser(browserClick)).reason, /failing closed/)
+}
+const brokenBrowser = harness(allowConfig, { realpath: async () => { throw new Error("unavailable") } }, false)
+await brokenBrowser.lifecycle("session_start")
+assert.equal((await brokenBrowser.requestBrowser({ action: "fill", ref: "@e1", text: "./ordinary.txt" })).block, true)
 
 console.log("pi policy extension tests passed")
