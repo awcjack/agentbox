@@ -148,6 +148,24 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   discards the pending save. Errors appear in the workspace notice. Files are
   saved as binary attachments through temporary, revoked Blob URLs and may contain
   sensitive data. Browser download settings may ask where to save them.
+- **`/download <full-path>`** in the composer downloads one exact workspace file,
+  without a model prompt or shell command. It is available in `/` suggestions even
+  when Pi's command catalog does not register it. Use a full absolute path to
+  distinguish files with the same relative name in different checkouts:
+
+  ```text
+  /download /workspace/brian/use-brian/apps/app-web/AGENTS.md
+  /download /workspace/brian/other-checkout/apps/app-web/AGENTS.md
+  /download "/workspace/brian/use-brian/docs/final report.pdf"
+  ```
+
+  Run each line separately. The entire argument names one file; spaces may be
+  unquoted or surrounded by matching single/double quotes. Paths are literal:
+  no shell expansion, globbing, tilde expansion, or URL decoding is performed.
+  Relative paths show usage instead of invoking checkout search. Remove composer
+  attachments first. Only a successful save clears an unchanged command draft;
+  errors, session switches, and edits made during the request preserve the draft.
+  The same authentication, workspace confinement, symlink and 16 MiB limits apply.
 - Raster image and file attachments from file selection, clipboard paste, or
   drag-and-drop onto the conversation transcript or composer, up to 5 MiB
   combined before base64 encoding, with previews, removal, and a 7.5 MiB

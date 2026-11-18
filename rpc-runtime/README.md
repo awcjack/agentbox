@@ -868,6 +868,12 @@ support, and keyboard dismissal, alongside the existing chat flows.
 ### Workspace file downloads
 
 `POST /v1/sessions/:id/downloads` accepts exactly `{"path":"output/report.pdf"}`.
+The web composer's local `/download /absolute/workspace/path` command calls this
+endpoint without a model prompt or shell command. It requires a full path so
+same-named files in separate checkouts can be selected explicitly; for example,
+`/download /workspace/brian/use-brian/apps/app-web/AGENTS.md`. Use matching quotes
+around paths with spaces if desired. This is a frontend command, not an upstream
+Pi RPC command or a tool available to the model.
 The bearer token must grant **both** `sessions:read` and `sessions:write`
 (filesystem access is more sensitive than reading a transcript), and the session
 profile must allow `prompt`. The `X-Pi-Session-Id` header is mandatory and must
