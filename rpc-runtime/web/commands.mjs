@@ -16,6 +16,21 @@ export function archiveCommand(text) {
   return typeof text === "string" && /^\/archive\s*$/.test(text);
 }
 
+// Frontend-only file download: the entire argument is one literal absolute
+// path, not shell syntax. Recognized invalid commands must never reach Pi.
+export function downloadCommand(text) {
+  if (typeof text !== "string" || !/^\/download(?:\s|$)/.test(text)) return null;
+  const usage = { error: "Usage: /download /absolute/workspace/path (one file; optional matching quotes for spaces)." };
+  let path = text.slice("/download".length).trim();
+  if (!path || /[\x00-\x1f\x7f]/.test(text)) return usage;
+  if (path.startsWith('"') || path.startsWith("'")) {
+    if (path.length < 2 || path.at(-1) !== path[0]) return usage;
+    path = path.slice(1, -1);
+  }
+  if (!path.startsWith("/") || path.startsWith("//") || path.endsWith("/") || path.length > 4096) return usage;
+  return { path };
+}
+
 // Only complete an initial slash command, never prose, selected text, or a
 // command's ordinary arguments. Auto has explicit, discoverable mode arguments.
 export function commandQuery(text, start = text.length, end = start) {
@@ -29,10 +44,14 @@ export function commandSuggestions(text, commands) {
   if (commandQuery(text) === null) return [];
   const query = text.slice(1).toLowerCase();
   const known = new Map();
-  // Always advertise the local archive action; it is not a Pi catalog entry.
+  // Always advertise local actions; the Pi catalog must not replace them.
   known.set("archive", {
     name: "archive",
     description: "End and archive this session (stops Pi; keeps history under Archived).",
+  });
+  known.set("download", {
+    name: "download",
+    description: "Download one file by full workspace path (no model prompt or shell command).",
   });
   for (const command of Array.isArray(commands) ? commands.slice(0, 2000) : []) {
     if (!command || typeof command.name !== "string" || !/^[A-Za-z0-9_:/.-]{1,200}$/.test(command.name)) continue;

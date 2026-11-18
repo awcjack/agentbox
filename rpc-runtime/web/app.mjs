@@ -6,7 +6,7 @@ import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
 import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
 import { findFilePreview, isMarkdownPath, pathBreadcrumb } from "./context-pane.mjs";
-import { archiveCommand, bangCommand, commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
+import { archiveCommand, bangCommand, downloadCommand, commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
 import { readAttachments, attachmentMessage, uploadAttachments, initComposerFileDrop } from "./attachments.mjs";
 import { sessionTitle } from "./session-title.mjs";
@@ -230,13 +230,15 @@ function updateControls() {
     : "<kbd>Enter</kbd> send <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>/</kbd> commands";
   $("attach").disabled = !ctx || readOnly || ctx.record.sending;
   const bashRunning = Boolean(ctx?.bash?.running);
+  const downloadDraft = Boolean(downloadCommand(draft?.text?.trim()));
   syncBashElapsedTimer(ctx);
-  $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy || !(draft.text.trim() || draft.images.length);
+  $("send").disabled = !canWrite(ctx) || ctx.record.sending || ctx.record.readingImages || ctx.modelBusy || ctx.thinkingBusy || (downloadDraft && ctx.record.downloading) || !(draft.text.trim() || draft.images.length);
   $("send").firstChild.textContent = ctx?.record.sending
     ? (bashRunning ? "Running " : "Sending ")
+    : downloadDraft ? (ctx?.record.downloading ? "Downloading " : "Download ")
     : shellMode ? (streaming ? "Queue " : "Run ")
     : streaming ? "Queue " : "Send ";
-  $("send-mode").hidden = !streaming || bashRunning;
+  $("send-mode").hidden = !streaming || bashRunning || downloadDraft;
   $("send-mode").disabled = !canWrite(ctx);
   $("stop").hidden = !streaming && !bashRunning;
   $("stop").disabled = bashRunning
@@ -1660,7 +1662,7 @@ downloadFileButton.addEventListener("click", () => {
   if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim());
 });
 async function downloadWorkspaceFile(ctx, filePath) {
-  if (!canDownloadFile(ctx) || ctx.record.downloading) return;
+  if (!canDownloadFile(ctx) || ctx.record.downloading) return false;
   const nativeId = ctx.meta.nativeSessionId, ownSelection = selection, ownEpoch = epoch;
   const valid = () => active(ctx) && selection === ownSelection && epoch === ownEpoch
     && ctx.meta.nativeSessionId === nativeId && canDownloadFile(ctx);
@@ -1669,7 +1671,8 @@ async function downloadWorkspaceFile(ctx, filePath) {
     const saved = await fetchDownload({ request: (url, options) => api.request(url, options),
       sessionId: ctx.id, nativeSessionId: nativeId, path: filePath, signal: ctx.controller.signal, valid });
     if (saved) showNotice("File downloaded. Workspace files may contain sensitive data.");
-  } catch (error) { if (valid()) report(error, ctx); }
+    return saved;
+  } catch (error) { if (valid()) report(error, ctx); return false; }
   finally {
     ctx.record.downloading = false;
     if (active(ctx)) { updateControls(); scheduleRender(); }
@@ -2048,6 +2051,20 @@ $("composer").addEventListener("submit", async (event) => {
     draft.text = ""; draft.images = []; draft.version++;
     restoreDraft(); hideCommandSuggestions();
     requestArchive(ctx.meta);
+    return;
+  }
+  const download = downloadCommand(text);
+  if (download) {
+    if (download.error) { showNotice(download.error, true); return; }
+    if (attachments.length) { showNotice("Remove attachments before downloading. /download never sends a model prompt.", true); return; }
+    if (!canDownloadFile(ctx)) { showNotice("Downloads require an online, writable session.", true); return; }
+    if (ctx.record.downloading) return;
+    hideCommandSuggestions();
+    const saved = await downloadWorkspaceFile(ctx, download.path);
+    if (saved && active(ctx) && ownEpoch === epoch && draft.version === version) {
+      draft.text = ""; draft.images = []; draft.version++;
+      if (current?.record === ctx.record) restoreDraft();
+    }
     return;
   }
   if (!canWrite(ctx)) return;
