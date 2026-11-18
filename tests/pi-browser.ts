@@ -13,6 +13,8 @@ import { createBrowserClient } from "../extensions/browser-channel.mjs"
 import { BrowserSession, browserArgs, humanBrowserCommands, parseBrowserConfig, createPiBrowserExtension, runBrowser, withBrowserLock } from "../extensions/pi-browser.ts"
 import type { BrowserConfig, BrowserRunner, RunOptions, BrowserLock } from "../extensions/pi-browser.ts"
 import { snapshotRef, runFixtureBrowser } from "./browser-smoke-helpers.ts"
+import { DECISIONS_DEFAULTS } from "../extensions/browser-decisions.ts"
+import type { DecisionPlan } from "../extensions/browser-decisions.ts"
 
 const executable = "/managed/bin/agent-browser"
 const chromium = "/managed/bin/chromium"
@@ -131,13 +133,13 @@ async function setup(t: TestContext, overrides: Partial<BrowserConfig> = {}, fak
   })
   return { session, fake }
 }
-function harness(fake = fakeBrowser(), readConfig: () => Promise<unknown> = async () => ({ browser: config() }), env: NodeJS.ProcessEnv = {}, bridgeStream?: Duplex) {
+function harness(fake = fakeBrowser(), readConfig: () => Promise<unknown> = async () => ({ browser: config() }), env: NodeJS.ProcessEnv = {}, bridgeStream?: Duplex, fetcher?: typeof fetch) {
   const handlers = new Map<string, Function>()
   const events = new Map<string, Function>()
   let tool: any
-  createPiBrowserExtension({ runner: fake.runner, lock: testLock, readConfig, bridgeStream, env: { PI_BROWSER_EXECUTABLE: executable, PI_BROWSER_CHROMIUM: chromium, ...env } })({
+  createPiBrowserExtension({ runner: fake.runner, lock: testLock, readConfig, bridgeStream, fetcher, env: { PI_BROWSER_EXECUTABLE: executable, PI_BROWSER_CHROMIUM: chromium, ...env } })({
     on(name: string, handler: Function) { handlers.set(name, handler) },
-    events: { on(name: string, handler: Function) { events.set(name, handler) } },
+    events: { on(name: string, handler: Function) { events.set(name, handler) }, emit(name: string, event: any) { events.get(name)?.(event) } },
     registerTool(value: any) { tool = value },
   } as any)
   return {
@@ -145,7 +147,8 @@ function harness(fake = fakeBrowser(), readConfig: () => Promise<unknown> = asyn
     start: (id: string | (() => string) = "native-one") => handlers.get("session_start")!({}, { sessionManager: { getSessionId: typeof id === "function" ? id : () => id } }),
     stop: () => handlers.get("session_shutdown")!(),
     root: () => { let result: any; events.get("agentbox:browser-delegation")!({ reply: (env: any) => { result = env } }); return result },
-    execute: (params: any, signal?: AbortSignal) => tool.execute("call", params, signal),
+    authorize: (handler: Function) => events.set("agentbox:browser-authorize", handler),
+    execute: (params: any, signal?: AbortSignal, ctx?: any) => tool.execute("call", params, signal, undefined, ctx),
   }
 }
 
@@ -1401,4 +1404,163 @@ for (const workflow of [false, true]) test(`${workflow ? "workflow child" : "unm
   await delay(50) // Client deadline is deliberately unref'd; keep the test alive.
   await rejected
   assert.equal(fake.calls.length, 0)
+})
+
+const decisionsConfig = { ...DECISIONS_DEFAULTS, enable: true }
+const runPlan: DecisionPlan = { action: "run", goal: "Submit the name Test", actions: [
+  { action: "fill", role: "textbox", name: "Name", text: "Test" },
+  { action: "click", role: "button", name: "Submit" },
+] }
+const allowDecision = async () => true
+const isCurrent = () => true
+
+test("Decisions config is optional and validated without changing ordinary browser actions", () => {
+  assert.equal(parseBrowserConfig({ browser: config() }).decisions, undefined)
+  assert.deepEqual(parseBrowserConfig({ browser: config({ decisions: decisionsConfig }) }).decisions, decisionsConfig)
+  assert.throws(() => parseBrowserConfig({ browser: { ...config(), decisions: { enable: true, apiKey: "not allowed" } } }), /decisions configuration/)
+  assert.throws(() => browserArgs(runPlan as any), /Unknown browser action/)
+})
+
+test("bounded run resolves fresh refs, authorizes each action and returns done with counts", async t => {
+  const { session, fake } = await readyControl(t, { decisions: decisionsConfig })
+  let calls = 0
+  const approved: any[] = []
+  const result = await session.runPlan(runPlan, async (goal, observation, candidates, history) => {
+    assert.equal(goal, runPlan.goal)
+    assert.equal(observation.url, "https://example.test/start")
+    assert.equal(candidates[0].request.ref, "@e2")
+    assert.equal(history.length, calls)
+    return { choice: ["fill_1", "click_2", "done"][calls++], confidence: 0.99, usage: { input: 5, output: 1 } }
+  }, async request => { approved.push(request); return true }, isCurrent)
+  assert.equal(result.details.decisions.reason, "done")
+  assert.equal(result.details.decisions.requests, 3)
+  assert.equal(result.details.decisions.actions, 2)
+  assert.deepEqual(result.details.decisions.usage, { input: 15, output: 3 })
+  assert.equal(result.usage.totalTokens, 18)
+  assert.equal(result.details.decisions.costTracked, false)
+  assert.equal(result.details.decisions.observation, undefined, "page evidence must not bypass the text cap through details")
+  assert.deepEqual(approved, [{ action: "fill", ref: "@e2", text: "Test" }, { action: "click", ref: "@e1" }])
+  assert.deepEqual(fake.calls.filter(c => ["fill", "click"].includes(c.command[0])).map(c => c.command), [["fill", "@e2", "--", "Test"], ["click", "@e1"]])
+  for (const c of fake.calls.filter(c => ["fill", "click"].includes(c.command[0]))) assert(c.args.includes("--action-policy"), "bounded execution must use no-launch policy")
+})
+
+for (const during of ["decision", "approval"]) for (const release of [false, true]) test(`human takeover during ${during}${release ? " and release" : ""} discards old selection without holding browser lock`, async t => {
+  const { session, fake } = await readyControl(t, { decisions: decisionsConfig })
+  const takeover = async () => {
+    const lease = await control(session, "acquire", { browserSessionId: session.session })
+    if (release) await control(session, "release", binding(session, lease))
+  }
+  const result = await session.runPlan(runPlan, async () => {
+    if (during === "decision") await takeover()
+    return { choice: "click_2", confidence: 1 }
+  }, async () => { if (during === "approval") await takeover(); return true }, isCurrent)
+  assert.equal(result.details.decisions.reason, release ? "browser_frame_stale" : "browser_control_held")
+  assert.equal(result.details.decisions.actions, 0)
+  assert(!fake.calls.some(c => c.command[0] === "click"))
+  assert.equal(session.uncertain, false)
+})
+
+for (const change of ["snapshot", "url", "refs", "agent", "context", "age"]) test(`run discards a decision after changed ${change}`, async t => {
+  let now = 1000, current = true
+  const { session, fake } = await readyControl(t, { decisions: decisionsConfig }, () => now)
+  const result = await session.runPlan(runPlan, async () => {
+    if (change === "snapshot") fake.hook = async c => c.command[0] === "snapshot" ? ok({ snapshot: "changed", refs: {} }) : undefined
+    if (change === "refs") fake.hook = async c => c.command[0] === "snapshot" ? ok({ snapshot: '- button "Submit" [ref=e1]\n- textbox "Name" [ref=e2]', refs: { e1: { role: "button", name: "Delete" } } }) : undefined
+    if (change === "url") fake.hook = async c => c.command[0] === "get" && c.command[1] === "url" ? ok({ url: "https://example.test/changed" }) : undefined
+    if (change === "agent") await session.execute({ action: "snapshot" })
+    if (change === "context") current = false
+    if (change === "age") now += 60000
+    return { choice: "done", confidence: 1 }
+  }, allowDecision, () => current)
+  assert.equal(result.details.decisions.reason, change === "context" ? "browser_session_changed" : "browser_frame_stale")
+  assert.equal(result.details.decisions.outcome, "handoff")
+  assert.equal(session.uncertain, false)
+})
+
+test("policy denial stops before browser input and approval delay rechecks the snapshot", async t => {
+  const { session, fake } = await readyControl(t, { decisions: decisionsConfig })
+  const choose = async () => ({ choice: "fill_1", confidence: 1 })
+  const denied = await session.runPlan(runPlan, choose, async () => false, isCurrent)
+  assert.equal(denied.details.decisions.reason, "policy_denied")
+  const stale = await session.runPlan(runPlan, choose, async () => {
+    fake.hook = async c => c.command[0] === "snapshot" ? ok({ snapshot: "new page", refs: {} }) : undefined
+    return true
+  }, isCurrent)
+  assert.equal(stale.details.decisions.reason, "browser_frame_stale")
+  assert(!fake.calls.some(c => c.command[0] === "fill"))
+  assert.equal(session.uncertain, false)
+})
+
+test("run requires an existing browser, respects budget and preserves uncertainty on failed input", async t => {
+  const { session, fake } = await setup(t, { decisions: decisionsConfig })
+  let requested = 0
+  const choose = async () => { requested++; return { choice: "click_2", confidence: 1 } }
+  const cold = await session.runPlan(runPlan, choose, allowDecision, isCurrent)
+  assert.equal(cold.details.decisions.reason, "browser_unavailable")
+  assert.equal(fake.calls.length, 0)
+  assert.equal(requested, 0)
+  await session.execute({ action: "snapshot" })
+  const budget = await session.runPlan({ ...runPlan, maxSteps: 1 }, choose, allowDecision, isCurrent)
+  assert.equal(budget.details.decisions.reason, "budget")
+  assert.equal(budget.details.decisions.actions, 1)
+  fake.hook = async c => { if (c.command[0] === "click") throw new Error("private browser error") }
+  const failed = await session.runPlan(runPlan, choose, allowDecision, isCurrent)
+  assert.equal(failed.details.decisions.reason, "failed")
+  assert.equal(session.uncertain, true)
+  assert(!JSON.stringify(failed).includes("private browser error"))
+})
+
+test("shutdown cancels in-flight Decisions and prevents subsequent input", async t => {
+  const { session, fake } = await readyControl(t, { decisions: decisionsConfig })
+  const entered = deferred()
+  const pending = session.runPlan(runPlan, async (_g, _o, _c, _h, signal) => {
+    entered.resolve()
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }))
+    return { choice: "click_2", confidence: 1 }
+  }, allowDecision, isCurrent)
+  await entered.promise
+  await session.shutdown()
+  assert.equal((await pending).details.decisions.reason, "cancelled")
+  assert(!fake.calls.some(c => c.command[0] === "click"))
+})
+
+test("extension keeps the key header-only, fails closed without policy, and sends exact nested authorization", async t => {
+  let calls = 0, choice = "click_2"
+  const key = "synthetic-browser-decisions-test"
+  const h = harness(fakeBrowser(), async () => ({ browser: config({ decisions: decisionsConfig }) }), { OPENAI_API_KEY: key }, undefined,
+    (async (_url: any, options: any) => {
+      calls++
+      assert.equal(options.headers.Authorization, `Bearer ${key}`)
+      assert(!options.body.includes(key))
+      return new Response(JSON.stringify({ answers: [{ type: "choice", name: "next_action", choice, confidence: 1 }] }))
+    }) as typeof fetch)
+  t.after(() => h.stop())
+  await h.start(nativeOne)
+  const ctx = { sessionManager: { getSessionId: () => nativeOne } }
+  await h.execute({ action: "snapshot" })
+  assert.equal((await h.execute(runPlan, undefined, ctx)).details.decisions.reason, "policy_denied")
+  assert(!h.fake.calls.some(c => c.command[0] === "click"))
+  h.authorize((event: any) => {
+    assert.equal(event.context.sessionManager, ctx.sessionManager)
+    assert.deepEqual(event.input, { action: "click", ref: "@e1" })
+    assert(event.context.signal instanceof AbortSignal)
+    assert.match(event.toolCallId, /^call:decisions:/)
+    choice = "done"
+    event.reply(Promise.resolve(undefined))
+  })
+  const result = await h.execute(runPlan, undefined, ctx)
+  assert.equal(result.details.decisions.reason, "done")
+  assert.equal(result.details.decisions.actions, 1)
+  assert.equal(calls, 3)
+  assert(!JSON.stringify(result).includes(key))
+  assert(h.fake.calls.every(c => c.options.env.OPENAI_API_KEY === undefined))
+})
+
+for (const enabled of [false, true]) test(`extension rejects ${enabled ? "missing key" : "disabled Decisions"} before observing or fetching`, async t => {
+  const h = harness(fakeBrowser(), async () => ({ browser: config({ decisions: { ...decisionsConfig, enable: enabled } }) }), {}, undefined,
+    (async () => { throw new Error("must not fetch") }) as typeof fetch)
+  t.after(() => h.stop())
+  await h.start(nativeOne)
+  await assert.rejects(h.execute(runPlan, undefined, { sessionManager: { getSessionId: () => nativeOne } }), { code: "decisions_unavailable" })
+  assert.equal(h.fake.calls.length, 0)
 })

@@ -183,9 +183,11 @@ in
       testSource = pkgs.runCommand "pi-browser-extension-test-source" { } ''
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-browser.ts} $out/tests/pi-browser.ts
+        cp ${./tests/browser-decisions.ts} $out/tests/browser-decisions.ts
         cp ${./tests/browser-smoke-helpers.ts} $out/tests/browser-smoke-helpers.ts
         cp ${./tests/pi-browser-loader.mjs} $out/tests/pi-browser-loader.mjs
         cp ${./extensions/pi-browser.ts} $out/extensions/pi-browser.ts
+        cp ${./extensions/browser-decisions.ts} $out/extensions/browser-decisions.ts
         cp ${./rpc-runtime/browser-channel.mjs} $out/extensions/browser-channel.mjs
       '';
     in
@@ -193,6 +195,7 @@ in
       export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
       export PI_BROWSER_FLOCK=${if isLinux then "${pkgs.util-linux}/bin/flock" else "/bin/flock"}
       node --experimental-strip-types ${testSource}/tests/pi-browser.ts
+      node --experimental-strip-types ${testSource}/tests/browser-decisions.ts
       node ${testSource}/tests/pi-browser-loader.mjs ${pi-coding-agent}/lib/node_modules/pi-monorepo
       touch $out
     '';
@@ -204,6 +207,7 @@ in
         mkdir -p tests extensions
         cp ${./tests/pi-browser-native.ts} tests/pi-browser-native.ts
         cp ${./extensions/pi-browser.ts} extensions/pi-browser.ts
+        cp ${./extensions/browser-decisions.ts} extensions/browser-decisions.ts
         cp ${./rpc-runtime/browser-channel.mjs} extensions/browser-channel.mjs
         export HOME=$TMPDIR PI_OFFLINE=1
         node --experimental-strip-types tests/pi-browser-native.ts ${agent-browser}/bin/agent-browser

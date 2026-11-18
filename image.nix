@@ -714,6 +714,7 @@ let
     cp ${./extensions/pi-openai-fast.ts} $out/pi-openai-fast.ts
     ${lib.optionalString withBrowser ''
       cp ${./extensions/pi-browser.ts} $out/pi-browser.ts
+      cp ${./extensions/browser-decisions.ts} $out/browser-decisions.ts
       cp ${./rpc-runtime/browser-channel.mjs} $out/browser-channel.mjs
     ''}
   '';

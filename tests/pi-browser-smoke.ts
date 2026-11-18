@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto"
 import { BrowserSession } from "../extensions/pi-browser.ts"
 import type { BrowserConfig } from "../extensions/pi-browser.ts"
 import { snapshotRef, runFixtureBrowser } from "./browser-smoke-helpers.ts"
+import { DECISIONS_DEFAULTS } from "../extensions/browser-decisions.ts"
 
 const [executable, chromium] = process.argv.slice(2)
 assert(executable?.startsWith("/") && chromium?.startsWith("/"), "Supply absolute CLI and sandboxed Chromium executable paths")
@@ -157,6 +158,22 @@ try {
   stage("agent visual tools: return preview to desktop")
   frame(await parent.execute({ action: "resize", width: 1280, height: 720 }))
   await parent.disconnectControl()
+  stage("bounded Decisions: real snapshots and actions with an offline chooser (no OpenAI request)")
+  const decisions = await make({ decisions: { ...DECISIONS_DEFAULTS, enable: true } })
+  await decisions.execute({ action: "open", url })
+  let step = 0, approved = 0
+  const boundedRun = await decisions.runPlan({ action: "run", goal: "Save the name Decisions", maxSteps: 3,
+    actions: [{ action: "fill", role: "textbox", name: "Name", text: "Decisions" }, { action: "click", role: "button", name: "Save" }] },
+    async (_goal, observation, candidates) => {
+      assert.equal(observation.url, url)
+      assert.equal(candidates.length, 2)
+      if (step === 2) assert.match(observation.snapshot, /saved Decisions/)
+      return { choice: ["fill_1", "click_2", "done"][step++], confidence: 1 }
+    }, async () => { approved++; return true }, () => true)
+  assert.equal(boundedRun.details.decisions.reason, "done")
+  assert.equal(approved, 2)
+  assert.match(text(await decisions.execute({ action: "get", property: "text" })), /saved Decisions/)
+  await decisions.shutdown()
   stage("unrelated conversation: verify cookie isolation")
   const unrelated = await make()
   await unrelated.execute({ action: "open", url })

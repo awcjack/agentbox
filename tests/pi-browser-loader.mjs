@@ -29,10 +29,11 @@ try {
     { action: "type", frameId: "00000000-0000-4000-8000-000000000000", text: "--literal 世界" },
     { action: "wheel", frameId: "00000000-0000-4000-8000-000000000000", x: 100, y: 200, deltaX: -50, deltaY: 300 },
     { action: "resize", width: 390, height: 844 },
+    { action: "run", goal: "Save the name", maxSteps: 4, actions: [{ action: "fill", role: "textbox", name: "Name", text: "Alice" }, { action: "click", role: "button", name: "Save" }] },
   ]) {
     assert.deepEqual(validateToolArguments(tool, { id: "test", name: "browser", arguments: parameters }), parameters)
   }
-  for (const parameters of [{ action: "eval" }, { action: "status", cdp: "http://localhost" }, { action: "resize", width: 319, height: 844 }, { action: "pointer", frameId: "bad", x: 1, y: 1 }, { action: "wheel", x: 1, y: 1, deltaY: 2001 }]) {
+  for (const parameters of [{ action: "eval" }, { action: "run", goal: "bad", actions: [{ action: "eval" }] }, { action: "run", maxSteps: 21 }, { action: "status", cdp: "http://localhost" }, { action: "resize", width: 319, height: 844 }, { action: "pointer", frameId: "bad", x: 1, y: 1 }, { action: "wheel", x: 1, y: 1, deltaY: 2001 }]) {
     assert.throws(() => validateToolArguments(tool, { id: "test", name: "browser", arguments: parameters }), /Validation failed/)
   }
   await assert.rejects(tool.execute("test", { action: "status" }, undefined, undefined, {}), /disabled/)
