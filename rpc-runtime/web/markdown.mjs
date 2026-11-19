@@ -167,26 +167,20 @@ export function renderMarkdown(source, { previewFences = true, renderMermaidPrev
   function inline(parent, text) {
     for (const token of inlineTokens(text)) {
       if (token.type === "text") { parent.append(document.createTextNode(token.text)); continue; }
-      const filePath = onFileDownload && (token.type === "a"
+      const fileAction = onFilePreview || onFileDownload;
+      const filePath = fileAction && (token.type === "a"
         ? localDownloadPath(token.href, { encoded: true, explicit: true })
         : token.type === "code" ? localDownloadPath(token.text) : null);
       if (filePath) {
-        const button = element("button", "file-download");
+        const actionLabel = onFilePreview ? "Preview" : "Download";
+        const button = element("button", onFilePreview ? "file-preview-button" : "file-download");
         button.type = "button";
-        button.title = `Download workspace file: ${filePath} (maximum 16 MiB)`;
-        button.setAttribute("aria-label", `Download ${token.text}`);
+        button.title = `${actionLabel} workspace file: ${filePath} (maximum 16 MiB)`;
+        button.setAttribute("aria-label", `${actionLabel} ${token.text}`);
         if (token.type === "code") button.append(element("code", "", token.text));
         else button.textContent = token.text;
-        button.addEventListener("click", () => onFileDownload(filePath));
+        button.addEventListener("click", () => fileAction(filePath));
         parent.append(button);
-        if (onFilePreview) {
-          const preview = element("button", "file-preview-button", "Preview");
-          preview.type = "button";
-          preview.title = `Preview workspace file: ${filePath} (maximum 16 MiB)`;
-          preview.setAttribute("aria-label", `Preview ${token.text}`);
-          preview.addEventListener("click", () => onFilePreview(filePath));
-          parent.append(preview);
-        }
       } else {
         const child = element(token.type, "", token.text);
         if (token.type === "a") { child.href = token.href; child.target = "_blank"; child.rel = "noopener noreferrer"; }

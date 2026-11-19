@@ -32,6 +32,7 @@ test("table document labels download their own file in place, without a six-file
   assert.deepEqual(clicked, [], "rendering must not fetch or download anything");
   assert.equal(buttons[0].textContent, "Audit");
   assert.equal(buttons[0].attributes["aria-label"], "Download Audit");
+  assert.equal(buttons[0].title, "Download workspace file: docs/report-0.md (maximum 16 MiB)");
   assert.equal(buttons[0].href, undefined, "local file paths must not navigate the web app");
   buttons[0].handlers.click(); buttons[11].handlers.click();
   assert.deepEqual(clicked, ["docs/report-0.md", "docs/report-11.md"]);
@@ -49,11 +50,20 @@ test("encoded spaces, angle paths, escaped spaces, parentheses and line anchors 
 test("ordinary URLs and anchors stay links, unsafe schemes stay text", () => fixture(() => {
   const clicked = [];
   const source = '[Web](https://host/docs/file.zip) [CDN](//host/file.zip) [Email](mailto:user@example.com) [Section](#part) [bad](javascript:alert(1)) [bad](file:///etc/passwd) [bad](data:text/html,evil)';
-  const nodes = all(renderMarkdown(source, { onFileDownload: path => clicked.push(path) }));
-  assert.deepEqual(nodes.filter(node => node.tag === "a").map(node => node.href), ["https://host/docs/file.zip", "//host/file.zip", "mailto:user@example.com", "#part"]);
-  assert.equal(nodes.filter(node => node.className === "file-download").length, 0);
-  assert.deepEqual(clicked, []);
-  for (const node of nodes.filter(node => node.tag === "a")) assert.equal(node.rel, "noopener noreferrer");
+  for (const options of [
+    { onFileDownload: path => clicked.push(path) },
+    { onFilePreview: path => clicked.push(path) },
+    { onFileDownload: path => clicked.push(path), onFilePreview: path => clicked.push(path) },
+  ]) {
+    const nodes = all(renderMarkdown(source, options));
+    assert.deepEqual(nodes.filter(node => node.tag === "a").map(node => node.href), ["https://host/docs/file.zip", "//host/file.zip", "mailto:user@example.com", "#part"]);
+    assert.equal(nodes.filter(node => node.tag === "button").length, 0);
+    assert.deepEqual(clicked, []);
+    for (const node of nodes.filter(node => node.tag === "a")) {
+      assert.equal(node.rel, "noopener noreferrer");
+      assert.equal(node.target, "_blank");
+    }
+  }
 }));
 
 test("inline-code file paths become inline download controls; fenced source stays untouched", () => fixture(() => {
@@ -80,21 +90,36 @@ test("download rendering is opt-in and Markdown previews inherit the callback", 
   assert.deepEqual(clicked, ["docs/audit.md"]);
 }));
 
-test("file previews are explicit adjacent actions and fenced Markdown inherits them", () => fixture(() => {
-  const downloads = [], previews = [];
-  const options = { onFileDownload: path => downloads.push(path), onFilePreview: path => previews.push(path) };
-  const root = renderMarkdown('[Report](out/report.md)\n\n```md\n[Image](out/a.png)\n```', options);
-  assert.deepEqual(previews, []);
-  all(root).find(node => node.className === "file-preview-button").handlers.click();
-  assert.deepEqual(previews, ["out/report.md"]);
-  assert.deepEqual(downloads, []);
-  all(root).find(node => node.textContent === "Preview" && node.className === "text-button").handlers.click();
-  const buttons = all(root).filter(node => node.className === "file-preview-button");
-  assert.equal(buttons.length, 2);
-  assert.equal(buttons[1].attributes["aria-label"], "Preview Image");
-  buttons[1].handlers.click();
-  assert.deepEqual(previews, ["out/report.md", "out/a.png"]);
-}));
+for (const withDownload of [false, true]) {
+  test(`file labels and code paths preview as the sole primary action (${withDownload ? "both callbacks" : "preview only"}), including fenced Markdown`, () => fixture(() => {
+    const downloads = [], previews = [];
+    const options = { onFilePreview: path => previews.push(path) };
+    if (withDownload) options.onFileDownload = path => downloads.push(path);
+    const root = renderMarkdown('[Report](out/report.md) `README.md`\n\n```md\n[Image](out/a.png) `out/data.csv`\n```', options);
+    assert.deepEqual(previews, [], "rendering must not preview anything");
+    const buttons = all(root).filter(node => node.className === "file-preview-button");
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons[0].textContent, "Report");
+    assert.equal(buttons[0].attributes["aria-label"], "Preview Report");
+    assert.equal(buttons[0].title, "Preview workspace file: out/report.md (maximum 16 MiB)");
+    assert.equal(buttons[0].href, undefined);
+    assert.equal(buttons[1].children[0].tag, "code");
+    assert.equal(buttons[1].children[0].textContent, "README.md");
+    assert.equal(buttons[1].attributes["aria-label"], "Preview README.md");
+    buttons.forEach(node => node.handlers.click());
+    assert.deepEqual(previews, ["out/report.md", "README.md"]);
+    all(root).find(node => node.textContent === "Preview" && node.className === "text-button").handlers.click();
+    const nestedButtons = all(root).filter(node => node.className === "file-preview-button").slice(2);
+    assert.equal(nestedButtons.length, 2);
+    assert.equal(nestedButtons[0].textContent, "Image");
+    assert.equal(nestedButtons[0].attributes["aria-label"], "Preview Image");
+    nestedButtons.forEach(node => node.handlers.click());
+    assert.deepEqual(previews, ["out/report.md", "README.md", "out/a.png", "out/data.csv"]);
+    assert.deepEqual(downloads, [], "preview actions must never invoke downloads");
+    assert.equal(all(root).filter(node => node.className === "file-download").length, 0);
+    assert.equal(all(root).filter(node => node.tag === "button").length, 6, "only four file actions, Copy and the fence toggle; no adjacent controls");
+  }));
+}
 
 test("balanced destinations preserve external URLs and incomplete links remain visible", () => {
   assert.deepEqual(inlineTokens('[Web](https://host/report(1).zip)'), [{ type: "a", text: "Web", href: "https://host/report(1).zip" }]);

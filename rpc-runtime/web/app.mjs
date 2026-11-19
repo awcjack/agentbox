@@ -1275,7 +1275,6 @@ function renderMessages() {
         if (change) accumulateChange(turnChanges, change);
         body.append(renderTool(block, result, block.id));
       } else renderContent(body, [block], message.role === "assistant" ? {
-        onFileDownload: (filePath) => downloadWorkspaceFile(ctx, filePath),
         onFilePreview: (filePath) => downloadWorkspaceFile(ctx, filePath, { preview: true }),
       } : undefined);
     }
