@@ -93,7 +93,7 @@ host mounts, network access, Docker access, and cloud permissions granted to it;
 scope each of those to the least privilege needed.
 
 Pi adds `web_search`, `web_fetch`, `code_diagnostics`, `code_navigation`,
-`todo`, `question`, and `task`. Diagnostics and navigation lazily start and reuse
+`report_execution_target`, `todo`, `question`, and `task`. Diagnostics and navigation lazily start and reuse
 language servers for Go, Nix, TypeScript/JavaScript, JSON, YAML, HTML, and CSS;
 diagnostics fall back to the existing deterministic type/syntax checks and still
 run automatically after `write`/`edit` alongside project tests. LSP output and
@@ -107,6 +107,82 @@ pinning a provider or model. Roles inherit the active Pi selection unless
 configured otherwise. Todo/task state follows the current session branch,
 delegation has concurrency/job/step/output limits, and `question` works in both
 the TUI and an RPC-provided UI.
+
+### Structured implementation-to-verification handoff
+
+`report_execution_target` is an explicit metadata tool, not automatic shell-cwd
+tracking or a review launcher. The implementation agent calls it **after all edits
+and checks, before its final response**, when its task requests a verification
+handoff. Shell `cd` and `git worktree add` do not update Pi's session cwd.
+
+A Product is the Git repository/worktree, not a literal `Product` directory.
+The tool derives its root from Git at the explicitly selected working directory;
+there is **no environment configuration requirement** and no inference from a
+Product name, original launch cwd, shell output, or final prose. Existing policy
+rules still apply to `workingDirectory`; no new default allow rule, runtime
+scope, or mount is added.
+
+Example call (the agent supplies the directory it actually selected):
+
+```json
+{"workingDirectory":"/workspace/aogb/aogb-erp-new-feat"}
+```
+
+The tool resolves that existing directory, inspects Git's worktree root, requires
+accessible private/common Git metadata, and checks containment in that worktree.
+The successful result's `details` and `structuredContent` contain the same
+versioned report:
+
+```json
+{
+  "version": 1,
+  "worktreeRoot": "/workspace/aogb/aogb-erp-new-feat",
+  "productPath": ".",
+  "productRelativeCwd": ".",
+  "workingDirectory": "/workspace/aogb/aogb-erp-new-feat",
+  "sessionId": "implementation-session-id",
+  "toolCallId": "report-tool-call-id"
+}
+```
+
+`productPath` is always `.`. `productRelativeCwd` is relative to the worktree
+root: `.` at its root, or e.g. `services/api` when the selected working directory
+is inside that subtree. Absolute paths are canonical and relative paths are
+normalized without traversal. The report is also persisted as native Pi custom entry
+`agentbox.execution-target.v1`, delivered through `entry_appended` and recoverable
+through `get_entries`. It does not change Pi's cwd, commit/stash/copy files,
+terminate the agent, or prove completion. Calling again replaces the candidate
+for that attempt; a failed newer call must invalidate an earlier candidate.
+
+RPC controllers should consume successful `tool_execution_end` results for this
+specific tool, correlate the tool call and implementation session/attempt, and
+wait for non-aborted `agent_settled` plus their normal task-success checks before
+review. Clear candidates at a new report attempt or new implementation attempt;
+never reuse a report from an abandoned branch, earlier run, or failed/cancelled
+implementation. Recovery must use the active `leafId`/`parentId` branch and match
+successful tool results, not simply select the last custom entry in the file.
+
+Managed `task` calls forward a direct child's valid report in
+`details.results[i].executionTarget` (also on the completed `jobs[i]` row).
+Only a successful, identity-matched `tool_execution_end` from that child counts;
+prose, arguments, partial updates and nested-tool reports are not forwarded.
+Failed/cancelled/step-limited jobs and resumes without a new report have no target.
+This is optional metadata: `task.status = completed` alone does not enforce a
+handoff. A controller requiring verification must block when a valid current
+report is absent rather than falling back to the launch cwd.
+
+**Consumer contract (for example sidanCode):** independently validate the exact
+schema, expected Product repository/common-directory identity,
+canonical directory containment and existing authorization. Persist the validated
+target with task/attempt/session/report provenance separately from the original
+`Task.CWD`; revalidate before launch. Start a fresh session against that **same
+on-disk worktree**, not a clone/new worktree or commit checkout, so uncommitted
+and untracked changes remain available. The existing `POST /v1/sessions` API
+accepts `{ "profile": "existing-profile", "cwd": "/validated/directory" }`;
+omit `resume` for fresh conversation state. A nested cwd narrows the sandbox
+mount: if required parent/shared Git metadata is absent in that sandbox, fail
+closed, without adding mounts or widening profiles. sidanCode's database and
+`startReview` integration are outside this repository and are not implemented here.
 
 ### Pi `/init` for AGENTS.md
 
