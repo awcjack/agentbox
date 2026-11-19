@@ -74,7 +74,7 @@ let current = null, sessions = [], profiles = [], history = [], readOnly = false
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
 let browserPanel = null, browserBinding = null;
-let filePreview = null, previewBinding = null;
+let filePreview = null, previewBinding = null, contextRevision = 0;
 const records = new Map();
 const baseTitle = document.title;
 const attention = createAttentionTracker();
@@ -167,7 +167,7 @@ function updateControls() {
   const ctx = current;
   $("download-file").disabled = !canDownloadFile(ctx) || Boolean(ctx?.record.downloading);
   $("preview-file").disabled = $("download-file").disabled;
-  if (previewBinding && (previewBinding.ctx !== ctx || previewBinding.nativeId !== ctx?.meta.nativeSessionId || !canDownloadFile(ctx))) closeFilePreview();
+  if (previewBinding && (previewBinding.ctx !== ctx || previewBinding.nativeId !== ctx?.meta.nativeSessionId || !canDownloadFile(ctx))) closeContextPane();
   $("open-browser").disabled = !browserViewAvailable(ctx);
   if (browserPanel && (!browserViewAvailable(ctx) || browserBinding?.ctx !== ctx || browserBinding?.nativeId !== ctx?.meta.nativeSessionId)) closeContextPane();
   $("export-conversation").disabled = !canExportConversation(ctx);
@@ -1003,6 +1003,11 @@ function forgetRecent(...ids) {
 }
 
 function closeContextPane() {
+  contextRevision++;
+  previewBinding = null;
+  filePreview?.dispose(); filePreview = null;
+  $("download-context-file").hidden = true;
+  $("download-context-file").disabled = true;
   browserPanel?.dispose(); browserPanel = null; browserBinding = null;
   $("open-browser").setAttribute("aria-expanded", "false");
   const pane = $("context-pane");
@@ -1714,39 +1719,50 @@ previewFileButton.addEventListener("click", () => {
   const filePath = window.prompt("Preview workspace file (maximum 16 MiB). Enter a relative or absolute workspace path:");
   if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim(), { preview: true });
 });
-function closeFilePreview() {
-  previewBinding = null;
-  filePreview?.dispose(); filePreview = null;
-  $("file-preview-body").replaceChildren();
-  $("file-preview-title").textContent = "File preview";
-  if ($("file-preview-dialog").open) $("file-preview-dialog").close();
-}
-$("close-file-preview").addEventListener("click", closeFilePreview);
-$("file-preview-dialog").addEventListener("close", () => { if (!$("file-preview-dialog").open) closeFilePreview(); });
-$("save-file-preview").addEventListener("click", () => {
-  if (previewBinding && canDownloadFile(previewBinding.ctx)) saveDownload(previewBinding.blob, previewBinding.filename);
+$("download-context-file").addEventListener("click", () => {
+  if (previewBinding?.blob && canDownloadFile(previewBinding.ctx)) saveDownload(previewBinding.blob, previewBinding.filename);
 });
 async function downloadWorkspaceFile(ctx, filePath, { preview = false } = {}) {
   if (!canDownloadFile(ctx) || ctx.record.downloading) return false;
   const nativeId = ctx.meta.nativeSessionId, ownSelection = selection, ownEpoch = epoch;
+  if (preview) {
+    closeContextPane();
+    previewBinding = { ctx, nativeId, blob: null, filename: filePath };
+    const pane = $("context-pane");
+    pane.dataset.mode = "workspace-file";
+    pane.setAttribute("aria-label", "File preview");
+    $("close-context-pane").setAttribute("aria-label", "Close file preview");
+    $("context-pane-path").textContent = pathBreadcrumb(filePath);
+    $("context-pane-path").title = filePath;
+    $("download-context-file").hidden = false;
+    $("context-pane-body").replaceChildren(element("p", "context-pane-empty", "Loading file preview…"));
+    pane.hidden = false; $("workspace").classList.add("context-open");
+  }
+  const ownPane = contextRevision;
   const valid = () => active(ctx) && selection === ownSelection && epoch === ownEpoch
-    && ctx.meta.nativeSessionId === nativeId && canDownloadFile(ctx);
+    && ctx.meta.nativeSessionId === nativeId && canDownloadFile(ctx)
+    && (!preview || contextRevision === ownPane);
   ctx.record.downloading = true; updateControls(); scheduleRender();
   try {
     const saved = await fetchDownload({ request: (url, options) => api.request(url, options),
       sessionId: ctx.id, nativeSessionId: nativeId, path: filePath, signal: ctx.controller.signal, valid,
       ...(preview ? { save: async (blob, filename) => {
-        closeFilePreview();
         const result = await createFilePreview(blob, filename, { renderMarkdown, valid });
         if (!valid()) { result.dispose(); return; }
         filePreview = result; previewBinding = { ctx, nativeId, blob, filename };
-        $("file-preview-title").textContent = filename;
-        $("file-preview-body").replaceChildren(result.node);
-        $("file-preview-dialog").showModal(); $("close-file-preview").focus();
+        $("context-pane-body").replaceChildren(result.node);
+        $("download-context-file").disabled = false;
+        $("download-context-file").title = `Download ${filename}`;
       } } : {}) });
     if (saved) showNotice(preview ? "File preview opened. Workspace files may contain sensitive data." : "File downloaded. Workspace files may contain sensitive data.");
     return saved;
-  } catch (error) { if (valid()) report(error, ctx); return false; }
+  } catch (error) {
+    if (valid()) {
+      if (preview) $("context-pane-body").replaceChildren(element("p", "context-pane-empty", error.message || "File preview unavailable."));
+      report(error, ctx);
+    }
+    return false;
+  }
   finally {
     ctx.record.downloading = false;
     if (active(ctx)) { updateControls(); scheduleRender(); }
@@ -2432,7 +2448,6 @@ async function attachImages(files) {
 }
 
 function logout(message = "", { clearRemembered = true } = {}) {
-  closeFilePreview();
   closeContextPane(); // Release with the old credential/identity before clearing auth.
   epoch++; selection++; listVersion++;
   token = ""; auth.abort(); auth = new AbortController();

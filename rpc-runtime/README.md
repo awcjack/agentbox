@@ -887,9 +887,13 @@ same-named files in separate checkouts can be selected explicitly; for example,
 `/download /workspace/brian/use-brian/apps/app-web/AGENTS.md`. Use matching quotes
 around paths with spaces if desired. This is a frontend command, not an upstream
 Pi RPC command or a tool available to the model.
-The web **Preview file…** action and **Preview** controls beside assistant file
-links use this same endpoint and authorization, not a public URL or managed browser
-session. UTF-8 text and Markdown previews are capped at 1 MiB; raster images use
+The web **Preview file…** action and assistant local-file link labels use this
+same endpoint and authorization, not a public URL or managed browser session.
+They open the existing Browser/file right pane without a modal; its header's
+**Download file** action saves the fetched bytes without another read. Opening a
+file replaces Browser and releases human control. Closing or replacing the pane
+also invalidates pending preview reads so late replies cannot reopen it.
+UTF-8 text and Markdown previews are capped at 1 MiB; raster images use
 local Blob URLs, PDFs use a sandboxed browser viewer when supported, and HTML/SVG
 are shown only as inert source. Unsupported files remain downloadable. Closing or
 changing session/conversation revokes preview media URLs; logout clears previews.

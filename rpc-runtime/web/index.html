@@ -80,6 +80,7 @@
     <aside id="context-pane" class="context-pane" hidden aria-label="File preview">
       <header class="context-pane-header">
         <div class="context-pane-crumb" id="context-pane-path"></div>
+        <button id="download-context-file" class="text-button" type="button" hidden disabled>Download file</button>
         <button id="close-context-pane" class="icon-button" type="button" aria-label="Close file preview" title="Close preview">&times;</button>
       </header>
       <div id="context-pane-body" class="context-pane-body" tabindex="0"></div>
@@ -187,14 +188,6 @@
       <p>Files and tool side effects are not undone. This requires an idle agent and capacity for one additional process.</p>
       <button id="confirm-conversation-action" class="primary-button" type="submit"></button><button id="cancel-conversation-action" class="text-button" type="button">Cancel</button>
     </form>
-  </dialog>
-  <dialog id="file-preview-dialog" aria-labelledby="file-preview-title">
-    <div class="dialog-body">
-      <div class="dialog-heading"><h2 id="file-preview-title">File preview</h2><button id="close-file-preview" class="text-button" type="button">Close</button></div>
-      <p>Local preview only. HTML and SVG are displayed as source. Unsupported files can still be downloaded.</p>
-      <button id="save-file-preview" class="text-button" type="button">Download file</button>
-      <div id="file-preview-body"></div>
-    </div>
   </dialog>
   <dialog id="copy-dialog" aria-labelledby="copy-title">
     <div class="dialog-body"><h2 id="copy-title">Copy message</h2><p>Clipboard access is unavailable. Copy the selected text manually.</p><textarea id="copy-text" aria-label="Message text to copy" rows="8" readonly></textarea><button id="close-copy" class="text-button" type="button">Close</button></div>

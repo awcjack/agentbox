@@ -714,12 +714,8 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .browser-panel input, .browser-panel select, .browser-panel textarea { width: 100%; min-width: 0; max-width: 100%; padding: 8px; background: #202020; color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
 .browser-panel textarea { min-height: 64px; resize: vertical; }
 .browser-panel fieldset:disabled { opacity: .65; }
-#file-preview-dialog { width: min(1000px, calc(100% - 24px)); }
-#file-preview-dialog .dialog-body { padding: 20px; min-width: 0; }
-#file-preview-dialog h2 { font-size: 18px; overflow-wrap: anywhere; min-width: 0; }
-#file-preview-dialog .dialog-heading { gap: 12px; }
-#file-preview-dialog .dialog-heading button { flex-shrink: 0; }
-#file-preview-body { margin-top: 12px; min-width: 0; overflow: auto; max-height: 65dvh; }
+#download-context-file { flex-shrink: 0; white-space: nowrap; }
+.context-pane-body .file-preview { min-width: 0; }
 .file-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
 .file-preview img { display: block; max-width: 100%; max-height: 60dvh; object-fit: contain; margin: auto; }
 .file-preview iframe { display: block; width: 100%; height: 60dvh; border: 0; background: white; }

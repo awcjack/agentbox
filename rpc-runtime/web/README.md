@@ -146,13 +146,13 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   inside `use-brian/` when that checkout is beneath the selected workspace.
   Multiple matches or an over-limit checkout scan ask you to include the checkout
   directory or enter an absolute workspace path; absolute paths stay exact.
-  Local file links in assistant responses download **in place**: click the original
-  label (for example, **Audit** in a document table) instead of finding a separate
-  button below the response. Likely file paths in inline code are clickable too.
-  These controls keep their text, expose a download label to assistive technology,
-  and show the destination path on hover. An adjacent **Preview** button opens the
-  file locally in the browser instead of saving it. There is no six-file cap or
-  extra download action row. Ordinary HTTP(S), mail and anchor links retain their normal behavior.
+  Local file links in assistant responses open a **preview in the right pane**:
+  click the original label (for example, **Audit** in a document table) or an inline
+  code file path. There is no extra Preview button or automatic download. These
+  controls keep their text, expose a preview label to assistive technology, and
+  show the destination path on hover. **Download file** in the right pane's header
+  saves the previewed file. Ordinary HTTP(S), mail and anchor links retain their
+  normal behavior.
   Use the manual action for bare/unrecognized paths; code/angle-link paths can
   contain spaces. Paths are not checked for existence until clicked. Rendering
   never fetches or downloads files; local controls use the authenticated API
@@ -164,13 +164,17 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   saved as binary attachments through temporary, revoked Blob URLs and may contain
   sensitive data. Browser download settings may ask where to save them.
 - **Preview file…** accepts the same workspace paths and uses the same authenticated
-  file-read endpoint and 16 MiB limit. It displays UTF-8 text, safe Markdown,
+  file-read endpoint and 16 MiB limit. It reuses the Browser/file preview right pane,
+  not a modal dialog, so the conversation remains interactive. Opening a file
+  replaces Browser and releases any human-control lease. It displays UTF-8 text, safe
+  Markdown,
   raster images, and PDFs (when supported by the browser's sandboxed viewer).
   Text previews stop at 1 MiB; HTML and SVG stay inert source text, never live pages.
-  Unsupported binaries offer download guidance. The dialog's **Download file**
-  saves the already-fetched bytes without another request. Closing the dialog,
-  switching conversation/session, or logging out clears the preview and revokes
-  its media Blob URLs. No model call, managed-browser tab, or public artifact URL
+  Unsupported binaries offer download guidance. The pane header's **Download file**
+  saves the already-fetched bytes without another request. Closing the pane,
+  switching pane/conversation/session, or logging out clears the preview and revokes
+  its media Blob URLs; late reads cannot reopen a closed or replaced pane.
+  No model call, managed-browser tab, or public artifact URL
   is involved. Previews may contain sensitive workspace data.
 - **`/download <full-path>`** in the composer downloads one exact workspace file,
   without a model prompt or shell command. It is available in `/` suggestions even
