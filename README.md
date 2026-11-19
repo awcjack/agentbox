@@ -217,7 +217,7 @@ and live/queued delivery using the bundled Pi loader without model calls.
 ### Pi goal mode
 
 Agentbox bundles upstream [`@narumitw/pi-goal` 0.53.1](https://github.com/narumiruna/pi-extensions/tree/86a5eda01aaf271ff0865b36d1a711dc972232e9/packages/pi-goal),
-characterized against **Pi 0.87.1**, without reimplementing its workflow.
+characterized against **Pi 1.5.2**, without reimplementing its workflow.
 It continues one session-owned objective at settled idle boundaries until complete,
 paused, blocked, waiting, or limited. It does not start a goal automatically in a
 fresh session.
@@ -303,7 +303,7 @@ Focused offline checks (also run in CI):
 nix build .#agentbox-pi-goal-runtime .#pi-goal-extension-test .#pi-agentsmd-test .#pi-codex-wrapper-test
 ```
 
-The extension check uses Pi 0.87.1's real Jiti loader, lazy TUI/RPC routes, managed
+The extension check uses Pi 1.5.2's real Jiti loader, lazy TUI/RPC routes, managed
 policy approvals, stale goal IDs, pause/resume/clear, token exhaustion and restored
 response caps. The wrapper check verifies policy-last ordering, immutable entry
 paths, rejection of user extensions, and exclusion from child sessions.
@@ -360,24 +360,26 @@ The work alias loads the native provider's local catalog (cached remote models
 and `models.json` metadata) before CLI/default/session model resolution, then
 mirrors the live registry after startup. Credentials and configured auth headers
 remain separate; catalog bootstrap performs no network requests or token refresh.
-Agentbox patches Pi 0.87.1 to batch startup provider registrations before one
+Agentbox patches Pi 1.5.2 to batch startup provider registrations before one
 awaited catalog/auth refresh, preventing intermittent account fallback on resume
 and missing aliases in new-session model lists. The web model picker loads after
 startup synchronization, retries transient read failures, and reloads on Refresh
 or reconnect without restarting Pi. Agentbox also patches RPC catalog reads to
-reload the local model cache: run `agentbox exec pi update --models` on the host,
-then click Refresh in the web UI to discover newly published models in an existing
-process. The picker itself does not force a network catalog refresh. Rebuild and redeploy the image to pick up the
+refresh Pi's catalogs and authentication availability. Explicit Refresh bypasses
+the catalog freshness TTL; offline mode still forbids network access. You can also
+run `agentbox exec pi update --models` on the host to refresh cached metadata.
+Rebuild and redeploy the image to pick up the
 patched executable and web assets; browser refresh alone cannot update Pi in an
 older image. Start a new session or resume into a new process after deployment.
 Reply badges show the model/provider recorded on each old reply.
 
 ### OpenAI models and fast mode
 
-The Pi-only `nixpkgs-unstable` pin supplies **Pi 0.87.1**. Agentbox also backports
-**GPT-6.1 Sol** and **GPT-6.1 Terra** into its offline OpenAI API and Codex catalogs,
-plus OpenAI's `chat-latest`, `gpt-5.6-cyber`, `gpt-daybreak-blue-latest`, and
-`gpt-daybreak-red-latest`, using provider-specific metadata from [Pi's OpenAI catalog](https://pi.dev/api/models/providers/openai)
+The Pi-only `nixpkgs-unstable` pin supplies **Pi 1.5.2**. Its upstream offline
+OpenAI API and Codex catalogs already include **GPT-6.1 Sol**, **GPT-6.1 Terra**,
+and OpenAI's `chat-latest`, `gpt-5.6-cyber`, `gpt-daybreak-blue-latest`, and
+`gpt-daybreak-red-latest`; Agentbox no longer carries a model-catalog backport.
+Provider-specific metadata comes from [Pi's OpenAI catalog](https://pi.dev/api/models/providers/openai)
 and [Codex catalog](https://pi.dev/api/models/providers/openai-codex). Native catalog
 refreshes remain authoritative. Select `/model openai/gpt-6.1-sol`,
 `/model openai-codex/gpt-6.1-sol`, or `/model codex-work/gpt-6.1-sol`.
@@ -388,8 +390,10 @@ so no separate model list is needed. Authentication and
 account entitlements still determine which models you can use. Rebuild/redeploy
 the image to upgrade Pi; `pi update --models` refreshes metadata only.
 When customizing `agentboxImage.override`, retain its bundled `pi-coding-agent`:
-replacing it with another nixpkgs package bypasses Agentbox's Pi pin and model/RPC
+replacing it with another nixpkgs package bypasses Agentbox's Pi pin and startup/RPC
 patches, even if the Agentbox flake input itself is current.
+See [Pi upgrade verification](docs/pi-upgrade-verification.md) for build and real-RPC
+compatibility checks before deployment.
 
 OpenAI [Fast mode](https://developers.openai.com/api/docs/guides/fast-mode) is a
 paid service tier, not a lower thinking level or a different model. Enable it
