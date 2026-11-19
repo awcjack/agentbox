@@ -491,10 +491,20 @@ export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies =
       ctx.ui.notify(`Cannot load skill ${match[1]}: ${String(error)}`, "error")
       return { action: "handled" }
     }
-    // Claude-derived skills use $ARGUMENTS (and sometimes $ARGUMENT). Replace
-    // only whole placeholders, literally and once, without shell evaluation.
-    const body = markdown.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "")
-      .trim().replace(/\$ARGUMENTS?\b/g, () => args)
+    const instructions = markdown.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").trim()
+    // Ordinary skills (including args/images) belong to Pi's native expansion.
+    if (!/\$ARGUMENTS?\b/.test(instructions)) {
+      // Pi parses only a literal space after the name. Preserve our legacy
+      // tab/newline separators without building the expanded skill block here.
+      const separator = event.text.slice(`/skill:${skillName}`.length, `/skill:${skillName}`.length + 1)
+      if (separator && separator !== " ") {
+        return { action: "transform", text: `/skill:${skillName}${args ? ` ${args}` : ""}`, images: event.images }
+      }
+      return
+    }
+    // Only Claude-derived placeholders need custom expansion. Substitute
+    // literally and once, without shell evaluation or replacement-string tokens.
+    const body = instructions.replace(/\$ARGUMENTS?\b/g, () => args)
     const block = `<skill name="${match[1]}" location="${path}">\nReferences are relative to ${dirname(path)}.\n\n${body}\n</skill>`
     return { action: "transform", text: args ? `${block}\n\n${args}` : block, images: event.images }
   })

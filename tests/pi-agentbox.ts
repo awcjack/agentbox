@@ -70,10 +70,13 @@ assert.equal(process.env.PI_SESSION_ID, "pi-session-test")
 assert.equal(handlers.has("session_info_changed"), true)
 assert.equal(handlers.has("agent_settled"), true)
 
-// Slash skills are expanded once with literal arguments, including RPC/queued
-// input. Resolve only Pi-discovered commands, never arbitrary user paths.
+// Only legacy placeholders and commit routing override native skill expansion,
+// including RPC/queued input. Resolve only Pi-discovered commands.
 const skillPath = join(root, "SKILL.md")
 const reviewSkillPath = join(root, "REVIEW_SKILL.md")
+const nativeSkillPath = join(root, "NATIVE_SKILL.md")
+commands.push({ name: "skill:native", source: "skill", sourceInfo: { path: nativeSkillPath } })
+writeFileSync(nativeSkillPath, "---\nname: native\ndescription: Keep $ARGUMENTS in metadata only\n---\nOrdinary instructions. Keep $ARGUMENTSuffix.\n")
 commands.push({ name: "skill:commit", source: "skill", sourceInfo: { path: skillPath } })
 commands.push({ name: "skill:review", source: "skill", sourceInfo: { path: reviewSkillPath } })
 writeFileSync(skillPath, "---\r\nname: commit\r\ndescription: Commit\r\n---\r\nCommit workflow.\r\n")
@@ -83,6 +86,19 @@ const images = [{ type: "image", data: "example", mimeType: "image/png" }]
 const args = "fix '$&' $ARGUMENTS `echo nope`\nsecond line"
 for (const source of ["interactive", "rpc", "extension"]) {
   for (const streamingBehavior of [undefined, "steer", "followUp"]) {
+    for (const suffix of ["", ` ${args}`]) {
+      const event = { text: `/skill:native${suffix}`, source, streamingBehavior, images }
+      assert.equal(await input(event, ctx), undefined, "Pi owns ordinary expansion with optional args/images")
+      assert.equal(event.text, `/skill:native${suffix}`, "passthrough text is untouched")
+      assert.equal(event.images, images, "passthrough images are untouched")
+    }
+    for (const separator of ["\t", "\n", "\r\n"]) {
+      assert.deepEqual(await input({ text: `/skill:native${separator}${args}`, source, streamingBehavior, images }, ctx),
+        { action: "transform", text: `/skill:native ${args}`, images }, "normalize legacy whitespace for native expansion")
+    }
+    assert.deepEqual(await input({ text: "/skill:native\t", source, streamingBehavior, images }, ctx),
+      { action: "transform", text: "/skill:native", images }, "empty legacy arguments still expand natively")
+
     const delegated = await input({ text: `/skill:commit\t${args}`, source, streamingBehavior, images }, ctx)
     assert.equal(delegated.action, "transform")
     assert.match(delegated.text, /Use the task tool exactly once/)
@@ -100,15 +116,20 @@ for (const source of ["interactive", "rpc", "extension"]) {
 }
 assert.match((await input({ text: "/skill:commit" }, ctx)).text, /Commit the changes requested in this conversation/)
 assert.match((await input({ text: "/skill:review" }, ctx)).text, /Use  and \. Keep \$ARGUMENTSuffix\./)
-writeFileSync(reviewSkillPath, "Updated instructions without frontmatter")
-assert.match((await input({ text: "/skill:review scope" }, ctx)).text, /Updated instructions without frontmatter\n<\/skill>\n\nscope$/)
+writeFileSync(reviewSkillPath, "Updated legacy instructions: $ARGUMENT")
+assert.match((await input({ text: "/skill:review scope" }, ctx)).text, /Updated legacy instructions: scope\n<\/skill>\n\nscope$/)
+writeFileSync(reviewSkillPath, "Updated ordinary instructions without frontmatter")
+assert.equal(await input({ text: "/skill:review scope", images }, ctx), undefined, "re-read discovered skill after edits; do not cache legacy status")
 for (const text of ["ordinary prompt", "/skill:unknown", "/skill:../../secret", "please /skill:commit"]) {
   assert.equal(await input({ text }, ctx), undefined)
 }
+commands.unshift({ name: "skill:review", source: "extension", sourceInfo: { path: join(root, "must-not-read.md") } })
+assert.equal(await input({ text: "/skill:review scope" }, ctx), undefined, "never read a non-skill command path")
 commands.unshift({ name: "skill:commit", source: "prompt" })
 assert.equal(await input({ text: "/skill:commit" }, ctx), undefined, "preserve command precedence")
 commands.length = 0
 assert.equal(await input({ text: "/skill:commit" }, ctx), undefined, "no stale command cache after reload")
+assert.equal(await input({ text: "/skill:review" }, ctx), undefined, "do not rediscover existing files after commands disappear")
 commands.push({ name: "skill:missing", source: "skill", sourceInfo: { path: join(root, "missing.md") } })
 let loadError = ""
 assert.deepEqual(await input({ text: "/skill:missing" }, { ui: { notify: (text: string) => { loadError = text } } }), { action: "handled" })
