@@ -271,7 +271,10 @@ images and transcript-based file previews are unchanged.
   is a validated, bounded `data:image/jpeg` source (supported by the page CSP).
 - Preview is single-flight, at most about 1 fps while viewing and 4 fps during takeover, with bounded
   2–8 second failure backoff. It never starts a browser that the agent has not
-  opened. Server `permissions.view` and `permissions.control` are authoritative;
+  opened. An open panel keeps watching for agent startup and close/reopen within
+  the same native conversation, discarding old frames and control leases when
+  the browser ID changes. Taking control again is always explicit.
+  Server `permissions.view` and `permissions.control` are authoritative;
   ordinary chat write access does not imply takeover permission. Browser reads
   require `sessions:read` + `browser:read` and profile `get_state`; takeover also
   requires `sessions:write` + `browser:control` and profile `prompt`.
