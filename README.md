@@ -418,11 +418,13 @@ Start a new session before crossing personal/work boundaries. The work alias is
 a managed extension, also used by delegated and RPC sessions; do not install
 user extensions or duplicate credentials in `models.json`.
 
-Pi slash skills (`/skill:commit optional arguments`) embed the skill instructions
-once and substitute `$ARGUMENTS` (also `$ARGUMENT`) literally with the supplied
-arguments, or an empty string when omitted. Arguments are also appended for
-skills without placeholders. The agent is instructed to use the embedded skill
-without rereading its Markdown; referenced files can still be loaded as needed.
+Ordinary Pi slash skills (`/skill:name optional arguments`) use Pi's native
+instruction expansion and argument appending. Agentbox only normalizes legacy
+tab/newline separators, substitutes `$ARGUMENTS` (also `$ARGUMENT`) literally for
+Claude-derived skills, and routes `/skill:commit` to the managed commit child.
+Omitted legacy arguments become an empty string. The agent is instructed to use
+the embedded skill without rereading its Markdown; referenced files can still be
+loaded as needed.
 
 ```nix
 services.agentbox = {
@@ -503,6 +505,15 @@ public HTTPS unless `transport.allowInsecureLoopback = true` explicitly enables
 a loopback endpoint. Identifier-shaped values cannot be distinguished from
 literals by the module schema, so MCP secret values belong in `environmentFile`.
 No MCP server is enabled by default.
+
+The managed MCP layer uses Pi's native `@earendil-works/pi-mcp` **1.5.2** client
+and transports, not a second MCP SDK. Agentbox retains its configuration, tool
+names, allow/deny and approval rules, network guards, absolute deadlines, output
+limits and environment isolation. Pi's stock MCP manager remains disabled: it is
+not a drop-in replacement for those controls. See [native Pi integration](docs/pi-native-integration.md)
+for migration boundaries and focused verification. The Browser Decisions adapter
+remains custom because the native classifier API does not preserve all of its
+refusal, answer-validation and cache-accounting contracts.
 
 ### Pi auto permissions
 
