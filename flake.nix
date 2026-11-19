@@ -40,15 +40,22 @@
         };
       piPackageFor =
         system:
-        nixpkgs-unstable.legacyPackages.${system}.pi-coding-agent.overrideAttrs (old: {
-          # Keep startup's awaited catalog/auth refresh authoritative: detached
-          # per-registration refreshes can otherwise race session restoration.
-          patches = (old.patches or [ ]) ++ [
-            ./patches/pi-startup-provider-refresh.patch
-            ./patches/pi-rpc-model-refresh.patch
-            ./patches/pi-openai-models.patch
-          ];
-        });
+        (
+          if system == "x86_64-darwin" then
+            # Unstable dropped Intel macOS in 26.11. Use its current Pi recipe
+            # with our still-supported 26.05 package set on that platform.
+            (pkgsFor system).callPackage "${nixpkgs-unstable}/pkgs/by-name/pi/pi-coding-agent/package.nix" { }
+          else
+            nixpkgs-unstable.legacyPackages.${system}.pi-coding-agent
+        ).overrideAttrs
+          (old: {
+            # Keep startup's awaited catalog/auth refresh authoritative: detached
+            # per-registration refreshes can otherwise race session restoration.
+            patches = (old.patches or [ ]) ++ [
+              ./patches/pi-startup-provider-refresh.patch
+              ./patches/pi-rpc-model-refresh.patch
+            ];
+          });
       opencodePackageFor =
         system:
         opencode.packages.${system}.default.overrideAttrs (old: {

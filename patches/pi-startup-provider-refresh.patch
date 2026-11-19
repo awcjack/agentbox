@@ -1,6 +1,6 @@
 --- a/packages/coding-agent/src/core/model-runtime.ts
 +++ b/packages/coding-agent/src/core/model-runtime.ts
-@@ -730,16 +730,16 @@
+@@ -925,7 +925,7 @@
  		return { aborted: result.aborted || (options.signal?.aborted ?? false), errors };
  	}
  
@@ -9,23 +9,28 @@
  		if (!provider.id.trim()) throw new Error("Provider id must not be empty.");
  		this.extensionProviders.delete(provider.id);
  		this.nativeExtensionProviders.set(provider.id, provider);
- 		this.recomposeProvider(provider.id);
- 		this.updateModelSnapshot();
+@@ -936,7 +936,7 @@
+ 			configuredRequestAuthStatus(this.config.getProvider(provider.id), undefined),
+ 			provider.auth.oauth && !provider.auth.apiKey ? "oauth" : "api_key",
+ 		);
 -		void this.refresh({ allowNetwork: false });
--	}
--
--	registerProvider(providerId: string, config: ProviderConfigInput): void {
 +		if (options.refresh !== false) void this.refresh({ allowNetwork: false });
-+	}
-+
+ 	}
+ 
+ 	/**
+@@ -962,7 +962,7 @@
+ 		};
+ 	}
+ 
+-	registerProvider(providerId: string, config: ProviderConfigInput): void {
 +	registerProvider(providerId: string, config: ProviderConfigInput, options: { refresh?: boolean } = {}): void {
  		// Validate the incoming registration on its own, like the legacy registry:
  		// a broken re-registration must throw without touching the stored config.
  		validateExtensionProvider(providerId, this.builtins.get(providerId), this.config.getProvider(providerId), config);
-@@ -774,7 +774,7 @@
- 				available: this.snapshot.all.filter((model) => configuredProviders.has(model.provider)),
- 			};
- 		}
+@@ -982,7 +982,7 @@
+ 			configuredRequestAuthStatus(this.config.getProvider(providerId), effective),
+ 			effective.oauth && !effective.apiKey ? "oauth" : "api_key",
+ 		);
 -		void this.refresh({ allowNetwork: false });
 +		if (options.refresh !== false) void this.refresh({ allowNetwork: false });
  	}
