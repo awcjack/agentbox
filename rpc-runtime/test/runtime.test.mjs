@@ -747,9 +747,9 @@ async function conversationFixture(t, overrides = {}, options = {}) {
   const persist = () => writeFile(path, [JSON.stringify({ type: "session", version: 3, id: source.nativeId, cwd: "/workspace", timestamp: "2026-09-10T00:00:00.000Z" }), ...source.entries.map((e) => JSON.stringify(e))].join("\n") + "\n");
   await persist();
   const route = `/v1/sessions/${id}/conversation`;
-  const body = { action: "fork", entryId: "u2", expectedNativeSessionId: source.nativeId, expectedLeafId: "a2" };
+  const body = { action: "fork", entryId: "a1", expectedNativeSessionId: source.nativeId, expectedLeafId: "a2" };
   return { ...f, id, source, root, path, persist, route, body,
-    act: (changes = {}, requestOptions = {}) => request(f.baseUrl, route, { method: "POST", body: { ...body, ...changes }, ...requestOptions }) };
+    act: (changes = {}, requestOptions = {}) => request(f.baseUrl, route, { method: "POST", body: { ...body, ...(changes.action === "revert" ? { entryId: "u2" } : {}), ...changes }, ...requestOptions }) };
 }
 
 test("thinking levels use model-reported values and changing them requires write scope", async (t) => {
@@ -925,14 +925,14 @@ test("late abandoned child exit releases native reservation and capacity", async
   assert.equal((await resume()).response.status, 201);
 });
 
-test("fork creates a separate child with only the pre-target branch; source and files are unchanged", async (t) => {
+test("fork includes the selected assistant in a separate child; source and files are unchanged", async (t) => {
   const f = await conversationFixture(t);
   const before = await readFile(f.path, "utf8");
   const result = await f.act();
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
   assert.notEqual(result.body.session.id, f.id);
   assert.notEqual(result.body.session.nativeSessionId, f.source.nativeId);
-  assert.deepEqual(result.body.draft, { text: "same", images: [{ type: "image", data: "YWJj", mimeType: "image/png" }] });
+  assert.deepEqual(result.body.draft, { text: "", images: [] });
   assert.deepEqual(f.children[1].entries.map((e) => e.id), ["model", "u1", "a1"]);
   assert.equal(f.source.exited, false);
   assert.equal(await readFile(f.path, "utf8"), before);
@@ -940,6 +940,36 @@ test("fork creates a separate child with only the pre-target branch; source and 
   assert.equal(f.children.some((child) => /"type":"fork"/.test(child.input)), false);
   const history = await request(f.baseUrl, "/v1/history?profile=default");
   assert.equal(history.body.sessions.length, 2);
+});
+
+test("fork preserves assistant thinking/tool content without trying to restore it as a draft", async (t) => {
+  const f = await conversationFixture(t);
+  const selected = f.source.entries.find((entry) => entry.id === "a1");
+  selected.message.content = [
+    { type: "thinking", thinking: "reasoning" },
+    { type: "toolCall", id: "call", name: "bash", arguments: { command: "pwd" } },
+  ];
+  await f.persist();
+  const result = await f.act();
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(result.body.draft, { text: "", images: [] });
+  assert.deepEqual(f.children[1].entries.at(-1), selected);
+});
+
+test("fork at the assistant leaf copies the complete active branch", async (t) => {
+  const f = await conversationFixture(t);
+  const result = await f.act({ entryId: "a2" });
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(result.body.draft, { text: "", images: [] });
+  assert.deepEqual(f.children[1].entries.map((entry) => entry.id), ["model", "u1", "a1", "u2", "a2"]);
+});
+
+test("revert restores user text and images while excluding the selected message", async (t) => {
+  const f = await conversationFixture(t);
+  const result = await f.act({ action: "revert" });
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(result.body.draft, { text: "same", images: [{ type: "image", data: "YWJj", mimeType: "image/png" }] });
+  assert.deepEqual(f.children[1].entries.map((entry) => entry.id), ["model", "u1", "a1"]);
 });
 
 test("revert fork-and-switches the same supervisor slot and retains original native history", async (t) => {
@@ -951,6 +981,7 @@ test("revert fork-and-switches the same supervisor slot and retains original nat
   assert.equal(result.body.session.id, f.id);
   assert.notEqual(result.body.session.nativeSessionId, f.source.nativeId);
   assert.equal(f.source.exited, true);
+  assert.deepEqual(result.body.draft, { text: "same", images: [] });
   assert.deepEqual(f.children[1].entries.map((e) => e.id), ["model"]);
   assert.equal(f.runtime.sessions.size, 1);
   assert.equal(await readFile(f.path, "utf8"), before);
@@ -964,11 +995,12 @@ test("revert fork-and-switches the same supervisor slot and retains original nat
   assert.equal(resumed.response.status, 201);
 });
 
-test("conversation rejects stale identity, off-branch/non-user targets and client paths", async (t) => {
+test("conversation rejects stale identity, off-branch/wrong-role targets and client paths", async (t) => {
   const f = await conversationFixture(t);
   for (const [changes, code] of [
     [{ expectedNativeSessionId: RESUME_ID }, "conversation_stale"], [{ expectedLeafId: "u1" }, "conversation_stale"],
-    [{ entryId: "offbranch" }, "invalid_entry"], [{ entryId: "a1" }, "invalid_entry"],
+    [{ entryId: "offbranch" }, "invalid_entry"], [{ entryId: "u2" }, "invalid_entry"],
+    [{ action: "revert", entryId: "a1" }, "invalid_entry"], [{ entryId: "model" }, "invalid_entry"],
     [{ entryId: "/etc/passwd" }, "invalid_conversation"], [{ sessionPath: f.path }, "invalid_conversation"],
     [{ expectedLeafId: undefined }, "invalid_conversation"], [{ action: "delete" }, "invalid_conversation"],
   ]) assert.equal((await f.act(changes)).body.error.code, code);

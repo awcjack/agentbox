@@ -1801,11 +1801,14 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
             throw new HttpError(409, "conversation_stale", "conversation identity or leaf changed; refresh before retrying");
           }
           const settings = conversationSettings(snapshot.state);
-          const index = snapshot.branch.findIndex((entry) => entry.id === body.entryId && entry.type === "message" && entry.message?.role === "user");
-          if (index < 0) throw new HttpError(400, "invalid_entry", "entryId must select a user message on the current branch");
-          let draft;
-          try { draft = conversationDraft(snapshot.branch[index].message); }
-          catch { throw new HttpError(409, "unsupported_message", "selected message cannot be restored losslessly as a draft"); }
+          const targetRole = body.action === "fork" ? "assistant" : "user";
+          const index = snapshot.branch.findIndex((entry) => entry.id === body.entryId && entry.type === "message" && entry.message?.role === targetRole);
+          if (index < 0) throw new HttpError(400, "invalid_entry", `entryId must select ${targetRole === "assistant" ? "an assistant" : "a user"} message on the current branch`);
+          let draft = { text: "", images: [] };
+          if (body.action === "revert") {
+            try { draft = conversationDraft(snapshot.branch[index].message); }
+            catch { throw new HttpError(409, "unsupported_message", "selected message cannot be restored losslessly as a draft"); }
+          }
           if (creating.size + [...sessions.values()].filter((value) => value.exit === null).length >= config.limits.maxSessions) {
             throw new HttpError(429, "session_limit", "conversation changes require capacity for one replacement child");
           }
@@ -1818,7 +1821,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           }
           creating.add(reservation);
           conversationSources.add(sourceReservation);
-          const prefix = snapshot.branch.slice(0, index);
+          const prefix = snapshot.branch.slice(0, index + (body.action === "fork" ? 1 : 0));
           let path;
           try { path = await createConversationHistory(session.profile, snapshot.nativeSessionId, snapshot.data, prefix, nativeId, config.limits.maxRecordBytes); }
           catch { throw new HttpError(409, "history_unavailable", "source must have complete, unique v3 persisted history within maxRecordBytes; no source files were changed"); }

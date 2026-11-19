@@ -234,9 +234,11 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   payloads. Message and code copying try synchronous `execCommand("copy")` first
   for HTTP compatibility, then the modern Clipboard API. Manual selection is
   available if both automatic methods fail.
-- Revert and Fork on user messages branch from before the selected message and
-  restore its text/images as an unsent draft after confirmation. Fork opens a
-  separate session; Revert replaces the current session's process/native history
+- **Fork** on an agent response creates a separate session with history through
+  that response, including it, and an empty draft. The original session and its
+  draft are unchanged. **Revert** on a user message branches from before that
+  message and restores its text/images as an unsent draft after confirmation.
+  Revert replaces the current session's process/native history
   while keeping its supervisor ID and original history available to resume.
   Neither action undoes files or external side effects. Both require an idle
   agent, persisted history, and capacity for an additional process during setup.

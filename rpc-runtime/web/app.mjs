@@ -1283,6 +1283,8 @@ function renderMessages() {
     if (previousArticle && canGroupActions(previousMessage, message)) {
       previousArticle.classList.add("action-group");
       previousArticle.querySelector(".message-content").append(...body.childNodes);
+      const fork = previousArticle.querySelector('[data-conversation-action="fork"]');
+      if (fork) fork.replaceWith(conversationActionButton(ctx, message, "fork", true));
       previousMessage = message;
       continue;
     }
@@ -1302,13 +1304,7 @@ function renderMessages() {
         });
         actions.append(copy);
       }
-      if (message.role === "user") for (const action of ["revert", "fork"]) {
-        const button = element("button", "text-button", action === "revert" ? "Revert" : "Fork");
-        button.type = "button"; button.dataset.conversationAction = action;
-        button.title = `${action === "revert" ? "Return" : "Branch"} to before this message. Files are not undone.`;
-        button.addEventListener("click", () => openConversationAction(ctx, message, action));
-        button.disabled = !canChangeConversation(ctx); actions.append(button);
-      }
+      actions.append(conversationActionButton(ctx, message, message.role === "user" ? "revert" : "fork"));
       if (actions.childElementCount) article.append(actions);
     }
     next.append(article);
@@ -1658,6 +1654,16 @@ async function runSession(ctx) {
     });
   }
 }
+function conversationActionButton(ctx, message, action, grouped = false) {
+  const button = element("button", "text-button", action === "revert" ? "Revert" : "Fork");
+  button.type = "button"; button.dataset.conversationAction = action;
+  button.title = action === "revert" ? "Return to before this message. Files are not undone."
+    : grouped ? "Branch after the last agent action in this group, including it. Files are not undone."
+    : "Branch after this agent response, including it. Files are not undone.";
+  button.addEventListener("click", () => openConversationAction(ctx, message, action));
+  button.disabled = !canChangeConversation(ctx);
+  return button;
+}
 async function openConversationAction(ctx, message, action) {
   if (!canChangeConversation(ctx)) return;
   ctx.record.conversationBusy = true; updateControls();
@@ -1672,8 +1678,11 @@ async function openConversationAction(ctx, message, action) {
     $("conversation-action-title").textContent = action === "revert" ? "Revert to this message?" : "Fork from this message?";
     $("conversation-action-description").textContent = action === "revert"
       ? "Switch this session to the history before this message. The original history stays available to resume."
-      : "Create a separate session with the history before this message. The original session stays open.";
-    $("conversation-action-preview").textContent = messageText(message).slice(0, 1000) || "Image attachment";
+      : "Create a separate session with the history through this agent response, including it. The original session stays open.";
+    $("conversation-action-draft-help").textContent = action === "revert"
+      ? "The selected message and its images become an unsent draft, replacing this session's current draft."
+      : "The new session starts with an empty draft. Your original session's draft is preserved.";
+    $("conversation-action-preview").textContent = messageText(message).slice(0, 1000) || (action === "fork" ? "Agent action or thinking (included in fork)" : "Image attachment");
     $("confirm-conversation-action").textContent = action === "revert" ? "Revert conversation" : "Create fork";
     $("conversation-action-dialog").showModal(); $("cancel-conversation-action").focus();
   } catch (error) { report(error, ctx); }

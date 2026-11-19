@@ -26,6 +26,10 @@ test("Pi 0.84.2 loads supervisor fork/revert prefixes, compaction and empty cont
     entry("00000003", "00000002", "compaction", { summary: "Earlier work", firstKeptEntryId: "00000001", tokensBefore: 20 }),
     entry("00000004", "00000003", "message", { message: user("selected") }),
   ];
+  records.push(
+    entry("00000005", "00000004", "message", { message: { ...records[2].message, content: [{ type: "text", text: "selected reply" }] } }),
+    entry("00000006", "00000005", "message", { message: user("later") }),
+  );
   const sourcePath = join(sessionDir, `source_${nativeId}.jsonl`);
   await writeFile(sourcePath, records.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
   const observed = [];
@@ -87,13 +91,17 @@ test("Pi 0.84.2 loads supervisor fork/revert prefixes, compaction and empty cont
   };
   const snapshot = await request(route);
   const before = await readFile(sourcePath, "utf8");
-  const fork = await request(route, { action: "fork", entryId: "00000004", expectedNativeSessionId: snapshot.nativeSessionId, expectedLeafId: snapshot.leafId });
+  const fork = await request(route, { action: "fork", entryId: "00000005", expectedNativeSessionId: snapshot.nativeSessionId, expectedLeafId: snapshot.leafId });
   assert.notEqual(fork.session.id, session.id);
-  assert.deepEqual(fork.draft, { text: "selected", images: [] });
+  assert.deepEqual(fork.draft, { text: "", images: [] });
   assert.deepEqual(settings((await request(`/v1/sessions/${fork.session.id}/rpc`, { type: "get_state" })).data), expected);
   const context = await request(`/v1/sessions/${fork.session.id}/rpc`, { type: "get_messages" });
   assert.equal(context.data.messages.some((message) => message.role === "compactionSummary"), true);
-  assert.equal(context.data.messages.some((message) => message.content?.some?.((block) => block.text === "selected")), false);
+  assert.equal(context.data.messages.some((message) => message.content?.some?.((block) => block.text === "selected reply")), true);
+  assert.equal(context.data.messages.some((message) => message.content?.some?.((block) => block.text === "later")), false);
+  const forkSnapshot = await request(`/v1/sessions/${fork.session.id}/conversation`);
+  assert.equal(forkSnapshot.leafId, "00000005");
+  assert.deepEqual(forkSnapshot.messages.at(-1).message, snapshot.messages.find((entry) => entry.entryId === "00000005").message);
   assert.equal(await readFile(sourcePath, "utf8"), before);
   const reverted = await request(route, { action: "revert", entryId: "00000001", expectedNativeSessionId: snapshot.nativeSessionId, expectedLeafId: snapshot.leafId });
   assert.equal(reverted.session.id, session.id);

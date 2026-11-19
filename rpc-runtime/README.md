@@ -799,24 +799,27 @@ context returned by `get_messages`.
 ```json
 {
   "action": "fork",
-  "entryId": "user-entry-id",
+  "entryId": "assistant-entry-id",
   "expectedNativeSessionId": "native-session-uuid",
   "expectedLeafId": "current-leaf-id"
 }
 ```
 
-`action` is `fork` or `revert`; the expected leaf may be `null`. The target must
-be a user message on the current branch. Both actions require read/write scopes,
+`action` is `fork` or `revert`; the expected leaf may be `null`. Fork targets an
+assistant (coding agent reply) message on the current branch; revert targets a
+user message on that branch. Both actions require read/write scopes,
 allowed `get_state`, `get_entries` and `prompt` commands, fully persisted Pi v3
 history in the profile-owned directory, and an idle agent with no queue or pending
 dialogs. Fork also requires `sessions:create`. Both need one spare `maxSessions`
 slot to verify the replacement before changing anything.
 
-The response is `{session, draft: {text, images}}`. History ends before the
-selected message; its text/images become an unsent draft. Fork creates a separate
-supervisor/native session and leaves the source running. Revert switches the
-existing supervisor slot to a new native history while retaining the original
-file for resume. Neither action undoes filesystem changes or tool side effects.
+The response is `{session, draft: {text, images}}`. Fork copies history through
+the selected assistant message (inclusive), returns an empty draft
+`{text: "", images: []}`, and creates a separate supervisor/native session while
+leaving the source running. Revert copies history before the selected user
+message, restores its text/images as an unsent draft, and switches the existing
+supervisor slot to a new native history while retaining the original file for
+resume. Neither action undoes filesystem changes or tool side effects.
 The current model, thinking level, auto-compaction and queue delivery modes are
 restored and verified on the new child. Preparation failures can leave an unused
 child history file; the original file is never rewritten.

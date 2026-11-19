@@ -142,8 +142,8 @@ export function messageText(message) {
 
 export function messageEntry(message, entries) {
   // Timestamps alone are not entry IDs. Refuse ambiguous matches, including
-  // identical prompts on different branches; the server validates the leaf too.
-  const matches = entries.filter((entry) => entry.message?.role === "user" && message.role === "user"
+  // identical messages on different branches; the server validates the leaf too.
+  const matches = entries.filter((entry) => ["user", "assistant"].includes(message.role) && entry.message?.role === message.role
     && entry.message.timestamp === message.timestamp && JSON.stringify(entry.message.content) === JSON.stringify(message.content));
   return matches.length === 1 ? matches[0].entryId : null;
 }

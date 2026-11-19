@@ -80,9 +80,9 @@ test("saved default survives live selections and restores in new web sessions", 
   // Supervisor fork/revert restores call set_model, even for an empty prefix.
   const route = `/v1/sessions/${restored.id}/conversation`;
   const snapshot = await request(route);
-  const fork = await request(route, { action: "fork", entryId: "00000002",
+  const reverted = await request(route, { action: "revert", entryId: "00000002",
     expectedNativeSessionId: snapshot.nativeSessionId, expectedLeafId: snapshot.leafId });
-  assert.deepEqual(await model(fork.session), temporary);
+  assert.deepEqual(await model(reverted.session), temporary);
   assert.deepEqual(await model(await create()), saved);
   const settings = JSON.parse(await readFile(settingsPath));
   assert.deepEqual(settings.agentboxDefaultModel, saved);

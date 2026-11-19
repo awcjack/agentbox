@@ -150,14 +150,14 @@ const server = createServer(async (request, response) => {
       if (body.expectedNativeSessionId !== snapshot.nativeSessionId || body.expectedLeafId !== snapshot.leafId) return json(response, 409, { error: { code: "conversation_stale", message: "Conversation changed; refresh before trying again." } });
       if (session.streaming || session.queued.length || session.pendingUi.length || session.conversationReplacing) return json(response, 409, { error: { code: "conversation_locked", message: "Conversation is busy." } });
       if (session.failConversation) return json(response, 503, { error: { code: "fixture_failure", message: "Fixture replacement failed." } });
-      const index = snapshot.messages.findIndex((entry) => entry.entryId === body.entryId && entry.message.role === "user");
+      const index = snapshot.messages.findIndex((entry) => entry.entryId === body.entryId && entry.message.role === (body.action === "fork" ? "assistant" : "user"));
       assert.ok(index >= 0); assert.ok(["fork", "revert"].includes(body.action));
       const content = snapshot.messages[index].message.content;
-      const draft = { text: typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n"), images: typeof content === "string" ? [] : content.filter((block) => block.type === "image") };
+      const draft = body.action === "fork" ? { text: "", images: [] } : { text: typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n"), images: typeof content === "string" ? [] : content.filter((block) => block.type === "image") };
       if (session.holdConversation) await new Promise((resolve) => { session.releaseConversation = resolve; });
       let destination;
       if (body.action === "fork") {
-        destination = { ...session, id: randomUUID(), nativeSessionId: randomUUID(), name: `${session.name} fork`, cursor: 0, events: [], clients: new Set(), subscriptions: 0, messages: structuredClone(session.messages.slice(0, index)), pendingUi: [], queued: [], holdConversation: false, releaseConversation: null };
+        destination = { ...session, id: randomUUID(), nativeSessionId: randomUUID(), name: `${session.name} fork`, cursor: 0, events: [], clients: new Set(), subscriptions: 0, messages: structuredClone(session.messages.slice(0, index + 1)), pendingUi: [], queued: [], holdConversation: false, releaseConversation: null };
         sessions.set(destination.id, destination);
       } else {
         session.conversationReplacing = true;
@@ -1234,7 +1234,8 @@ try {
       complete(other, { role: "user", content: [{ type: "text", text: "Restore this **raw** draft" }, image], timestamp: ++tick });
       complete(other, { role: "assistant", content: [{ type: "text", text: "Discarded old response" }], timestamp: ++tick });
       const target = page.locator("article.user").filter({ hasText: "Restore this" });
-      const action = (kind) => target.locator(`[data-conversation-action="${kind}"]`);
+      const responseTarget = page.locator("article.assistant").filter({ hasText: "Discarded old response" });
+      const action = (kind) => (kind === "fork" ? responseTarget : target).locator(`[data-conversation-action="${kind}"]`);
       const ready = async (tab = page) => until(async () => await tab.locator("#session-status").textContent() === "READY" && await tab.locator("#connection-label").textContent() === "Connected", "conversation ready");
       const mutations = () => calls.filter((call) => call.id === other.id && call.conversation === "POST");
       await target.waitFor(); await ready();
@@ -1286,9 +1287,11 @@ try {
       await until(() => codeCopy.textContent().then((text) => text === "Selected: copy manually"), "manual code copy fallback");
       assert.equal(await page.evaluate(() => window.getSelection().toString()), "const copied = true;");
       assert.equal(await page.locator(".clipboard-copy").count(), 0);
+      assert.equal(await target.locator('[data-conversation-action="fork"]').count(), 0, "user messages only offer revert");
+      assert.equal(await responseTarget.locator('[data-conversation-action="revert"]').count(), 0, "agent responses only offer fork");
       for (const kind of ["fork", "revert"]) {
         await action(kind).click(); await page.locator("#conversation-action-dialog").waitFor();
-        assert.equal(await page.locator("#conversation-action-preview").textContent(), "Restore this **raw** draft");
+        assert.equal(await page.locator("#conversation-action-preview").textContent(), kind === "fork" ? "Discarded old response" : "Restore this **raw** draft");
         await page.locator("#cancel-conversation-action").click();
         assert.equal(mutations().length, 0, "cancel never mutates");
         assert.equal(await page.locator("#prompt").inputValue(), "Keep this other draft");
@@ -1331,9 +1334,9 @@ try {
       const fork = [...sessions.values()].find((entry) => entry.name === `${other.name} fork`);
       assert.ok(fork && fork.id !== other.id && fork.nativeSessionId !== originalNative);
       assert.equal(other.nativeSessionId, originalNative); assert.deepEqual(other.messages, originalMessages); assert.equal(other.cursor, originalCursor);
-      assert.deepEqual(fork.messages, originalMessages.slice(0, 2), "fork branches before selected user");
-      assert.equal(await page.locator("#prompt").inputValue(), "Restore this **raw** draft");
-      assert.equal(await page.locator(".attachment img").getAttribute("src"), `data:image/png;base64,${image.data}`);
+      assert.deepEqual(fork.messages, originalMessages.slice(0, 4), "fork includes selected agent response but not later messages");
+      assert.equal(await page.locator("#prompt").inputValue(), "", "fork has a fresh draft");
+      assert.equal(await page.locator(".attachment img").count(), 0, "fork does not copy user attachments into the draft");
       await openSidebar();
       assert.equal(await page.locator(".session-item.active").textContent().then((text) => text.includes(fork.name)), true);
       await page.locator(".session-item").filter({ hasText: other.name }).filter({ hasNotText: " fork" }).click();
@@ -1373,7 +1376,7 @@ try {
       await until(() => other.model.id === "pi-reasoning", "post-revert write uses replacement native ID");
       await replacementObserver.close();
       assert.equal(mutations().length, 5, "cancel, stale and failure paths never silently retry");
-      console.log(`${label}: PASS raw copy, clipboard fallback, historical model/title, action cancel, busy controls, stale/no retry, failure drafts, fork identity/draft/images, revert identity/draft/images, observer replacement reconnect`);
+      console.log(`${label}: PASS raw copy, clipboard fallback, historical model/title, action cancel, busy controls, stale/no retry, failure drafts, fork identity/fresh draft, revert identity/draft/images, observer replacement reconnect`);
       // Consecutive action-only messages share one header, with useful collapsed inputs.
       const commands = [
         ["read", { path: "src/config.mjs" }, "src/config.mjs"],
@@ -1393,6 +1396,13 @@ try {
       for (const [index, [, , preview]] of commands.entries()) assert.ok((await group.locator(".tool-preview").nth(index).textContent()).startsWith(preview));
       assert.ok((await group.locator(".tool-preview").nth(1).textContent()).endsWith("…"));
       assert.equal(await group.locator("script").count(), 0, "command previews are text, never HTML");
+      other.failConversation = true;
+      await group.locator('[data-conversation-action="fork"]').click();
+      await page.locator("#confirm-conversation-action").click();
+      await until(() => page.locator("#notice-text").textContent().then((text) => text.includes("Fixture replacement failed")), "group fork boundary captured");
+      assert.equal(mutations().at(-1).body.entryId, entryIds.get(other.messages.at(-2)), "group fork targets its final assistant action, not its first");
+      other.failConversation = false;
+      await page.locator("#dismiss-notice").click();
       await group.locator(".tool-summary").nth(1).click();
       assert.ok((await group.locator(".tool-detail[open] pre").first().textContent()).includes("x".repeat(200)), "expanded input retains the full command");
       await noOverflow(page);

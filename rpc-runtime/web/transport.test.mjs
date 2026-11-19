@@ -8,12 +8,18 @@ test("copy text preserves Markdown without exposing thinking, tools or image pay
   assert.equal(messageText({ content: [{ type: "image", data: "base64" }] }), "");
 });
 
-test("conversation targets require a unique complete user message match", () => {
+test("conversation targets require a unique complete user or assistant message match", () => {
   const message = { role: "user", timestamp: 7, content: [{ type: "text", text: "same" }] };
   const first = { entryId: "first", message }, second = { entryId: "second", message: { ...message, timestamp: 8 } };
   assert.equal(messageEntry(message, [first, second]), "first");
   assert.equal(messageEntry(message, [first, { ...first, entryId: "duplicate" }]), null);
   assert.equal(messageEntry({ ...message, role: "assistant" }, [first]), null);
+  const assistant = { ...message, role: "assistant", content: [{ type: "text", text: "reply" }, { type: "thinking", thinking: "reason" }] };
+  const reply = { entryId: "reply", message: assistant };
+  assert.equal(messageEntry(assistant, [first, reply]), "reply");
+  assert.equal(messageEntry(assistant, [reply, { ...reply, entryId: "duplicate" }]), null);
+  assert.equal(messageEntry({ ...assistant, content: [{ type: "text", text: "reply" }] }, [reply]), null);
+  assert.equal(messageEntry({ ...message, role: "system" }, [{ entryId: "system", message: { ...message, role: "system" } }]), null);
   assert.equal(messageEntry({ ...message, content: "same" }, [first]), null);
   assert.equal(messageEntry({ ...message, content: [{ type: "image", data: "a" }] }, [first]), null);
 });
