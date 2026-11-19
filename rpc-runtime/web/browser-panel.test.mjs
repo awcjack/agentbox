@@ -100,6 +100,59 @@ test("explicit server control permission required; unavailable browser stays laz
   }
 });
 
+test("an already-open panel follows lazy browser startup without starting it", async () => {
+  const status = { ready: false };
+  const f = fixture({ status }); await f.start();
+  await f.time.tick(3000);
+  assert.equal(f.calls.length, 4);
+  assert.ok(f.calls.every(c => !c.body && !c.path.endsWith("/frame")));
+  assert.equal(f.controller.getState().frame, null);
+  assert.match(f.changes.at(-1).message, /has not opened a browser/);
+  status.ready = true;
+  await f.time.tick(1000);
+  assert.equal(f.controller.getState().disposed, false);
+  assert.equal(f.controller.getState().fresh, true);
+  assert.equal(f.changes.at(-1).frame.frameId, "frame-1");
+  assert.equal(f.controller.getState().canAcquire, true);
+  f.controller.dispose();
+});
+
+test("agent browser close/reopen drops old frames and leases but keeps the panel polling", async () => {
+  for (const takeover of [false, true]) {
+    let replacement = null;
+    const f = fixture({ handle(path, opts, time) {
+      if (!replacement || opts.body) return;
+      if (path.endsWith("/frame")) return { ...frame(time.now(), "replacement-frame"), browserSessionId: replacement.browserSessionId };
+      return { ...binding, available: true, capabilities: { liveView: true, takeover: true }, permissions: { view: true, control: true }, control: { mode: "agent" }, ...replacement };
+    } });
+    await f.start();
+    if (takeover) { await f.controller.acquire(); await f.time.tick(250); }
+    replacement = { browserSessionId: "browser-new", ready: false };
+    await f.time.tick(1000);
+    assert.equal(f.controller.getState().disposed, false);
+    assert.equal(f.controller.getState().frame, null);
+    assert.equal(f.controller.getState().held, false);
+    assert.equal(f.mutations("release").length, takeover ? 1 : 0);
+    if (takeover) assert.equal(f.mutations("release")[0].body.browserSessionId, "browser-old");
+    replacement.ready = true;
+    await f.time.tick(1000);
+    assert.equal(f.controller.getState().frame?.browserSessionId, "browser-new");
+    assert.equal(f.controller.getState().canAcquire, true);
+    assert.equal(f.controller.getState().canInput, false);
+    assert.equal(f.mutations("acquire").length, takeover ? 1 : 0);
+    f.controller.dispose();
+  }
+});
+
+test("frames from a different browser than the latest status still fail closed", async () => {
+  const f = fixture({ handle: path => path.endsWith("/frame") ? { ...frame(), browserSessionId: "browser-other" } : undefined });
+  await f.start();
+  assert.equal(f.controller.getState().disposed, true);
+  assert.equal(f.controller.getState().frame, null);
+  await f.time.tick(10_000);
+  assert.equal(f.calls.length, 2);
+});
+
 test("acknowledged lease plus post-acquire frame, renew at 10s, release stops renewal", async () => {
   const f = fixture(); await f.start();
   assert.equal(f.controller.getState().canAcquire, true);
@@ -314,6 +367,31 @@ test("DOM adapter renders page labels as text only and clears in-memory images/d
   assert.ok(nodes.some((n) => n.tag === "option" && n.textContent.includes("<img src=x onerror=alert(1)>")));
   const text = nodes.find((n) => n.tag === "textarea"); text.value = "not persisted";
   mounted.dispose(); assert.equal(root.children.length, 0); assert.equal(image.src, ""); assert.equal(text.value, "");
+});
+
+test("mounted panel clears old pixels while waiting for a restarted browser's first frame", async () => {
+  const doc = { createElement: tag => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+  const pending = deferred(); let replaced = false;
+  const f = fixture({ handle(path, opts) {
+    if (!replaced || opts.body) return;
+    if (path.endsWith("/frame")) return pending.promise;
+    return { ...binding, browserSessionId: "browser-new", available: true, ready: true,
+      capabilities: { liveView: true, takeover: true }, permissions: { view: true, control: true }, control: { mode: "agent" } };
+  } });
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time });
+  await flush();
+  const all = el => [el, ...el.children.flatMap(all)];
+  const image = all(root).find(n => n.tag === "img");
+  assert.equal(image.hidden, false);
+  replaced = true; await f.time.tick(1000);
+  assert.equal(image.hidden, true);
+  assert.equal(image.src, "");
+  pending.resolve({ ...frame(f.time.now()), browserSessionId: "browser-new", data: "/9j/AQ==" });
+  await flush();
+  assert.equal(image.hidden, false);
+  assert.equal(image.src, "data:image/jpeg;base64,/9j/AQ==");
+  mounted.dispose();
+  assert.equal(f.time.size, 0);
 });
 
 test("takeover, renewal and release keep the preview stable without enabling stale input", async () => {

@@ -95,21 +95,31 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
     if (busy) { schedulePoll(250); return; }
     polling = true;
     lastPollAt = now();
-    const ownRevision = revision;
+    let ownRevision = revision;
     try {
       const next = await call("", undefined, reads.signal);
       if (disposed || ownRevision !== revision) return;
-      binding(next);
+      // Status discovers the current browser within this native conversation.
+      // Agent close/reopen rotates that browser ID; frames and mutations must
+      // still match the newly acknowledged ID, never the previous browser.
+      binding(next, null);
       if (next.available !== true || typeof next.ready !== "boolean" || next.permissions?.view !== true
         || typeof next.permissions.control !== "boolean" || next.capabilities?.liveView !== true
         || !["agent", "human"].includes(next.control?.mode)) invalid();
+      const replaced = status && next.browserSessionId !== status.browserSessionId;
+      if (replaced) {
+        forgetLease();
+        controlError = "";
+        ownRevision = revision;
+      }
       status = next;
       if (lease && (!next.ready || next.permissions.control !== true || next.capabilities.takeover !== true || next.control.mode !== "human" || lease.expiresAt <= now())) forgetLease();
       message = controlError || (!next.ready ? "The agent has not opened a browser. Preview never starts it."
         : lease ? "You have control. Agent browser actions are paused."
         : next.control.mode === "human" ? "Another human control lease is active."
         : next.permissions.control && next.capabilities.takeover === true ? "Viewing the main conversation's tab. Take control to interact." : "Read-only browser preview (server permission/capability).");
-      if (!next.ready) { frame = null; emit(); return; }
+      if (!next.ready) { frame = null; failures = 0; emit(); return; }
+      if (replaced) emit();
       const frameRevision = revision;
       const nextFrame = await call("/frame", undefined, reads.signal);
       if (disposed || frameRevision !== revision) return;
@@ -332,7 +342,7 @@ export function mountBrowserPanel(root, options) {
     // A control request consumes the actionable frame, but need not blank the
     // preview or reset a reference the operator is using on every lease renewal.
     // Retained pixels/refs are display-only until a fresh frame is acknowledged.
-    const preview = state.frame || (!state.disposed && state.status?.ready ? shownFrame : null);
+    const preview = state.frame || (!state.disposed && state.status?.ready && shownFrame?.browserSessionId === state.status.browserSessionId ? shownFrame : null);
     const stale = preview && (options.now || Date.now)() - preview.createdAt >= FRAME_TTL;
     image.setAttribute("data-stale", String(Boolean(stale)));
     age.textContent = !preview ? "Waiting for browser preview…" : stale ? "Preview is stale · waiting to reconnect." : state.pendingOperation === "acquire" ? "Taking control…" : state.held ? "Live · you have control" : "Live · viewing browser";
