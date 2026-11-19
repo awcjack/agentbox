@@ -80,6 +80,22 @@ test("download rendering is opt-in and Markdown previews inherit the callback", 
   assert.deepEqual(clicked, ["docs/audit.md"]);
 }));
 
+test("file previews are explicit adjacent actions and fenced Markdown inherits them", () => fixture(() => {
+  const downloads = [], previews = [];
+  const options = { onFileDownload: path => downloads.push(path), onFilePreview: path => previews.push(path) };
+  const root = renderMarkdown('[Report](out/report.md)\n\n```md\n[Image](out/a.png)\n```', options);
+  assert.deepEqual(previews, []);
+  all(root).find(node => node.className === "file-preview-button").handlers.click();
+  assert.deepEqual(previews, ["out/report.md"]);
+  assert.deepEqual(downloads, []);
+  all(root).find(node => node.textContent === "Preview" && node.className === "text-button").handlers.click();
+  const buttons = all(root).filter(node => node.className === "file-preview-button");
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[1].attributes["aria-label"], "Preview Image");
+  buttons[1].handlers.click();
+  assert.deepEqual(previews, ["out/report.md", "out/a.png"]);
+}));
+
 test("balanced destinations preserve external URLs and incomplete links remain visible", () => {
   assert.deepEqual(inlineTokens('[Web](https://host/report(1).zip)'), [{ type: "a", text: "Web", href: "https://host/report(1).zip" }]);
   assert.deepEqual(inlineTokens('[still streaming](docs/report'), [{ type: "text", text: "[still streaming](docs/report" }]);

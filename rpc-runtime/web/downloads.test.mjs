@@ -79,6 +79,14 @@ test("native conversation mismatches and API errors never save or retry", async 
   assert.equal(saves, 0); assert.equal(calls, 1);
 });
 
+test("asynchronous preview consumers finish before success and recheck selection", async () => {
+  let valid = true;
+  assert.equal(await fetchDownload(options({ valid: () => valid, save: async () => {
+    await Promise.resolve(); valid = false;
+  } })), false);
+  await assert.rejects(fetchDownload(options({ save: async () => { throw new Error("preview failed"); } })), /preview failed/);
+});
+
 test("Blob URL is clicked, removed, and revoked, including failed clicks", () => {
   for (const fail of [false, true]) {
     const events = [], link = { click() { events.push('click'); if (fail) throw new Error('blocked'); }, remove() { events.push('remove'); } };

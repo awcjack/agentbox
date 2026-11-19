@@ -1399,7 +1399,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
       const url = new URL(request.url, "http://runtime.invalid");
       const asset = WEB_ASSETS.get(url.pathname);
       if (asset && ["GET", "HEAD"].includes(request.method)) {
-        response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+        response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
         response.setHeader("Content-Type", asset.type);
         response.setHeader("Content-Length", asset.data.length);
         return response.end(request.method === "HEAD" ? undefined : asset.data);

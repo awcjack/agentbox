@@ -887,6 +887,13 @@ same-named files in separate checkouts can be selected explicitly; for example,
 `/download /workspace/brian/use-brian/apps/app-web/AGENTS.md`. Use matching quotes
 around paths with spaces if desired. This is a frontend command, not an upstream
 Pi RPC command or a tool available to the model.
+The web **Preview file…** action and **Preview** controls beside assistant file
+links use this same endpoint and authorization, not a public URL or managed browser
+session. UTF-8 text and Markdown previews are capped at 1 MiB; raster images use
+local Blob URLs, PDFs use a sandboxed browser viewer when supported, and HTML/SVG
+are shown only as inert source. Unsupported files remain downloadable. Closing or
+changing session/conversation revokes preview media URLs; logout clears previews.
+The backend always returns octet-stream; it never serves workspace HTML inline.
 The bearer token must grant **both** `sessions:read` and `sessions:write`
 (filesystem access is more sensitive than reading a transcript), and the session
 profile must allow `prompt`. The `X-Pi-Session-Id` header is mandatory and must

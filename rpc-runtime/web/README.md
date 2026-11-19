@@ -150,8 +150,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   label (for example, **Audit** in a document table) instead of finding a separate
   button below the response. Likely file paths in inline code are clickable too.
   These controls keep their text, expose a download label to assistive technology,
-  and show the destination path on hover. There is no six-file cap or extra download
-  action row. Ordinary HTTP(S), mail and anchor links retain their normal behavior.
+  and show the destination path on hover. An adjacent **Preview** button opens the
+  file locally in the browser instead of saving it. There is no six-file cap or
+  extra download action row. Ordinary HTTP(S), mail and anchor links retain their normal behavior.
   Use the manual action for bare/unrecognized paths; code/angle-link paths can
   contain spaces. Paths are not checked for existence until clicked. Rendering
   never fetches or downloads files; local controls use the authenticated API
@@ -162,6 +163,15 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   discards the pending save. Errors appear in the workspace notice. Files are
   saved as binary attachments through temporary, revoked Blob URLs and may contain
   sensitive data. Browser download settings may ask where to save them.
+- **Preview file…** accepts the same workspace paths and uses the same authenticated
+  file-read endpoint and 16 MiB limit. It displays UTF-8 text, safe Markdown,
+  raster images, and PDFs (when supported by the browser's sandboxed viewer).
+  Text previews stop at 1 MiB; HTML and SVG stay inert source text, never live pages.
+  Unsupported binaries offer download guidance. The dialog's **Download file**
+  saves the already-fetched bytes without another request. Closing the dialog,
+  switching conversation/session, or logging out clears the preview and revokes
+  its media Blob URLs. No model call, managed-browser tab, or public artifact URL
+  is involved. Previews may contain sensitive workspace data.
 - **`/download <full-path>`** in the composer downloads one exact workspace file,
   without a model prompt or shell command. It is available in `/` suggestions even
   when Pi's command catalog does not register it. Use a full absolute path to

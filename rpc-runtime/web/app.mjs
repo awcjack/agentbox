@@ -13,7 +13,8 @@ import { sessionTitle } from "./session-title.mjs";
 import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./model-visibility.mjs";
 import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
 import { mountBrowserPanel } from "./browser-panel.mjs";
-import { fetchDownload } from "./downloads.mjs";
+import { fetchDownload, saveDownload } from "./downloads.mjs";
+import { createFilePreview } from "./file-preview.mjs";
 import { canNavigatePromptHistory, createPromptHistory } from "./prompt-history.mjs";
 
 let preferenceStorage;
@@ -73,6 +74,7 @@ let current = null, sessions = [], profiles = [], history = [], readOnly = false
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
 let browserPanel = null, browserBinding = null;
+let filePreview = null, previewBinding = null;
 const records = new Map();
 const baseTitle = document.title;
 const attention = createAttentionTracker();
@@ -164,6 +166,8 @@ function canDownloadFile(ctx) {
 function updateControls() {
   const ctx = current;
   $("download-file").disabled = !canDownloadFile(ctx) || Boolean(ctx?.record.downloading);
+  $("preview-file").disabled = $("download-file").disabled;
+  if (previewBinding && (previewBinding.ctx !== ctx || previewBinding.nativeId !== ctx?.meta.nativeSessionId || !canDownloadFile(ctx))) closeFilePreview();
   $("open-browser").disabled = !browserViewAvailable(ctx);
   if (browserPanel && (!browserViewAvailable(ctx) || browserBinding?.ctx !== ctx || browserBinding?.nativeId !== ctx?.meta.nativeSessionId)) closeContextPane();
   $("export-conversation").disabled = !canExportConversation(ctx);
@@ -1210,7 +1214,7 @@ function patchTranscript(parent, next) {
     } else if (old.nodeType === 1) {
       // These controls have closures over the rendered message/code. Use fresh
       // handlers rather than retaining ones that would copy an earlier delta.
-      if (fresh.classList.contains("message-actions") || fresh.classList.contains("file-download") || fresh.classList.contains("changes-card") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
+      if (fresh.classList.contains("message-actions") || fresh.classList.contains("file-download") || fresh.classList.contains("file-preview-button") || fresh.classList.contains("changes-card") || (fresh.classList.contains("code-block") && !old.isEqualNode(fresh))) {
         parent.replaceChild(fresh, old);
         continue;
       }
@@ -1272,6 +1276,7 @@ function renderMessages() {
         body.append(renderTool(block, result, block.id));
       } else renderContent(body, [block], message.role === "assistant" ? {
         onFileDownload: (filePath) => downloadWorkspaceFile(ctx, filePath),
+        onFilePreview: (filePath) => downloadWorkspaceFile(ctx, filePath, { preview: true }),
       } : undefined);
     }
     if (message.summary) body.append(renderMarkdown(message.summary));
@@ -1700,7 +1705,29 @@ downloadFileButton.addEventListener("click", () => {
   const filePath = window.prompt("Download workspace file (maximum 16 MiB). Enter a relative path from this session's working directory or an absolute workspace path. Symlinks and private /tmp files are not supported:");
   if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim());
 });
-async function downloadWorkspaceFile(ctx, filePath) {
+const previewFileButton = element("button", "text-button", "Preview file…");
+previewFileButton.id = "preview-file"; previewFileButton.type = "button"; previewFileButton.disabled = true;
+previewFileButton.title = "Preview a workspace file in this browser (maximum 16 MiB)";
+downloadFileButton.before(previewFileButton);
+previewFileButton.addEventListener("click", () => {
+  const ctx = current;
+  if (!canDownloadFile(ctx) || ctx.record.downloading) return;
+  const filePath = window.prompt("Preview workspace file (maximum 16 MiB). Enter a relative or absolute workspace path:");
+  if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim(), { preview: true });
+});
+function closeFilePreview() {
+  previewBinding = null;
+  filePreview?.dispose(); filePreview = null;
+  $("file-preview-body").replaceChildren();
+  $("file-preview-title").textContent = "File preview";
+  if ($("file-preview-dialog").open) $("file-preview-dialog").close();
+}
+$("close-file-preview").addEventListener("click", closeFilePreview);
+$("file-preview-dialog").addEventListener("close", () => { if (!$("file-preview-dialog").open) closeFilePreview(); });
+$("save-file-preview").addEventListener("click", () => {
+  if (previewBinding && canDownloadFile(previewBinding.ctx)) saveDownload(previewBinding.blob, previewBinding.filename);
+});
+async function downloadWorkspaceFile(ctx, filePath, { preview = false } = {}) {
   if (!canDownloadFile(ctx) || ctx.record.downloading) return false;
   const nativeId = ctx.meta.nativeSessionId, ownSelection = selection, ownEpoch = epoch;
   const valid = () => active(ctx) && selection === ownSelection && epoch === ownEpoch
@@ -1708,8 +1735,17 @@ async function downloadWorkspaceFile(ctx, filePath) {
   ctx.record.downloading = true; updateControls(); scheduleRender();
   try {
     const saved = await fetchDownload({ request: (url, options) => api.request(url, options),
-      sessionId: ctx.id, nativeSessionId: nativeId, path: filePath, signal: ctx.controller.signal, valid });
-    if (saved) showNotice("File downloaded. Workspace files may contain sensitive data.");
+      sessionId: ctx.id, nativeSessionId: nativeId, path: filePath, signal: ctx.controller.signal, valid,
+      ...(preview ? { save: async (blob, filename) => {
+        closeFilePreview();
+        const result = await createFilePreview(blob, filename, { renderMarkdown, valid });
+        if (!valid()) { result.dispose(); return; }
+        filePreview = result; previewBinding = { ctx, nativeId, blob, filename };
+        $("file-preview-title").textContent = filename;
+        $("file-preview-body").replaceChildren(result.node);
+        $("file-preview-dialog").showModal(); $("close-file-preview").focus();
+      } } : {}) });
+    if (saved) showNotice(preview ? "File preview opened. Workspace files may contain sensitive data." : "File downloaded. Workspace files may contain sensitive data.");
     return saved;
   } catch (error) { if (valid()) report(error, ctx); return false; }
   finally {
@@ -2397,6 +2433,7 @@ async function attachImages(files) {
 }
 
 function logout(message = "", { clearRemembered = true } = {}) {
+  closeFilePreview();
   closeContextPane(); // Release with the old credential/identity before clearing auth.
   epoch++; selection++; listVersion++;
   token = ""; auth.abort(); auth = new AbortController();

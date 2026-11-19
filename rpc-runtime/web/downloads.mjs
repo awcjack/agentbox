@@ -58,6 +58,6 @@ export async function fetchDownload({ request, sessionId, nativeSessionId, path,
   if (response?.nativeSessionId !== nativeSessionId) throw new Error("The conversation changed. Refresh before downloading.");
   const blob = downloadBlob(response);
   if (!valid()) return false;
-  save(blob, response.filename);
-  return true;
+  await save(blob, response.filename);
+  return valid();
 }

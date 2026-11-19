@@ -162,7 +162,7 @@ export async function copyText(text) {
 // Preview fenced Markdown through the same text-node-only renderer, never HTML.
 // Nested fences stay source-only to keep preview rendering bounded.
 // ```mermaid fences get an opt-in chart preview that renders to a data: SVG image.
-export function renderMarkdown(source, { previewFences = true, renderMermaidPreview = createMermaidPreview, onFileDownload } = {}) {
+export function renderMarkdown(source, { previewFences = true, renderMermaidPreview = createMermaidPreview, onFileDownload, onFilePreview } = {}) {
   const root = element("div", "markdown");
   function inline(parent, text) {
     for (const token of inlineTokens(text)) {
@@ -179,6 +179,14 @@ export function renderMarkdown(source, { previewFences = true, renderMermaidPrev
         else button.textContent = token.text;
         button.addEventListener("click", () => onFileDownload(filePath));
         parent.append(button);
+        if (onFilePreview) {
+          const preview = element("button", "file-preview-button", "Preview");
+          preview.type = "button";
+          preview.title = `Preview workspace file: ${filePath} (maximum 16 MiB)`;
+          preview.setAttribute("aria-label", `Preview ${token.text}`);
+          preview.addEventListener("click", () => onFilePreview(filePath));
+          parent.append(preview);
+        }
       } else {
         const child = element(token.type, "", token.text);
         if (token.type === "a") { child.href = token.href; child.target = "_blank"; child.rel = "noopener noreferrer"; }
@@ -213,7 +221,7 @@ export function renderMarkdown(source, { previewFences = true, renderMermaidPrev
         let preview;
         toggle.addEventListener("click", () => {
           if (!preview) {
-            preview = renderMarkdown(block.text, { previewFences: false, renderMermaidPreview, onFileDownload });
+            preview = renderMarkdown(block.text, { previewFences: false, renderMermaidPreview, onFileDownload, onFilePreview });
             preview.classList.add("markdown-preview");
             wrapper.append(preview);
           }

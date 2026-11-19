@@ -1234,8 +1234,10 @@ test("web assets are public and allowlisted without weakening API authentication
   assert.match(page.headers.get("content-type"), /text\/html/);
   assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
+  assert.match(page.headers.get("content-security-policy"), /img-src 'self' data: blob:;/);
+  assert.match(page.headers.get("content-security-policy"), /frame-src blob:;/);
   assert.match(await page.text(), /Pi agent/);
-  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "attachments.mjs", "prompt-history.mjs", "session-title.mjs", "model-visibility.mjs", "auth-storage.mjs", "styles.css", "icon.svg"]) {
+  for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "attachments.mjs", "prompt-history.mjs", "session-title.mjs", "model-visibility.mjs", "auth-storage.mjs", "downloads.mjs", "file-preview.mjs", "styles.css", "icon.svg"]) {
     const response = await fetch(`${baseUrl}/${asset}`);
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("x-content-type-options"), "nosniff");
@@ -1244,7 +1246,7 @@ test("web assets are public and allowlisted without weakening API authentication
   const head = await fetch(baseUrl, { method: "HEAD" });
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
-  for (const path of ["/runtime.mjs", "/history.mjs", "/web/README.md", "/README.md", "/browser-smoke.mjs", "/auth-storage.test.mjs", "/%2e%2e%2fruntime.mjs"]) {
+  for (const path of ["/runtime.mjs", "/history.mjs", "/web/README.md", "/README.md", "/browser-smoke.mjs", "/auth-storage.test.mjs", "/file-preview.test.mjs", "/%2e%2e%2fruntime.mjs"]) {
     assert.equal((await request(baseUrl, path, { auth: false })).response.status, 404);
   }
   const api = await request(baseUrl, "/v1/sessions", { auth: false });

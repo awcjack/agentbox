@@ -69,7 +69,7 @@ const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://fixture.invalid");
     if (staticFiles.has(url.pathname)) {
       const [file, type] = staticFiles.get(url.pathname);
-      response.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store" });
+      response.writeHead(200, { "Content-Type": type, "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-src blob:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" });
       response.end(await readFile(new URL(file, import.meta.url))); return;
     }
     if (request.headers.authorization !== "Bearer smoke-token") return json(response, 401, { error: { code: "unauthorized", message: "Invalid smoke token" } });
@@ -128,12 +128,19 @@ const server = createServer(async (request, response) => {
     if (!session) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
     if (match[2] === "downloads") {
       assert.equal(request.method, "POST");
-      assert.deepEqual(body, { path: downloadPath }, "download sends only the literal workspace path");
+      const previewFixtures = {
+        "/workspace/project/preview.md": ["preview.md", Buffer.from("# Preview heading\n\nSafe **Markdown**.")],
+        "/workspace/project/preview.html": ["preview.html", Buffer.from('<script>window.previewExecuted = true</script><h1>Source only</h1>')],
+        "/workspace/project/preview.png": ["preview.png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=", "base64")],
+      };
+      assert.deepEqual(Object.keys(body), ["path"]);
+      assert.ok(body.path === downloadPath || previewFixtures[body.path], "download sends only a literal workspace path");
       assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId, "download carries the current native session ID");
       calls.push({ id: session.id, download: body });
       if (session.failDownload) return json(response, 503, { error: { code: "fixture_failure", message: "Fixture download failed." } });
       if (session.holdDownload) await new Promise((resolve) => { session.releaseDownload = resolve; });
-      return json(response, 200, { nativeSessionId: session.nativeSessionId, filename: "smoke result.bin", mimeType: "application/octet-stream", data: downloadBytes.toString("base64") });
+      const [filename, bytes] = previewFixtures[body.path] || ["smoke result.bin", downloadBytes];
+      return json(response, 200, { nativeSessionId: session.nativeSessionId, filename, mimeType: "application/octet-stream", data: bytes.toString("base64") });
     }
     if (match[2] === "export") {
       const snapshot = conversationSnapshot(session);
@@ -879,6 +886,34 @@ try {
       assert.equal(await page.locator("#prompt").inputValue(), "Keep the draft edited during download", "late successful download preserves edited draft");
       assert.equal(downloadCalls().length, 3);
       assert.equal(modelOrShellCalls(), beforeDownloadCommands, "local downloads, including invalid and failed attempts, never prompt the model or run bash");
+      // Preview uses the same authenticated file read, never the managed browser.
+      const previewFile = async (path) => {
+        page.once("dialog", (dialog) => dialog.accept(path));
+        await page.locator("#preview-file").click();
+        await page.locator("#file-preview-dialog").waitFor();
+      };
+      await previewFile("/workspace/project/preview.md");
+      assert.equal(await page.locator("#file-preview-body h1").textContent(), "Preview heading");
+      const previewDownloadPromise = page.waitForEvent("download");
+      await page.locator("#save-file-preview").click();
+      const previewDownload = await previewDownloadPromise;
+      assert.equal(previewDownload.suggestedFilename(), "preview.md");
+      await previewDownload.delete();
+      await noOverflow(page); await page.locator("#close-file-preview").click();
+      await previewFile("/workspace/project/preview.html");
+      assert.ok((await page.locator("#file-preview-body pre").textContent()).includes("<script>"));
+      assert.equal(await page.evaluate(() => window.previewExecuted), undefined);
+      assert.equal(await page.locator("#file-preview-body script").count(), 0);
+      await page.keyboard.press("Escape");
+      await until(() => page.locator("#file-preview-body").textContent().then((text) => text === ""), "escape disposes preview");
+      await previewFile("/workspace/project/preview.png");
+      await until(() => page.locator("#file-preview-body img").evaluate((img) => img.complete && img.naturalWidth === 1), "blob image loads under CSP");
+      await page.locator("#close-file-preview").click();
+      await previewFile(downloadPath);
+      assert.ok((await page.locator("#file-preview-body").textContent()).includes("unsupported binary"));
+      await page.locator("#close-file-preview").click();
+      assert.equal(modelOrShellCalls(), beforeDownloadCommands, "file previews never prompt the model or run bash");
+      console.log(`${label}: PASS authenticated Markdown/source/image/binary previews and save/close/escape`);
       await page.locator("#prompt").fill("");
       session.autoMode = null;
       emit(session, { type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-auto", statusText: "" });
