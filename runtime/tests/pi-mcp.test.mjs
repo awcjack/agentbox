@@ -43,23 +43,25 @@ function stdio(command = "fake-server", extra = {}) {
 function fakeSdk(behaviors, records = {}) {
   records.clients = []
   records.transports = []
-  class StdioClientTransport {
+  class StdioTransport {
     constructor(options) {
       this.kind = "stdio"
       this.options = options
       records.transports.push(this)
     }
   }
-  class StreamableHTTPClientTransport {
-    constructor(url, options) {
+  class StreamableHttpTransport {
+    constructor(options) {
       this.kind = "http"
-      this.url = url
+      this.url = options.url
       this.options = options
       records.transports.push(this)
     }
   }
-  class Client {
-    constructor() {
+  class McpClient {
+    constructor(options) {
+      this.options = options
+      this.requests = []
       this.closed = 0
       records.clients.push(this)
     }
@@ -69,24 +71,29 @@ function fakeSdk(behaviors, records = {}) {
       this.connectOptions = options
       if (!this.behavior) throw new Error("missing fake behavior")
       if (this.behavior.connectError) throw this.behavior.connectError
+      await this.behavior.connect?.(transport)
     }
-    async listTools(params, options) {
-      this.listOptions = options
-      return this.behavior.listTools(params)
-    }
-    async callTool(params, schema, options) {
-      this.call = { params, schema, options }
+    async request(method, params, options) {
+      assert.ok(options.signal instanceof AbortSignal)
+      this.requests.push({ method, params, options })
+      if (method === "tools/list") {
+        this.listOptions = options
+        return this.behavior.listTools(params, options)
+      }
+      assert.equal(method, "tools/call")
+      this.call = { params, options }
       return this.behavior.callTool(params, options)
     }
+    onClose(listener) { this.closeListener = listener }
+    onError(listener) { this.errorListener = listener }
     async close() {
       this.closed++
     }
   }
   return {
-    Client,
-    StdioClientTransport,
-    StreamableHTTPClientTransport,
-    getDefaultEnvironment: () => ({ PATH: "/safe/bin" }),
+    McpClient,
+    StdioTransport,
+    StreamableHttpTransport,
   }
 }
 
@@ -118,15 +125,15 @@ test("loads the default path and resolves stdio and HTTP secrets from env", asyn
   const runtime = await setup(config({
     local: { transport: { type: "stdio", command: "fake-server", env: { TOKEN: "MCP_TOKEN" } } },
     remote: { transport: { type: "http", url: "https://mcp.example.test/rpc", headers: { Authorization: "MCP_AUTH" } } },
-  }), behaviors, { env: { MCP_TOKEN: "stdio-secret", MCP_AUTH: "Bearer http-secret" } })
+  }), behaviors, { env: { PATH: "/safe/bin", MCP_TOKEN: "stdio-secret", MCP_AUTH: "Bearer http-secret" } })
 
   assert.equal(runtime.records.configPath, DEFAULT_CONFIG_PATH)
   assert.deepEqual(runtime.records.transports[0].options.env, { PATH: "/safe/bin", TOKEN: "stdio-secret" })
-  assert.equal(runtime.records.transports[0].options.stderr, "ignore")
-  assert.equal(runtime.records.transports[0].options.maxBufferSize, 1024 * 1024)
-  assert.deepEqual(runtime.records.transports[1].options.requestInit.headers, { Authorization: "Bearer http-secret" })
+  assert.equal(runtime.records.transports[0].options.stderr, "pipe")
+  assert.equal(runtime.records.transports[0].options.maxMessageBytes, 1024 * 1024)
+  assert.deepEqual(runtime.records.transports[1].options.headers, { Authorization: "Bearer http-secret" })
   assert.equal(typeof runtime.records.transports[1].options.fetch, "function")
-  assert.equal(runtime.records.transports[1].options.reconnectionOptions.maxRetries, 0)
+  assert.equal(runtime.records.transports[1].options.reconnect.maxRetries, 0)
   assert.equal(JSON.stringify(runtime.records.transports).includes("MCP_TOKEN"), false)
 })
 
@@ -340,8 +347,8 @@ test("passes cancellation and timeout options and bounds all output", async () =
   const behavior = {
     listTools: async () => ({ tools: [{ name: "large", inputSchema: { type: "object" } }] }),
     callTool: async (_params, options) => {
-      assert.equal(options.timeout, 50)
-      assert.equal(options.maxTotalTimeout, 50)
+      assert.equal(options.timeoutMs, 50)
+      assert.equal(options.maxTotalTimeout, undefined)
       assert.ok(options.signal instanceof AbortSignal)
       return {
         content: [
@@ -591,4 +598,114 @@ test("formats compatibility and binary MCP results safely", () => {
     truncated: false,
   })
   assert.equal(formatToolResult({ content: [{ type: "audio", mimeType: "audio/wav", data: "secret" }] }, 1024).text, "[audio omitted: audio/wav]")
+})
+
+test("native adapter forwards only baseline and explicitly resolved environment", async () => {
+  const env = {
+    HOME: "/fixture/home", LOGNAME: "fixture", PATH: "/fixture/bin", SHELL: "() { unsafe; }",
+    TERM: "dumb", USER: "fixture", NODE_OPTIONS: "--inspect", UNRELATED_TOKEN: "excluded",
+    SOURCE: "explicit", SOURCE_PATH: "/override/bin",
+  }
+  const runtime = await setup(config({ server: {
+    transport: { type: "stdio", command: "server", args: ["--fixture"], cwd: "/fixture",
+      env: { TOKEN: "SOURCE", PATH: "SOURCE_PATH" } },
+    maxResponseBytes: 2048, closeTimeoutMs: 42,
+  } }), { server: { listTools: async () => ({ tools: [] }) } }, { env })
+  assert.deepEqual(runtime.records.transports[0].options, {
+    command: "server", args: ["--fixture"], cwd: "/fixture",
+    env: { HOME: env.HOME, LOGNAME: env.LOGNAME, PATH: env.SOURCE_PATH, TERM: env.TERM, USER: env.USER, TOKEN: env.SOURCE },
+    inheritEnv: false, stderr: "pipe", maxStderrBytes: 1, maxMessageBytes: 2048, closeTimeoutMs: 42,
+  })
+  assert.deepEqual(runtime.records.clients[0].options, {
+    name: "pi-agentbox-mcp-runtime", version: "1.0.0", capabilities: {}, requestTimeoutMs: 10_000,
+  })
+  assert.equal(runtime.records.clients[0].connectOptions, undefined)
+  assert.equal(runtime.records.clients[0].listOptions.timeoutMs, 10_000)
+})
+
+test("native HTTP adapter disables background streams and authentication recovery", async () => {
+  const runtime = await setup(config({ remote: { transport: { type: "http", url: "https://example.test/mcp" } } }), {
+    "https://example.test/mcp": { listTools: async () => ({ tools: [] }) },
+  })
+  const { options } = runtime.records.transports[0]
+  assert.equal(options.url.href, "https://example.test/mcp")
+  assert.equal(options.openGetStream, false)
+  assert.equal(options.maxMessageBytes, 1024 * 1024)
+  assert.deepEqual(options.reconnect, { maxRetries: 0 })
+  assert.equal("authProvider" in options, false)
+})
+
+test("native raw list requests retain the 100 page bound and cursor validation", async () => {
+  for (const cursor of ["repeat", 42, "x".repeat(1025)]) {
+    let pages = 0
+    const runtime = await setup(config({ server: stdio("server") }), { server: {
+      listTools: async () => { pages++; return { tools: [], nextCursor: cursor } },
+    } })
+    assert.equal(pages, cursor === "repeat" ? 100 : 1)
+    assert.equal(runtime.tools.size, 0)
+    assert.equal(runtime.records.clients[0].closed, 1)
+    assert.match(runtime.logs.join("\n"), cursor === "repeat" ? /exceeded 100 pages/ : /invalid or oversized cursor/)
+  }
+})
+
+for (const failure of ["401", "404", "503", "network"]) {
+  test(`native raw call is dispatched once after ${failure} failure`, async () => {
+    let calls = 0
+    const runtime = await setup(config({ server: stdio("server") }), { server: {
+      listTools: async () => ({ tools: [{ name: "mutate", inputSchema: {} }] }),
+      callTool: async () => { calls++; throw new Error(failure) },
+    } })
+    const tool = runtime.tools.get("mcp__server__mutate")
+    assert.equal((await tool.execute("call", {})).isError, true)
+    assert.equal((await tool.execute("again", {})).isError, true)
+    assert.equal(calls, 1)
+    await runtime.handlers.get("session_shutdown")[0]()
+    assert.equal(runtime.records.clients[0].closed, 1)
+  })
+}
+
+test("progress cannot extend the absolute deadline and UI callback errors are isolated", async () => {
+  let signal, timer, calls = 0, updates = 0
+  const runtime = await setup(config({ server: stdio("server", { callTimeoutMs: 30 }) }), { server: {
+    listTools: async () => ({ tools: [{ name: "wait", inputSchema: {} }] }),
+    callTool: async (_params, options) => {
+      calls++
+      signal = options.signal
+      timer = setInterval(() => options.onProgress({ progress: 1 }), 2)
+      return new Promise(() => {})
+    },
+  } })
+  try {
+    const result = await runtime.tools.get("mcp__server__wait").execute("id", {}, undefined, () => { updates++; throw new Error("UI") })
+    assert.match(result.content[0].text, /timed out after 30ms/)
+    assert.equal(result.isError, true)
+    assert.ok(updates > 0)
+    assert.equal(signal.aborted, true)
+    assert.equal(calls, 1)
+    assert.equal(runtime.records.clients[0].closed, 1)
+  } finally { clearInterval(timer) }
+})
+
+test("native close and error subscriptions invalidate the connection", async () => {
+  for (const event of ["closeListener", "errorListener"]) {
+    const runtime = await setup(config({ server: stdio("server") }), { server: {
+      listTools: async () => ({ tools: [{ name: "tool", inputSchema: {} }] }),
+      callTool: async () => { throw new Error("must not dispatch") },
+    } })
+    runtime.records.clients[0][event](new Error("protocol failure"))
+    // Error cleanup starts asynchronously through withDeadline.
+    await new Promise((resolve) => setImmediate(resolve))
+    const result = await runtime.tools.get("mcp__server__tool").execute("id", {})
+    assert.match(result.content[0].text, /unavailable/)
+    assert.equal(runtime.records.clients[0].requests.filter(({ method }) => method === "tools/call").length, 0)
+  }
+})
+
+test("connect timeout closes a native client whose connect has no signal parameter", async () => {
+  const runtime = await setup(config({ server: stdio("server", { connectTimeoutMs: 10 }) }), {
+    server: { connect: async () => new Promise(() => {}) },
+  })
+  assert.equal(runtime.tools.size, 0)
+  assert.equal(runtime.records.clients[0].closed, 1)
+  assert.match(runtime.logs.join("\n"), /connecting MCP server server timed out after 10ms/)
 })

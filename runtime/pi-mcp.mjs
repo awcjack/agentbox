@@ -619,12 +619,19 @@ function textResult(text, details, isError = false) {
 }
 
 async function defaultLoadSdk() {
-  const [{ Client }, { StdioClientTransport, getDefaultEnvironment }, { StreamableHTTPClientTransport }] = await Promise.all([
-    import("@modelcontextprotocol/sdk/client/index.js"),
-    import("@modelcontextprotocol/sdk/client/stdio.js"),
-    import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
-  ])
-  return { Client, StdioClientTransport, StreamableHTTPClientTransport, getDefaultEnvironment }
+  return import("@earendil-works/pi-mcp")
+}
+
+// Preserve the SDK's minimal POSIX baseline on our Linux/macOS hosts, not the
+// native transport's default process.env inheritance. Explicit references below
+// remain the only way to forward other variables to a managed server.
+function stdioEnvironment(environment) {
+  const result = {}
+  for (const name of ["HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER"]) {
+    const value = environment[name]
+    if (typeof value === "string" && !value.startsWith("()")) result[name] = value
+  }
+  return result
 }
 
 async function defaultRequestApproval({ context, server, tool, signal }) {
@@ -680,18 +687,26 @@ export function createPiMcpExtension(dependencies = {}) {
         let transport
         if (server.transport.type === "stdio") {
           const referenced = resolveReferences(server.transport.env, environment, `server ${server.name}`)
-          transport = new sdk.StdioClientTransport({
+          transport = new sdk.StdioTransport({
             command: server.transport.command,
             args: server.transport.args,
             cwd: server.transport.cwd,
-            env: { ...sdk.getDefaultEnvironment(), ...referenced },
-            stderr: "ignore",
-            maxBufferSize: server.maxResponseBytes,
+            env: { ...stdioEnvironment(environment), ...referenced },
+            inheritEnv: false,
+            stderr: "pipe",
+            // Native 1.5.2 treats zero as subarray(-0), retaining all stderr.
+            // Drain silently with the smallest bounded tail instead.
+            maxStderrBytes: 1,
+            maxMessageBytes: server.maxResponseBytes,
+            closeTimeoutMs: server.closeTimeoutMs,
           })
         } else {
           const headers = resolveReferences(server.transport.headers, environment, `server ${server.name}`)
-          transport = new sdk.StreamableHTTPClientTransport(server.transport.url, {
-            requestInit: { headers },
+          transport = new sdk.StreamableHttpTransport({
+            url: server.transport.url,
+            headers,
+            maxMessageBytes: server.maxResponseBytes,
+            openGetStream: false,
             fetch: createSecureFetch({
               baseUrl: server.transport.url,
               allowInsecureLoopback: server.transport.allowInsecureLoopback,
@@ -699,18 +714,20 @@ export function createPiMcpExtension(dependencies = {}) {
               fetch: fetchImpl,
               lookup,
             }),
-            reconnectionOptions: {
-              initialReconnectionDelay: 1_000,
-              maxReconnectionDelay: 30_000,
-              reconnectionDelayGrowFactor: 1.5,
-              maxRetries: 0,
-            },
+            // No background GET, response-stream resumption, OAuth recovery, or
+            // retries: a mutating call must be dispatched at most once.
+            reconnect: { maxRetries: 0 },
           })
         }
 
-        client = new sdk.Client({ name: "pi-agentbox-mcp-runtime", version: "1.0.0" }, { capabilities: {} })
+        client = new sdk.McpClient({
+          name: "pi-agentbox-mcp-runtime", version: "1.0.0",
+          capabilities: {}, requestTimeoutMs: server.connectTimeoutMs,
+        })
         await withDeadline(
-          (signal) => client.connect(transport, { signal, timeout: server.connectTimeoutMs }),
+          // Native connect has no signal option; the outer deadline closes the
+          // client/transport on failure, including an unfinished initialize.
+          () => client.connect(transport),
           server.connectTimeoutMs,
           undefined,
           `connecting MCP server ${server.name}`,
@@ -720,13 +737,13 @@ export function createPiMcpExtension(dependencies = {}) {
           return undefined
         }
         connections.set(server.name, { client, closeTimeoutMs: server.closeTimeoutMs })
-        client.onclose = () => {
+        client.onClose(() => {
           if (connections.get(server.name)?.client === client) connections.delete(server.name)
-        }
-        client.onerror = (error) => {
+        })
+        client.onError((error) => {
           log(`server ${server.name} protocol error: ${formatError(error)}`)
           void closeClient(server.name, client, server.closeTimeoutMs)
-        }
+        })
 
         const tools = []
         const seen = new Set()
@@ -734,7 +751,9 @@ export function createPiMcpExtension(dependencies = {}) {
         let cursor
         for (let page = 0; page < MAX_LIST_PAGES; page++) {
           const response = await withDeadline(
-            (signal) => client.listTools(cursor ? { cursor } : undefined, { signal, timeout: server.connectTimeoutMs }),
+            // Native listTools aggregates pages; request one page so managed
+            // page/count/metadata bounds remain authoritative.
+            (signal) => client.request("tools/list", cursor ? { cursor } : undefined, { signal, timeoutMs: server.connectTimeoutMs }),
             server.connectTimeoutMs,
             undefined,
             `listing tools from MCP server ${server.name}`,
@@ -852,14 +871,15 @@ export function createPiMcpExtension(dependencies = {}) {
 
           try {
             const result = await withDeadline(
-              (requestSignal) => client.callTool(
+              (requestSignal) => client.request(
+                "tools/call",
                 { name: tool.name, arguments: params, _meta: { progressToken: toolCallId } },
-                undefined,
                 {
                   signal: requestSignal,
-                  timeout: server.callTimeoutMs,
-                  maxTotalTimeout: server.callTimeoutMs,
-                  onprogress: onUpdate
+                  // Native progress renews its timeout; withDeadline above remains
+                  // the absolute managed deadline even under continuous progress.
+                  timeoutMs: server.callTimeoutMs,
+                  onProgress: onUpdate
                     ? () => {
                       try {
                         onUpdate(textResult(`MCP tool ${server.name}/${tool.name} is running.`, {
@@ -915,7 +935,7 @@ export function createPiMcpExtension(dependencies = {}) {
       try {
         sdk = await loadSdk()
       } catch (error) {
-        log(`could not load MCP SDK: ${formatError(error)}`)
+        log(`could not load native Pi MCP client: ${formatError(error)}`)
         return
       }
 

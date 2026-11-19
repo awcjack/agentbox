@@ -13,7 +13,9 @@ buildNpmPackage {
     filter = path: _type: baseNameOf path != "node_modules";
   };
   nodejs = nodejs_22;
-  npmDepsHash = "sha256-7jnFnlxOnb/21ARb0lavJybJ5EYtVM28bdk60dIjdTQ=";
+  npmDepsHash = "sha256-8o6tqMFagbzjLN6C16wk7pgY2WujS1Zrs6e19Canw78=";
+  # Native Pi MCP is published as compiled JS; no lifecycle scripts are needed.
+  npmFlags = [ "--ignore-scripts" ];
 
   dontNpmBuild = true;
   doCheck = true;
