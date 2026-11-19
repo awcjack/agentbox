@@ -9,8 +9,8 @@ import { createRuntime } from "../runtime.mjs";
 
 // Opt-in, offline contract test against the deployed immutable Pi executable.
 const executable = process.env.PI_CONVERSATION_TEST_EXECUTABLE;
-test("Pi 0.84.2 loads supervisor fork/revert prefixes, compaction and empty context", { skip: !executable, timeout: 60_000 }, async (t) => {
-  assert.equal(execFileSync(executable, ["--version"], { encoding: "utf8" }).trim(), "0.84.2");
+test("Pi 1.5.2 loads supervisor fork/revert prefixes, compaction and empty context", { skip: !executable, timeout: 60_000 }, async (t) => {
+  assert.equal(execFileSync(executable, ["--version"], { encoding: "utf8" }).trim(), "1.5.2");
   const root = await mkdtemp(join(tmpdir(), "pi-conversation-contract-"));
   const sessionDir = join(root, "sessions"), agentDir = join(root, "agent");
   await mkdir(sessionDir);

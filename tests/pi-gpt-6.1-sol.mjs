@@ -81,7 +81,7 @@ assert.deepEqual(alias.getModels().filter((model) => model.id === id), [
 assert.ok(alias.auth.oauth);
 assert.equal(alias.auth.apiKey, undefined);
 // Exercise the actual picker composition, not just the native provider factories.
-// 0.87.1 merges bundled + eligible cached models by ID, then applies models.json.
+// Pi merges bundled + eligible cached models by ID, then applies models.json.
 const { ModelRuntime, ModelRegistry } = await load("dist/index.js");
 const { FileModelsStore } = await load("dist/core/models-store.js");
 const { InMemoryCredentialStore } = await load("node_modules/@earendil-works/pi-ai/dist/index.js");

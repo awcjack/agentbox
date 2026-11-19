@@ -105,6 +105,7 @@ jobs:
             pi-post-test \
             pi-goal-extension-test \
             pi-agentsmd-test \
+            pi-codex-accounts-test \
             pi-codex-wrapper-test \
             pi-cursor-test \
             pi-lsp-client-test \
