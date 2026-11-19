@@ -4,6 +4,7 @@ import { existsSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { isIP } from "node:net"
 import { isSensitivePath, shellPathTokens } from "./path-policy.ts"
+import { registerExecutionTargetTool } from "./execution-target.ts"
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path"
 import {
   createLspClient,
@@ -321,6 +322,8 @@ export function createPiAgentboxExtension(dependencies: PiAgentboxDependencies =
       }
     }
   }
+
+  registerExecutionTargetTool(pi)
 
   pi.registerTool({
     name: "web_search",

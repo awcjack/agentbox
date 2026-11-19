@@ -146,6 +146,7 @@ export const TOOL_INPUT_TARGETS: Readonly<Record<string, readonly string[]>> = O
   grep: ["path"],
   ls: ["path"],
   read: ["path", "filePath", "file_path", "notebook_path"],
+  report_execution_target: ["workingDirectory"],
   send_message: ["to"],
   task: ["prompt"],
   web_fetch: ["url"],
@@ -153,7 +154,7 @@ export const TOOL_INPUT_TARGETS: Readonly<Record<string, readonly string[]>> = O
   write: ["path", "filePath", "file_path", "notebook_path"],
 })
 
-const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics", "code_navigation"])
+const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics", "code_navigation", "report_execution_target"])
 const WRITE_TOOLS = new Set(["write", "edit", "apply_patch", "patch", "delete", "move"])
 const DECISIONS = new Set<Decision>(["allow", "ask", "deny"])
 const CONFIG_KEYS = new Set(["version", "defaultDecision", "timeout", "rules", "auto"])

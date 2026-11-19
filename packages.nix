@@ -164,6 +164,8 @@ in
       testSource = pkgs.runCommand "pi-agentbox-extension-test-source" { } ''
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-agentbox.ts} $out/tests/pi-agentbox.ts
+        cp ${./tests/pi-execution-target.ts} $out/tests/pi-execution-target.ts
+        cp ${./extensions/execution-target.ts} $out/extensions/execution-target.ts
         cp ${./extensions/path-policy.ts} $out/extensions/path-policy.ts
         cp ${./extensions/pi-agentbox.ts} $out/extensions/pi-agentbox.ts
         cp ${./extensions/lsp-client.ts} $out/extensions/lsp-client.ts
@@ -171,9 +173,15 @@ in
     in
     pkgs.runCommand "pi-agentbox-extension-test"
       {
-        nativeBuildInputs = [ pkgs.nodejs_22 ];
+        nativeBuildInputs = [
+          pkgs.nodejs_22
+          pkgs.git
+        ];
       }
       ''
+        export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+        node --experimental-strip-types ${testSource}/tests/pi-execution-target.ts \
+          ${pi-coding-agent}/lib/node_modules/pi-monorepo
         node --experimental-strip-types ${testSource}/tests/pi-agentbox.ts
         touch $out
       '';
@@ -224,6 +232,7 @@ in
         cp ${./tests/pi-approval.ts} $out/tests/pi-approval.ts
         cp ${./tests/fixtures/pi-approval-child.ts} $out/tests/fixtures/pi-approval-child.ts
         cp ${./extensions/pi-workflow.ts} $out/extensions/pi-workflow.ts
+        cp ${./extensions/execution-target.ts} $out/extensions/execution-target.ts
         cp ${./extensions/path-policy.ts} $out/extensions/path-policy.ts
         cp ${./extensions/pi-policy.ts} $out/extensions/pi-policy.ts
         cp ${./extensions/pi-approval.ts} $out/extensions/pi-approval.ts
@@ -331,6 +340,7 @@ in
       testSource = pkgs.runCommand "pi-cursor-integration-test-source" { } ''
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-cursor.ts} $out/tests/pi-cursor.ts
+        cp ${./extensions/execution-target.ts} $out/extensions/execution-target.ts
         cp ${./extensions/path-policy.ts} $out/extensions/path-policy.ts
         cp ${./extensions/pi-agentbox.ts} $out/extensions/pi-agentbox.ts
         cp ${./extensions/lsp-client.ts} $out/extensions/lsp-client.ts
