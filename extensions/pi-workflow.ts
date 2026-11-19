@@ -6,6 +6,7 @@ import { dirname, isAbsolute } from "node:path"
 import { APPROVAL_ENV, APPROVAL_VERSION, createApprovalBroker } from "./pi-approval.ts"
 import type { ApprovalContext } from "./pi-approval.ts"
 import type { Readable, Writable } from "node:stream"
+import { isExecutionTargetReport, type ExecutionTargetReport } from "./execution-target.ts"
 
 const TODO_ENTRY = "pi-workflow.todos"
 const TASK_ENTRY = "pi-workflow.tasks"
@@ -90,6 +91,7 @@ interface TaskResult {
   stderrTruncated: boolean
   steps: number
   resumed: boolean
+  executionTarget?: ExecutionTargetReport
 }
 
 function textResult(text: string, details: unknown, isError = false) {
@@ -642,6 +644,12 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         let assistantStopReason = ""
         let assistantOutput = ""
         let assistantOutputTruncated = false
+        // Invocation-local metadata only: never restore from resume history or use
+        // this report to change cwd, filesystem scope, or authorization.
+        let executionTarget: ExecutionTargetReport | undefined
+        let agentStarted = false
+        let agentSettled = false
+        let agentSettledAborted = false
         let killTimer: ReturnType<typeof setTimeout> | undefined
 
         return await new Promise<TaskResult>((resolve) => {
@@ -664,6 +672,31 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               const text = line.toString("utf8").trim()
               if (!text) return
               const event = JSON.parse(text)
+              if (event?.type === "agent_settled") {
+                agentSettled = true
+                agentSettledAborted = event.aborted === true
+                if (agentSettledAborted) executionTarget = undefined
+              }
+              if (event?.type === "agent_start") {
+                // agent_end/start also brackets automatic retries and compaction
+                // recovery. Preserve their report, but not a separate settled run.
+                if (!agentStarted || agentSettled) executionTarget = undefined
+                agentStarted = true
+                agentSettled = false
+                agentSettledAborted = false
+              }
+              if (event?.toolName === "report_execution_target" && event.parentToolCallId === undefined) {
+                if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+                  // A newer attempt invalidates older metadata even when it fails.
+                  executionTarget = undefined
+                }
+                if (event.type === "tool_execution_end" && event.isError === false) {
+                  const report = event.result?.details
+                  if (isExecutionTargetReport(report) && report.toolCallId === event.toolCallId && report.sessionId === taskId) {
+                    executionTarget = report
+                  }
+                }
+              }
               if (event?.type !== "message_end" || event.message?.role !== "assistant") return
               steps++
               assistantStopReason = typeof event.message.stopReason === "string" ? event.message.stopReason : ""
@@ -719,11 +752,11 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
             if (job.resume) activeResumeIds.delete(taskId)
             const stdoutText = stdout.text().trim()
             let stderrText = stderr.text().trim()
-            const status = cancelled || assistantStopReason === "aborted"
+            const status = cancelled || agentSettledAborted || assistantStopReason === "aborted"
               ? "cancelled"
               : stepLimited
                 ? "step_limit"
-                : parserFailure || assistantStopReason === "error" || exitCode !== 0
+                : spawnError || parserFailure || assistantStopReason === "error" || exitCode !== 0
                   ? "failed"
                   : "completed"
             // Pi 0.84 emits this expected notice when --session-id creates a child.
@@ -753,6 +786,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
               stderrTruncated: stderr.omitted > 0,
               steps,
               resumed: Boolean(job.resume),
+              ...(status === "completed" && executionTarget ? { executionTarget } : {}),
             })
           }
 

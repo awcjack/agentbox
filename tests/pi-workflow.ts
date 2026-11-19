@@ -995,6 +995,159 @@ for (const entry of [savedSetting, resetSetting]) {
 assert.ok(shared.tools.get("task").promptGuidelines.every((guideline: string) => /\btask\b/.test(guideline)))
 
 
+// Reports are explicit child metadata, not prose-derived cwd or authorization.
+const targetReport = (sessionId = "pi-workflow-target", toolCallId = "report-1") => ({
+  version: 1,
+  worktreeRoot: "/workspace/other-worktree",
+  productPath: ".",
+  productRelativeCwd: "products/café/src",
+  workingDirectory: "/workspace/other-worktree/products/café/src",
+  sessionId,
+  toolCallId,
+})
+const reportEvent = (details: unknown = targetReport(), overrides: any = {}) => ({
+  type: "tool_execution_end", toolName: "report_execution_target", toolCallId: "report-1",
+  isError: false, result: { content: [], details }, ...overrides,
+})
+const finalMessage = (stopReason = "stop") => ({
+  type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason },
+})
+function targetHarness() {
+  let events: any[] = []
+  let outcome = "completed"
+  let abort: (() => void) | undefined
+  const targetUpdates: any[] = []
+  const targetCalls: any[] = []
+  const target = harness({
+    readFile: async () => JSON.stringify({ maxOutputBytes: 1024, roles: { scout: { maxSteps: 1 } } }),
+    randomUUID: () => "target",
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+    spawn: (_command: string, args: string[], options: any) => {
+      targetCalls.push({ args, options })
+      const proc = new EventEmitter() as any
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.stdin = new EventEmitter()
+      proc.kill = () => { queueMicrotask(() => proc.emit("close", null)); return true }
+      proc.stdin.end = () => queueMicrotask(() => {
+        // Byte-sized fragments exercise JSON framing, including split UTF-8.
+        for (const event of events) {
+          const line = Buffer.from(`${JSON.stringify(event)}\n`)
+          for (let index = 0; index < line.length; index++) proc.stdout.emit("data", line.subarray(index, index + 1))
+        }
+        if (outcome === "cancelled") abort!()
+        else if (outcome === "spawnError") proc.emit("error", new Error("fixture spawn error"))
+        else proc.emit("close", outcome === "failed" ? 1 : 0)
+      })
+      return proc
+    },
+  })
+  return {
+    target, targetUpdates, targetCalls,
+    async run(nextEvents: any[], nextOutcome = "completed", resume?: string) {
+      events = nextEvents
+      outcome = nextOutcome
+      const controller = new AbortController()
+      abort = () => controller.abort()
+      return target.tools.get("task").execute("target-task", { role: "scout", prompt: "report target", resume },
+        controller.signal, (update: any) => targetUpdates.push(update.details), context())
+    },
+  }
+}
+const forwardedTarget = targetHarness()
+const targetSuccess = await forwardedTarget.run([{ type: "agent_start" }, reportEvent(), finalMessage()])
+assert.deepEqual(targetSuccess.details.results[0].executionTarget, targetReport())
+assert.deepEqual(targetSuccess.details.jobs[0].executionTarget, targetReport())
+assert.equal(forwardedTarget.targetCalls[0].options.cwd, "/workspace/project", "report must not redirect launch cwd")
+assert.ok(forwardedTarget.targetUpdates.filter(update => update.results.length === 0)
+  .every(update => update.jobs.every((job: any) => job.executionTarget === undefined)), "no running candidate is published")
+assert.deepEqual(forwardedTarget.target.entries.at(-1).data.records,
+  [{ id: "pi-workflow-target", cwd: "/workspace/project", role: "scout" }], "reports are not persisted as resume state")
+
+const ignoredTargetEvents: any[] = [
+  { type: "message_end", message: { role: "assistant", content: JSON.stringify(targetReport()), stopReason: "stop" } },
+  { type: "tool_execution_start", toolName: "report_execution_target", args: targetReport() },
+  { type: "tool_execution_update", toolName: "report_execution_target", partialResult: { details: targetReport() } },
+  { type: "custom", customType: "execution-target", data: targetReport() },
+  { type: "message_end", message: { role: "toolResult", toolName: "report_execution_target", details: targetReport() } },
+  reportEvent(targetReport(), { toolName: "bash" }),
+  reportEvent({ executionTarget: targetReport() }),
+  reportEvent({ results: [{ executionTarget: targetReport() }] }, { toolName: "task" }),
+  reportEvent(targetReport(), { parentToolCallId: "ancestor-task" }),
+  reportEvent(targetReport("descendant-session")),
+]
+for (const event of ignoredTargetEvents) {
+  const ignored = await targetHarness().run([event, finalMessage()])
+  assert.equal(ignored.details.results[0].status, "completed")
+  assert.equal(Object.hasOwn(ignored.details.results[0], "executionTarget"), false, JSON.stringify(event))
+}
+for (const attempt of [
+  reportEvent(undefined, { result: {} }),
+  reportEvent(null),
+  reportEvent({ ...targetReport(), version: 2 }),
+  reportEvent({ ...targetReport(), productPath: "../escape" }),
+  reportEvent({ ...targetReport(), productPath: "products/café", productRelativeCwd: "src" }),
+  reportEvent({ ...targetReport(), workingDirectory: "/wrong/join" }),
+  reportEvent({ ...targetReport(), productRelativeCwd: "src/../src" }),
+  reportEvent({ ...targetReport(), productPath: "x".repeat(4097) }),
+  reportEvent({ ...targetReport(), worktreeRoot: "/workspace/\ncontrol" }),
+  reportEvent(targetReport("wrong-session")),
+  reportEvent(targetReport(undefined, "wrong-call")),
+  reportEvent(targetReport(), { isError: true }),
+  reportEvent(targetReport(), { isError: undefined }),
+  { type: "tool_execution_start", toolName: "report_execution_target", args: {} },
+]) {
+  const cleared = await targetHarness().run([reportEvent(), attempt, finalMessage()])
+  assert.equal(cleared.details.results[0].status, "completed", "optional metadata must not fail the task")
+  assert.equal(Object.hasOwn(cleared.details.results[0], "executionTarget"), false, JSON.stringify(attempt))
+}
+// Unrelated/nested results neither replace nor invalidate the direct report.
+for (const event of ignoredTargetEvents.filter(event => event.type !== "tool_execution_start")) {
+  if (event.toolName === "report_execution_target" && event.type === "tool_execution_end" && event.parentToolCallId === undefined) continue
+  const kept = await targetHarness().run([reportEvent(), event, finalMessage()])
+  assert.deepEqual(kept.details.results[0].executionTarget, targetReport())
+}
+for (const [outcome, reason, expected] of [
+  ["failed", "stop", "failed"], ["spawnError", "stop", "failed"],
+  ["cancelled", "stop", "cancelled"], ["completed", "error", "failed"],
+  ["completed", "aborted", "cancelled"], ["completed", "toolUse", "step_limit"],
+]) {
+  const failure = await targetHarness().run([reportEvent(), finalMessage(reason)], outcome)
+  assert.equal(failure.details.results[0].status, expected)
+  assert.equal(Object.hasOwn(failure.details.results[0], "executionTarget"), false)
+}
+const abortedSettlement = await targetHarness().run([
+  { type: "agent_start" }, reportEvent(), finalMessage(), { type: "agent_settled", aborted: true },
+])
+assert.equal(abortedSettlement.details.results[0].status, "cancelled")
+assert.equal(Object.hasOwn(abortedSettlement.details.results[0], "executionTarget"), false)
+// agent_end/start alone is a retry/continuation, not proof of a separate run.
+const retriedTarget = await targetHarness().run([
+  { type: "agent_start" }, reportEvent(), { type: "agent_end" }, { type: "agent_start" }, finalMessage(),
+])
+assert.deepEqual(retriedTarget.details.results[0].executionTarget, targetReport())
+const subsequentTarget = await targetHarness().run([
+  { type: "agent_start" }, reportEvent(), { type: "agent_end" }, { type: "agent_settled" },
+  { type: "agent_start" }, finalMessage(),
+])
+assert.equal(Object.hasOwn(subsequentTarget.details.results[0], "executionTarget"), false)
+const newReport = targetReport(undefined, "report-2")
+const replacementTarget = await targetHarness().run([
+  reportEvent(), reportEvent(newReport, { toolCallId: "report-2" }), finalMessage(),
+])
+assert.deepEqual(replacementTarget.details.results[0].executionTarget, newReport)
+const longRoot = `/workspace/${"w".repeat(1500)}`
+const largeReport = { ...targetReport(), worktreeRoot: longRoot, workingDirectory: `${longRoot}/products/café/src` }
+const truncatedTarget = await targetHarness().run([reportEvent(largeReport), finalMessage()])
+assert.equal(truncatedTarget.details.results[0].outputTruncated, true)
+assert.deepEqual(truncatedTarget.details.results[0].executionTarget, largeReport, "structured metadata survives bounded text capture")
+const resumedTarget = await forwardedTarget.run([finalMessage()], "completed", "pi-workflow-target")
+assert.equal(resumedTarget.details.results[0].resumed, true)
+assert.equal(Object.hasOwn(resumedTarget.details.results[0], "executionTarget"), false)
+assert.equal(forwardedTarget.targetCalls.at(-1).options.cwd, "/workspace/project")
+const freshResumeTarget = await forwardedTarget.run([reportEvent(), finalMessage()], "completed", "pi-workflow-target")
+assert.deepEqual(freshResumeTarget.details.results[0].executionTarget, targetReport())
+
 const originalChild = process.env.PI_WORKFLOW_CHILD
 process.env.PI_WORKFLOW_CHILD = "1"
 const child = harness()
