@@ -807,8 +807,16 @@ function scheduleSessionPoll() {
     try {
       const result = await api.request("/v1/sessions", { signal: auth.signal });
       if (ownEpoch === epoch && version === listVersion) {
-        sessions = (result.sessions || []).filter((session) => !records.get(session.id)?.ending);
-        renderSessions();
+        const nextSessions = (result.sessions || []).filter((session) => !records.get(session.id)?.ending);
+        const nextIds = new Set(nextSessions.map((session) => session.id));
+        if (sessions.some((session) => !nextIds.has(session.id))) {
+          // Idle/exited processes can be reaped between polls. Resolve their
+          // saved conversations before removing live rows, without a page reload.
+          await refreshSessions({ sessionSnapshot: nextSessions });
+        } else {
+          sessions = nextSessions;
+          renderSessions();
+        }
       }
     } catch (error) {
       if (ownEpoch === epoch && error.status === 401) report(error);
@@ -848,20 +856,35 @@ async function refreshProjects(isCurrent) {
     else showNotice(`Projects could not be refreshed: ${error.message} Previous project data is unchanged; existing sessions can still be opened.`, true);
   }
 }
-async function refreshSessions({ refreshProjects: projects = false } = {}) {
+async function refreshSessions({ refreshProjects: projects = false, sessionSnapshot = null } = {}) {
   const version = ++listVersion, ownEpoch = epoch;
   const isCurrent = () => ownEpoch === epoch && version === listVersion;
   try {
     if (projects) await refreshProjects(isCurrent);
     if (!isCurrent()) return;
     refreshFolders();
-    const result = await api.request("/v1/sessions", { signal: auth.signal });
-    if (ownEpoch !== epoch || version !== listVersion) return;
-    sessions = result.sessions || []; renderSessions();
-    const names = $("profile-filter").value ? [$("profile-filter").value] : profiles;
+    const result = sessionSnapshot === null
+      ? await api.request("/v1/sessions", { signal: auth.signal })
+      : { sessions: sessionSnapshot };
+    if (!isCurrent()) return;
+    const names = [...new Set([
+      ...($("profile-filter").value ? [$("profile-filter").value] : profiles),
+      // Reconcile vanished rows even outside the selected profile.
+      ...sessions.filter((session) => !(result.sessions || []).some((next) => next.id === session.id)).map((session) => session.profile),
+    ])];
     const results = await Promise.allSettled(names.map((profile) => api.request(`/v1/history?profile=${encodeURIComponent(profile)}&includeArchived=true`, { signal: auth.signal })));
     if (ownEpoch !== epoch || version !== listVersion) return;
-    history = results.flatMap((result) => result.status === "fulfilled" ? result.value.sessions || [] : []);
+    const refreshed = new Set(names.filter((_, index) => results[index].status === "fulfilled"));
+    const failedProfiles = new Set(names.filter((_, index) => results[index].status === "rejected"));
+    history = [
+      ...history.filter((session) => !refreshed.has(session.profile)),
+      ...results.flatMap((result) => result.status === "fulfilled" ? result.value.sessions || [] : []),
+    ];
+    const nextSessions = result.sessions || [];
+    const nextIds = new Set(nextSessions.map((session) => session.id));
+    // Failed history reads must not erase the last known row. Keeping vanished
+    // live entries also makes the next lightweight poll retry reconciliation.
+    sessions = [...nextSessions, ...sessions.filter((session) => !nextIds.has(session.id) && failedProfiles.has(session.profile))];
     renderSessions();
     if (results.some((result) => result.status === "fulfilled" && result.value.truncated)) {
       showNotice("History listing is truncated by the server. Some conversations may not be shown.", true);

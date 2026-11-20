@@ -34,6 +34,73 @@ const catalog = (path) => {
   return { sessions: [{ id: "saved", profile: "new" }] };
 };
 
+test("poll reconciles reaped sessions with history before removing their rows", async () => {
+  let finishHistory;
+  const { h } = harness(path => {
+    if (path === "/v1/sessions") return { sessions: [] };
+    return new Promise(resolve => { finishHistory = () => resolve({ sessions: [{ id: "native", profile: "old" }] }); });
+  });
+  h.sessions = [{ id: "runtime", nativeSessionId: "native", profile: "old" }];
+  h.token = "fixture"; h.records = new Map(); h.sessionPoll = null;
+  h.clearTimeout = () => {};
+  h.setTimeout = callback => { h.poll = callback; return 1; };
+  vm.runInContext(source.slice(source.indexOf("function scheduleSessionPoll("), source.indexOf("async function refreshProjects(")), h);
+  h.scheduleSessionPoll();
+  const pending = h.poll();
+  while (!finishHistory) await Promise.resolve();
+  assert.equal(h.sessions[0].id, "runtime", "row stays visible while history is pending");
+  finishHistory(); await pending;
+  assert.equal(h.sessions.length, 0);
+  assert.equal(h.history[0].id, "native");
+  assert.deepEqual(h.calls, ["/v1/sessions", "/v1/history?profile=old&includeArchived=true"]);
+});
+
+test("unchanged live-session polls do not scan history", async () => {
+  const { h } = harness(() => ({ sessions: [{ id: "runtime", profile: "old" }] }));
+  h.sessions = [{ id: "runtime", profile: "old" }];
+  h.token = "fixture"; h.records = new Map(); h.sessionPoll = null;
+  h.clearTimeout = () => {};
+  h.setTimeout = callback => { h.poll = callback; return 1; };
+  vm.runInContext(source.slice(source.indexOf("function scheduleSessionPoll("), source.indexOf("async function refreshProjects(")), h);
+  h.scheduleSessionPoll(); await h.poll();
+  assert.deepEqual(h.calls, ["/v1/sessions"]);
+});
+
+test("history failure retains vanished live rows and cached history until retry succeeds", async () => {
+  let fail = true;
+  const { h } = harness(() => {
+    if (fail) throw new Error("temporary history failure");
+    return { sessions: [{ id: "native", profile: "old" }] };
+  });
+  h.sessions = [{ id: "runtime", nativeSessionId: "native", profile: "old" }];
+  h.history = [{ id: "cached", profile: "old" }];
+  await h.refreshSessions({ sessionSnapshot: [] });
+  assert.equal(h.sessions[0].id, "runtime");
+  assert.equal(h.history[0].id, "cached");
+  fail = false;
+  await h.refreshSessions({ sessionSnapshot: [] });
+  assert.equal(h.sessions.length, 0);
+  assert.equal(h.history[0].id, "native");
+});
+
+test("refresh preserves other profiles' cached conversations", async () => {
+  const { h } = harness(() => ({ sessions: [{ id: "new-old", profile: "old" }] }));
+  h.history = [{ id: "stale-old", profile: "old" }, { id: "cached-new", profile: "new" }];
+  await h.refreshSessions({ sessionSnapshot: [] });
+  assert.deepEqual(Array.from(h.history, session => session.id), ["cached-new", "new-old"]);
+});
+
+test("stale history reconciliation cannot replace a newer selection", async () => {
+  let finish;
+  const { h } = harness(() => new Promise(resolve => { finish = () => resolve({ sessions: [{ id: "late", profile: "old" }] }); }));
+  h.sessions = [{ id: "runtime", profile: "old" }];
+  const pending = h.refreshSessions({ sessionSnapshot: [] });
+  while (!finish) await Promise.resolve();
+  h.listVersion++; finish(); await pending;
+  assert.equal(h.sessions[0].id, "runtime");
+  assert.equal(h.history.length, 0);
+});
+
 test("explicit refresh reads profiles then roots, preserves filter/draft, replaces options and loads history", async () => {
   const { h, filter } = harness(catalog);
   const current = h.current, draft = current.record.draft;
