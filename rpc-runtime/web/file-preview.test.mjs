@@ -50,11 +50,13 @@ for (const extension of ["md", "markdown"]) {
     const f = fixtures();
     const content = f.document.createElement("section");
     let args;
-    const { node } = await createFilePreview(new Blob(["# heading"]), `notes.${extension}`, {
+    const preview = await createFilePreview(new Blob(["# heading"]), `notes.${extension}`, {
       ...f, renderMarkdown(...values) { args = values; return content; },
     });
     assert.deepEqual(args, ["# heading"]);
-    assert.equal(node.children[0], content);
+    assert.equal(preview.node.children[0], content);
+    assert.equal(preview.text, "# heading", "copy uses Markdown source rather than rendered text");
+    assert.equal(preview.truncated, false);
   });
 }
 

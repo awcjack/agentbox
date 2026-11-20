@@ -742,4 +742,4 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .file-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); }
 .file-preview img { display: block; max-width: 100%; max-height: 60dvh; object-fit: contain; margin: auto; }
 .file-preview iframe { display: block; width: 100%; height: 60dvh; border: 0; background: white; }
-@media(max-width:720px) { .topbar #preview-file { grid-row: 4; grid-column: 1 / 3; justify-self: start; } }
+@media(max-width:720px) { .topbar #open-file { grid-row: 4; grid-column: 1 / 3; justify-self: start; } }

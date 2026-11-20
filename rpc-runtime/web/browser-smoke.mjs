@@ -889,7 +889,7 @@ try {
       // Preview uses the same authenticated file read, never the managed browser.
       const previewFile = async (path) => {
         page.once("dialog", (dialog) => dialog.accept(path));
-        await page.locator("#preview-file").click();
+        await page.locator("#open-file").click();
         await page.locator('#context-pane[data-mode="workspace-file"]').waitFor();
         await until(() => page.locator("#download-context-file").isEnabled(), "workspace preview loaded");
       };
@@ -931,7 +931,7 @@ try {
       assert.equal(await page.locator("#download-context-file").isDisabled(), true, "no download before file arrives");
       await page.locator("#close-context-pane").click();
       session.holdDownload = false; session.releaseDownload();
-      await until(() => page.locator("#preview-file").isEnabled(), "closed preview request settled");
+      await until(() => page.locator("#open-file").isEnabled(), "closed preview request settled");
       assert.equal(await page.locator("#context-pane").isVisible(), false, "late reads do not reopen a closed pane");
       assert.equal(await page.locator("#download-context-file").isVisible(), false);
       assert.equal(modelOrShellCalls(), beforeDownloadCommands, "file previews never prompt the model or run bash");

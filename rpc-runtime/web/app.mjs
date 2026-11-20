@@ -76,7 +76,7 @@ let current = null, sessions = [], profiles = [], history = [], readOnly = false
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
 let browserPanel = null, browserBinding = null;
-let filePreview = null, previewBinding = null, contextRevision = 0;
+let filePreview = null, previewBinding = null, contextRevision = 0, contextText = null;
 const records = new Map();
 const baseTitle = document.title;
 const attention = createAttentionTracker();
@@ -167,8 +167,7 @@ function canDownloadFile(ctx) {
 }
 function updateControls() {
   const ctx = current;
-  $("download-file").disabled = !canDownloadFile(ctx) || Boolean(ctx?.record.downloading);
-  $("preview-file").disabled = $("download-file").disabled;
+  $("open-file").disabled = !canDownloadFile(ctx) || Boolean(ctx?.record.downloading);
   if (previewBinding && (previewBinding.ctx !== ctx || previewBinding.nativeId !== ctx?.meta.nativeSessionId || !canDownloadFile(ctx))) closeContextPane();
   $("open-browser").disabled = !browserViewAvailable(ctx);
   if (browserPanel && (!browserViewAvailable(ctx) || browserBinding?.ctx !== ctx || browserBinding?.nativeId !== ctx?.meta.nativeSessionId)) closeContextPane();
@@ -1007,6 +1006,9 @@ function forgetRecent(...ids) {
 function closeContextPane() {
   contextRevision++;
   previewBinding = null;
+  contextText = null;
+  $("copy-context-file").hidden = true;
+  $("copy-context-file").textContent = "Copy content";
   filePreview?.dispose(); filePreview = null;
   $("download-context-file").hidden = true;
   $("download-context-file").disabled = true;
@@ -1060,6 +1062,8 @@ function openContextPane(path) {
   $("context-pane-path").textContent = pathBreadcrumb(preview?.path || path);
   $("context-pane-path").title = preview?.path || path;
   body.replaceChildren();
+  contextText = preview?.text ?? null;
+  $("copy-context-file").hidden = contextText === null;
   if (!preview?.text) {
     body.append(element("p", "context-pane-empty", "No transcript content is available for this path yet. Open a matching read/write/edit tool result, or wait for the agent to finish writing it."));
   } else if (isMarkdownPath(preview.path)) {
@@ -1700,26 +1704,27 @@ async function openConversationAction(ctx, message, action) {
   finally { ctx.record.conversationBusy = false; if (active(ctx)) { updateControls(); requestRefresh(ctx); } }
 }
 
-// Keep the manual action next to Export without changing the static HTML contract.
-const downloadFileButton = element("button", "text-button", "Download file…");
-downloadFileButton.id = "download-file"; downloadFileButton.type = "button"; downloadFileButton.disabled = true;
-downloadFileButton.title = "Download a workspace file by relative or absolute path (maximum 16 MiB; no symlinks or private /tmp files)";
-$("export-conversation").before(downloadFileButton);
-downloadFileButton.addEventListener("click", () => {
+// One entry point opens a preview with a download action in its header.
+const openFileButton = element("button", "text-button", "Open file…");
+openFileButton.id = "open-file"; openFileButton.type = "button"; openFileButton.disabled = true;
+openFileButton.title = "Preview or download a workspace file (maximum 16 MiB)";
+$("export-conversation").before(openFileButton);
+openFileButton.addEventListener("click", () => {
   const ctx = current;
   if (!canDownloadFile(ctx) || ctx.record.downloading) return;
-  const filePath = window.prompt("Download workspace file (maximum 16 MiB). Enter a relative path from this session's working directory or an absolute workspace path. Symlinks and private /tmp files are not supported:");
-  if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim());
-});
-const previewFileButton = element("button", "text-button", "Preview file…");
-previewFileButton.id = "preview-file"; previewFileButton.type = "button"; previewFileButton.disabled = true;
-previewFileButton.title = "Preview a workspace file in this browser (maximum 16 MiB)";
-downloadFileButton.before(previewFileButton);
-previewFileButton.addEventListener("click", () => {
-  const ctx = current;
-  if (!canDownloadFile(ctx) || ctx.record.downloading) return;
-  const filePath = window.prompt("Preview workspace file (maximum 16 MiB). Enter a relative or absolute workspace path:");
+  const filePath = window.prompt("Preview or download workspace file (maximum 16 MiB). Enter a relative or absolute workspace path. Symlinks and private /tmp files are not supported:");
   if (filePath?.trim()) downloadWorkspaceFile(ctx, filePath.trim(), { preview: true });
+});
+$("copy-context-file").addEventListener("click", async () => {
+  const text = contextText, ownRevision = contextRevision;
+  if (text === null) return;
+  const copied = await copyText(text);
+  if (ownRevision !== contextRevision) return;
+  if (copied) showNotice("Preview content copied.");
+  else {
+    $("copy-text").value = text; $("copy-dialog").showModal();
+    $("copy-text").focus(); $("copy-text").select();
+  }
 });
 $("download-context-file").addEventListener("click", () => {
   if (previewBinding?.blob && canDownloadFile(previewBinding.ctx)) saveDownload(previewBinding.blob, previewBinding.filename);
@@ -1752,6 +1757,9 @@ async function downloadWorkspaceFile(ctx, filePath, { preview = false } = {}) {
         const result = await createFilePreview(blob, filename, { renderMarkdown, valid });
         if (!valid()) { result.dispose(); return; }
         filePreview = result; previewBinding = { ctx, nativeId, blob, filename };
+        contextText = result.text ?? null;
+        $("copy-context-file").hidden = contextText === null;
+        $("copy-context-file").textContent = result.truncated ? "Copy preview" : "Copy content";
         $("context-pane-body").replaceChildren(result.node);
         $("download-context-file").disabled = false;
         $("download-context-file").title = `Download ${filename}`;

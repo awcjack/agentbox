@@ -83,6 +83,8 @@ export async function createFilePreview(blob, filename, {
     pre.textContent = text;
     node.append(pre);
   }
+  result.text = text;
+  result.truncated = truncated;
   if (truncated) message("Preview truncated at 1 MiB. Download the file to view its full contents.");
   return result;
 }
