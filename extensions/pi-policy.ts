@@ -342,6 +342,21 @@ function rawTargets(toolName: string, input: Record<string, unknown>) {
     // are policy targets rather than silently falling back to the tool name.
     complete = collectStringTargets(input, targets)
   }
+  if (toolName === "browser") {
+    // Browser strings are page text/operations, not filenames. Keep every
+    // bounded leaf for managed text rules, but inspect literal paths separately.
+    // This also covers type and run.actions[].text without a second schema.
+    const literals = new Set<string>()
+    for (const target of [...targets]) {
+      if (target.path) continue
+      for (const value of browserPathLiterals(target.value)) {
+        if (literals.has(value)) continue
+        if (targets.length >= MAX_GENERIC_TARGETS) { complete = false; break }
+        literals.add(value)
+        targets.push({ value, path: true })
+      }
+    }
+  }
   const unique = new Map<string, PolicyTarget>()
   for (const target of targets) {
     const existing = unique.get(target.value)
@@ -353,6 +368,44 @@ function rawTargets(toolName: string, input: Record<string, unknown>) {
 function looksLikePath(target: string) {
   if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(target)) return false
   return target.startsWith("/") || target.startsWith(".") || target.startsWith("~") || target.includes("/") || target.includes("\\")
+}
+
+/** Literal inspection only, not shell parsing or a secret-content/DLP filter.
+ * URLs stay atomic and are not local paths. Quotes can delimit paths containing
+ * spaces; otherwise punctuation/whitespace delimits individual path fragments.
+ * Never send a whole prose leaf to realpath just because it contains a slash.
+ */
+function* browserPathLiterals(text: string) {
+  // Keep exact non-whitespace spellings too: punctuation may belong to an
+  // alias's filename, not just the surrounding prose. The scan below also
+  // inspects punctuation-delimited fragments. Never split URLs into paths.
+  for (const match of text.matchAll(/[^\s<>"'`]+/gu)) {
+    const value = match[0].replaceAll("\\", "/")
+    if (!value.includes("://") && looksLikePath(value)) yield value
+  }
+  const tokens = /[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s<>"'`]+|"[^"\r\n]+"|'[^'\r\n]+'|`[^`\r\n]+`|[^\s<>"'`()\[\]{},;:!?=]+/gu
+  for (const match of text.matchAll(tokens)) {
+    const token = match[0]
+    if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(token)) continue
+    const quoted = /^["'`]/u.test(token)
+    const literal = (quoted ? token.slice(1, -1) : token).replaceAll("\\", "/")
+    // Inspect both spellings: a sentence-final dot may be punctuation, but it
+    // can also be part of a real symlink's name. Never discard the latter.
+    for (const value of new Set([literal, literal.replace(/[.]+$/u, "")])) {
+      if (!value || (!/\s/u.test(value) && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//u.test(value))) continue
+      if (!/\s/u.test(value) && (looksLikePath(value) || isSensitivePath(`/${value}`))) yield value
+      else if (quoted) {
+        // Preserve complete rooted quoted paths (and aliases) with spaces. Also
+        // inspect fragments inside quoted prose rather than treating it as a file.
+        if (/^(?:\/|\.{1,2}\/|~\/)/u.test(value)) yield value
+        yield* browserPathLiterals(value)
+      }
+    }
+  }
+}
+
+function isPathTarget(toolName: string, target: PolicyTarget) {
+  return target.path || (toolName !== "browser" && looksLikePath(target.value))
 }
 
 function expandPath(path: string, cwd: string, home: string) {
@@ -452,7 +505,7 @@ async function immutableReason(
   // extracted targets below (including canonical aliases), not its basename.
   const pathTargets = toolName === "bash" ? [] : FILE_TOOLS.has(toolName)
     ? targets
-    : targets.filter((target) => target.path || looksLikePath(target.value))
+    : targets.filter((target) => isPathTarget(toolName, target))
 
   if (pathTargets.length > 0) {
     for (const target of pathTargets) {
@@ -491,7 +544,7 @@ async function matchTargetGroups(toolName: string, input: Record<string, unknown
 
   const groups: string[][] = []
   for (const target of targets) {
-    if (!fileTool && (!genericTool || (!target.path && !looksLikePath(target.value)))) {
+    if (!fileTool && (!genericTool || !isPathTarget(toolName, target))) {
       groups.push([target.value])
       continue
     }

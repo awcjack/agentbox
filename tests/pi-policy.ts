@@ -1092,6 +1092,84 @@ for (const extra of [{ context: undefined }, { context: {} }, { toolCallId: "" }
   assert.equal((await browserAllow.requestBrowser(browserClick, context(), extra)).block, true)
 }
 
+// Browser prose is rule-matchable text, not one filename. Exercise both entry
+// points with real filesystem canonicalization so ENAMETOOLONG cannot hide
+// behind a permissive realpath stub. No browser executor is registered here.
+symlinkSync(join(root, "safe", ".env"), join(root, "leak."))
+symlinkSync(join(root, "safe", ".env"), join(root, "leak space."))
+for (const name of ["leak!", "leak,", "leak=alias", "leak(alias)"]) {
+  symlinkSync(join(root, "safe", ".env"), join(root, name))
+}
+const browserProse = [
+  `${"Build an accessible application with clear navigation. ".repeat(16)}\nUse docs/tests for guidance.`,
+  "Use src/components and docs/tests.\nShow 1/2 and 3/4 as fractions.",
+  "CSS: color: rgb(0 0 0 / 50%); font: 16px/1.5 sans-serif;\nUse grid-column: 1 / 3;",
+  "See https://example.com/docs/tests?q=a/b and https://example.com/.env.\nKeep these as URLs.",
+  "Use `docs/tests`, (src/components), and/or optional sections.\nDo not change the fixture.",
+  `Visit "https://example.com/${"a".repeat(400)}/.env" and keep the address as page text.`,
+  'Quote "Use docs/tests and 1/2 fractions" in the page.',
+  `Quote "${"Build accessible navigation. ".repeat(30)}Use docs/tests" in the page.`,
+  "Document `.env.example` `.env.sample` and `.env.template` as templates.\nThese are ordinary template names.",
+]
+for (const nested of [false, true]) {
+  const instance = harness(allowConfig, {}, false)
+  await instance.lifecycle("session_start")
+  const invoke = (input: any, ctx = context({ cwd: root })) => nested ? instance.requestBrowser(input, ctx) : call(instance.toolCall, "browser", input, ctx)
+  for (const text of browserProse) {
+    const readsBefore = instance.reads.length
+    assert.equal(await invoke({ action: "fill", ref: "@e1", text }), undefined, text)
+    assert.equal(instance.reads.length, readsBefore + 1, "ordinary prose reaches managed configuration")
+  }
+  for (const text of [".env", "/workspace/project/.env", "Please inspect `/workspace/project/.env` first.",
+    "Use ~/.ssh/id_ed25519.", "Do not paste credentials.json!", 'Inspect "/workspace/a folder/.env".',
+    'Quote "https://example.com and /workspace/project/.env".',
+    `Use docs/tests.\n${"Ordinary text. ".repeat(60)}\n/workspace/project/.env`]) {
+    const readsBefore = instance.reads.length
+    assert.match((await invoke({ action: "fill", ref: "@e1", text })).reason, /sensitive path/, text)
+    assert.equal(instance.reads.length, readsBefore, "literal sensitive paths still block before configuration")
+  }
+  for (const text of [`Please inspect ${root}/leak now.`, `${root}/leak.`, `Inspect "${root}/leak space." now.`,
+    'Inspect "./leak space." now.', ...["leak!", "leak,", "leak=alias", "leak(alias)"].map(name => `${root}/${name}`)]) {
+    assert.match((await invoke({ action: "fill", ref: "@e1", text })).reason, /sensitive path/)
+  }
+  assert.match((await invoke({ action: "fill", ref: "@e1", text: Array.from({ length: 129 }, (_, i) => `docs/file-${i}`).join(" ") })).reason, /target limits/)
+  const longPath = `./${"x".repeat(300)}/file`
+  assert.match((await invoke({ action: "fill", ref: "@e1", text: longPath })).reason, /canonicalize/)
+  assert.match((await call(instance.toolCall, "read", { path: longPath }, context({ cwd: root }))).reason, /canonicalize/)
+
+  // Canonical aliases remain subject to path-specific managed denials.
+  const canonical = harness(JSON.stringify({ version: 1, defaultDecision: "allow", rules: [
+    { tools: ["browser"], patterns: [`${root}/safe/**`], decision: "deny" },
+  ] }), {}, false)
+  await canonical.lifecycle("session_start")
+  const aliasInput = { action: "fill", ref: "@e1", text: `Inspect ${root}/alias/file.txt first.` }
+  assert.match((nested ? await canonical.requestBrowser(aliasInput) : await call(canonical.toolCall, "browser", aliasInput)).reason, /Denied/)
+
+  for (const decision of ["allow", "deny", "ask"]) {
+    const policy = harness(autoPolicy({ defaultDecision: "allow", rules: [
+      { tools: ["browser"], patterns: [browserProse[0]], decision },
+    ] }), {}, false)
+    await policy.lifecycle("session_start")
+    let prompts = 0
+    const ctx = context({ ui: { select: async () => { prompts++; return "Allow once" } } })
+    const input = { action: "fill", ref: "@e1", text: browserProse[0] }
+    const result = nested ? await policy.requestBrowser(input, ctx) : await call(policy.toolCall, "browser", input, ctx)
+    if (decision === "deny") assert.match(result.reason, /Denied/)
+    else assert.equal(result, undefined)
+    assert.equal(prompts, decision === "ask" ? 1 : 0)
+    if (decision === "deny") {
+      await policy.command("on")
+      assert.match((nested ? await policy.requestBrowser(input, ctx) : await call(policy.toolCall, "browser", input, ctx)).reason, /Denied/)
+    }
+  }
+}
+// The same extraction covers visual typing and text inside bounded run actions.
+for (const text of browserProse) {
+  assert.equal(await call(browserAllow.toolCall, "browser", { action: "type", text }), undefined)
+  assert.equal(await call(browserAllow.toolCall, "browser", { action: "run", goal: text, actions: [{ action: "fill", role: "textbox", name: "Prompt", text }] }), undefined)
+}
+assert.match((await call(browserAllow.toolCall, "browser", { action: "run", actions: [{ action: "fill", text: "/workspace/project/.env" }] })).reason, /sensitive path/)
+
 const browserDeny = harness(autoPolicy({ rules: [{ tools: ["browser"], patterns: ["click"], decision: "deny" }] }), {}, false)
 await browserDeny.lifecycle("session_start")
 await browserDeny.command("on")
