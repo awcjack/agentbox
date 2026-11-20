@@ -71,6 +71,15 @@ changed to `allow` or `deny`. Task prompts
 and bounded string arguments from MCP/custom tools are policy targets. The
 policy, workflow, and shared runtime JSON files are generated declaratively,
 mounted read-only, and cannot be replaced by Pi or project configuration.
+Browser string arguments remain managed-rule text targets; only extracted literal
+paths (including quoted rooted paths with spaces) undergo filesystem inspection,
+not entire prose strings containing slashes. URLs remain text. Extracted sensitive
+paths and canonical aliases still fail closed, including in nested browser fills.
+Quote paths containing spaces and use `/`, `./`, `../`, or `~/` prefixes to make
+their path intent explicit; arbitrary prose is not a filesystem argument. This
+heuristic inspection is not a secret-content/DLP filter. Browser deny/ask
+rules and approval behavior are unchanged. Pick up policy repairs through the
+normal image rebuild/redeploy and a new Pi process, not a live policy hot-patch.
 
 A Pi `bash` approval is approval of the submitted command string, not a command
 sandbox. The policy rejects listed immutable operations and inspects obvious
