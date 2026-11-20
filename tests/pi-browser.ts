@@ -9,7 +9,7 @@ import { spawn } from "node:child_process"
 import { once } from "node:events"
 import { Duplex } from "node:stream"
 import { setTimeout as delay } from "node:timers/promises"
-import { createBrowserClient } from "../extensions/browser-channel.mjs"
+import { BROWSER_OPERATION_TIMEOUT_MS, BROWSER_REQUEST_TIMEOUT_MS, createBrowserClient } from "../extensions/browser-channel.mjs"
 import { BrowserSession, browserArgs, humanBrowserCommands, parseBrowserConfig, createPiBrowserExtension, runBrowser, withBrowserLock } from "../extensions/pi-browser.ts"
 import type { BrowserConfig, BrowserRunner, RunOptions, BrowserLock } from "../extensions/pi-browser.ts"
 import { snapshotRef, runFixtureBrowser } from "./browser-smoke-helpers.ts"
@@ -1338,6 +1338,80 @@ test("private duplex integration binds requests to the current native ID before 
   await assert.rejects(request(nativeOne, "status"), { code: "browser_session_changed" })
   await assert.rejects(request(nativeTwo, "renew", { browserSessionId: initial.browserSessionId, leaseId: oldLease.leaseId }), { code: "browser_session_changed" })
   assert.deepEqual(next.control, { mode: "agent" }, "native replacement must not inherit the old lease")
+})
+
+for (const inventory of ["session info", "get cdp-url", "tab list"]) test(`slow takeover ${inventory} cancels without closing the bridge or quarantining the browser`, async t => {
+  const [clientStream, extensionStream] = duplexPair()
+  const client = createBrowserClient(clientStream)
+  const h = harness(fakeBrowser(), async () => ({ browser: config({ delegation: "tabs", commandTimeoutMs: 30000 }) }), { PI_BROWSER_RPC_FD: "3" }, extensionStream)
+  t.after(async () => { client.close(); await h.stop() })
+  await h.start(nativeOne)
+  await h.execute({ action: "snapshot" })
+  const request = (operation: string, payload = {}) => client.request(nativeOne, operation, payload, principal)
+  const initial = await request("status")
+  const entered = deferred()
+  let signal: AbortSignal | undefined
+  h.fake.hook = async c => {
+    if (c.command.join(" ") !== inventory) return
+    signal = c.options.signal!
+    entered.resolve()
+    await new Promise((_resolve, reject) => signal!.addEventListener("abort", () => reject(new Error("private inventory cancellation")), { once: true }))
+  }
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const acquiring = assert.rejects(request("acquire", { browserSessionId: initial.browserSessionId }), { code: "browser_failed", message: "Browser operation failed" })
+  await entered.promise
+  t.mock.timers.tick(BROWSER_OPERATION_TIMEOUT_MS - 1)
+  assert.equal(signal!.aborted, false)
+  t.mock.timers.tick(1)
+  await acquiring
+  assert.equal(signal!.aborted, true)
+  assert.equal(client.closed, false)
+  const root = h.root().PI_BROWSER_ROOT
+  await assert.rejects(fs.stat(join(root, "control.json")), { code: "ENOENT" })
+  await assert.rejects(fs.stat(join(root, "operation.json")), { code: "ENOENT" }, "read-only inventory must not leave an interrupted mutation")
+  assert.equal((await h.execute({ action: "status" })).details.browser.status, "ready")
+  h.fake.hook = undefined
+  assert.equal((await request("status")).ready, true)
+  assert.equal((await request("frame")).browserSessionId, initial.browserSessionId)
+  const lease = await request("acquire", { browserSessionId: initial.browserSessionId })
+  await request("release", { browserSessionId: initial.browserSessionId, leaseId: lease.leaseId })
+  await new Promise(resolve => setImmediate(resolve))
+  t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS)
+  assert.equal(client.closed, false, "settled operations must clear their bridge deadlines")
+})
+
+test("soft bridge deadline during human input keeps the bridge but quarantines ambiguous page work", async t => {
+  const [clientStream, extensionStream] = duplexPair()
+  const client = createBrowserClient(clientStream)
+  const h = harness(fakeBrowser(), undefined, { PI_BROWSER_RPC_FD: "3" }, extensionStream)
+  t.after(async () => { client.close(); await h.stop() })
+  await h.start(nativeOne)
+  await h.execute({ action: "snapshot" })
+  const request = (operation: string, payload = {}) => client.request(nativeOne, operation, payload, principal)
+  const status = await request("status")
+  const lease = await request("acquire", { browserSessionId: status.browserSessionId })
+  const frame = await request("frame")
+  const entered = deferred()
+  h.fake.hook = async c => {
+    if (c.command[0] !== "click") return
+    entered.resolve()
+    await new Promise((_resolve, reject) => c.options.signal!.addEventListener("abort", () => reject(new Error("private input cancellation")), { once: true }))
+  }
+  t.mock.timers.enable({ apis: ["setTimeout"] })
+  const mutation = assert.rejects(request("input", { browserSessionId: status.browserSessionId, leaseId: lease.leaseId, frameId: frame.frameId, request: { action: "click", ref: "@e1" } }), { code: "browser_failed" })
+  await entered.promise
+  t.mock.timers.tick(BROWSER_OPERATION_TIMEOUT_MS)
+  await mutation
+  assert.equal(client.closed, false)
+  assert.equal((await request("status")).ready, false)
+  assert.equal((await h.execute({ action: "status" })).details.browser.status, "uncertain")
+  await assert.rejects(request("frame"), { code: "browser_unavailable" })
+  await request("release", { browserSessionId: status.browserSessionId, leaseId: lease.leaseId })
+  assert.equal(h.fake.calls.filter(c => c.command[0] === "click").length, 1, "ambiguous input is never replayed")
+  h.fake.hook = undefined
+  await h.execute({ action: "close" })
+  await h.execute({ action: "snapshot" })
+  assert.equal((await request("status")).ready, true)
 })
 
 test("duplex channel disconnect cancels input, removes the lease, and disables live capabilities", async t => {

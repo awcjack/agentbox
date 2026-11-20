@@ -393,7 +393,7 @@ export class BrowserSession {
     if (this.shared) {
       const owner = await this.cli("owner", ["session", "info"], signal)
       if (!owner.active || !owner.runtime?.browserLaunched) { this.uncertain = true; throw controlError("browser_unavailable") }
-      const endpoint = await this.cli("owner", ["get", "cdp-url"], signal)
+      const endpoint = await this.cli("owner", ["get", "cdp-url"], signal, ["--action-policy", join(this.root, "control-policy.json")])
       if (endpoint.cdpUrl !== this.cdp) { this.uncertain = true; throw controlError("browser_session_changed") }
       const tabs = await this.existingCli(["tab", "list"], signal)
       if (!tabs.tabs?.some((tab: any) => tab.active === true && tab.targetId === this.targetId)) {
@@ -442,8 +442,10 @@ export class BrowserSession {
         return { ...this.controlBinding(), accepted: true }
       }
       if (interrupted) throw controlError("browser_unavailable")
-      return this.tracked(async () => {
+      // Inventory is read-only and launch-denied. Cancelling a slow takeover
+      // here must not journal an interrupted page mutation or poison the family.
       await this.existingBrowser(combined)
+      return this.tracked(async () => {
       // Inventory itself awaits CLI work; a lease may expire during those reads.
       lease = await this.lease()
       if (operation === "frame") {
@@ -569,7 +571,8 @@ export class BrowserSession {
         if (await this.lease()) throw controlError("browser_control_held")
         if (await this.interruptedOperation()) throw controlError("browser_unavailable")
         this.frames.clear()
-        return this.tracked(async () => { await this.existingBrowser(signal); return work() })
+        await this.existingBrowser(signal)
+        return this.tracked(work)
       })
     })
     this.queue = operation.catch(() => {})
