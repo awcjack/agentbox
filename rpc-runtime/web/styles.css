@@ -312,6 +312,7 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 /* Right-side file preview (Codex-style docs pane). */
 .workspace { position: relative; }
 .context-pane {
+  position: relative;
   display: none;
   min-width: 0;
   min-height: 0;
@@ -322,18 +323,22 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .workspace.context-open .context-pane { display: flex; }
 @media (min-width: 1100px) {
   .workspace.context-open {
-    grid-template-columns: clamp(64px, var(--sidebar-width, var(--sidebar-default-width, 260px)), min(480px, calc(100vw - 720px))) minmax(0, 1fr) minmax(300px, min(42vw, 560px));
+    grid-template-columns: clamp(64px, var(--sidebar-width, var(--sidebar-default-width, 260px)), min(480px, calc(100vw - 720px))) minmax(280px, 1fr) minmax(240px, min(var(--context-width, min(42vw, 560px)), calc(100vw - clamp(64px, var(--sidebar-width, 260px), 480px) - 280px)));
   }
 }
 @media (max-width: 1099px) {
   .workspace.context-open .context-pane {
     position: absolute;
     inset: 0 0 0 auto;
-    width: min(100vw, 420px);
+    width: min(100vw, var(--context-width, 420px));
     z-index: 15;
     box-shadow: -12px 0 40px #0008;
   }
 }
+.context-resizer { position: absolute; inset: 0 auto 0 -5px; width: 10px; z-index: 16; cursor: col-resize; touch-action: none; }
+.context-resizer:hover, .context-resizer:focus-visible, .context-resizing .context-resizer { background: var(--accent); }
+.workspace.context-resizing, .workspace.context-resizing * { cursor: col-resize!important; user-select: none!important; }
+@media (max-width: 720px) { .context-resizer { display: none; } }
 .context-pane-header {
   display: flex;
   align-items: center;
@@ -687,19 +692,37 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .browser-frame[hidden] { display: none; }
 .browser-frame[data-stale="true"] { opacity: .55; }
 .browser-viewport { position: relative; width: 100%; min-width: min(240px, 100%); min-height: 160px; aspect-ratio: 16 / 9; max-width: 100%; max-height: 75dvh; resize: both; overflow: hidden; border: 1px solid #333; border-radius: 8px; background: #090909; }
-.browser-viewport.is-expanded { position: fixed; left: 16px; top: 64px; width: calc(100vw - 32px); height: calc(100dvh - 80px); max-width: calc(100vw - 32px); max-height: calc(100dvh - 80px); z-index: 40; box-shadow: 0 0 0 100vmax #000c; }
+.browser-viewport.is-expanded { height: min(65dvh, 720px); resize: none; }
+/* Expand within the workspace: keep sessions, conversation and composer accessible. */
+@media (min-width: 721px) {
+  .workspace.context-open:has(.browser-viewport.is-expanded) {
+    grid-template-columns: clamp(64px, var(--sidebar-width, var(--sidebar-default-width, 260px)), min(480px, calc(100vw - 620px))) minmax(280px, 1fr) minmax(240px, min(var(--context-width, 55vw), calc(100vw - clamp(64px, var(--sidebar-width, 260px), max(64px, calc(100vw - 620px))) - 280px)));
+  }
+  .workspace.context-open:has(.browser-viewport.is-expanded) .context-pane {
+    position: relative; width: auto; box-shadow: none;
+  }
+}
+@media (max-width: 720px) {
+  .workspace.context-open:has(.browser-viewport.is-expanded) { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+  .workspace.context-open:has(.browser-viewport.is-expanded) .context-pane {
+    position: static; width: auto; min-height: 0; grid-column: 1 / -1; grid-row: 2; box-shadow: none;
+  }
+  .browser-viewport.is-expanded { height: 30dvh; min-height: 160px; }
+}
+.browser-viewport.is-fullscreen { position: fixed; left: 16px; top: 64px; width: calc(100vw - 32px); height: calc(100dvh - 80px); max-width: calc(100vw - 32px); max-height: calc(100dvh - 80px); resize: none; z-index: 40; box-shadow: 0 0 0 100vmax #000c; }
 .browser-viewport .browser-control-row { position: absolute; left: 8px; bottom: 8px; z-index: 2; gap: 4px; padding: 4px; background: #141414e8; border: 1px solid #555; border-radius: 8px; backdrop-filter: blur(8px); }
 .browser-control-row .text-button { padding: 6px 8px; color: #eee; }
 .browser-control-row .text-button:first-child:not(:disabled) { background: var(--accent); color: #201912; border-radius: 5px; }
 .browser-control-row[data-held="true"] .text-button:first-child { display: none; }
 .browser-control-row[data-held="false"] .text-button:nth-child(2) { display: none; }
+.browser-viewport:is(.is-expanded, .is-fullscreen) .browser-resize-hint { display: none; }
 .browser-resize-hint { position: absolute; right: 18px; bottom: 6px; font-size: 9px; color: #bbb; pointer-events: none; text-shadow: 0 1px 2px #000; }
 .browser-preview-options { display: flex; align-items: center; gap: 10px; }
 .browser-address-bar { display: flex; align-items: center; gap: 3px; min-width: 0; background: #1e1e1e; padding: 4px; border: 1px solid var(--border); border-radius: 8px; }
 .browser-address-bar input { flex: 1; min-width: 0; font-size: 12px; }
 .browser-address-bar .text-button { flex-shrink: 0; padding: 6px; font-size: 13px; }
 .browser-address-bar input[readonly] { color: var(--muted); }
-.browser-panel:has(.browser-viewport.is-expanded) .browser-address-bar { position: fixed; left: 16px; right: 16px; top: 12px; height: 44px; z-index: 41; }
+.browser-panel:has(.browser-viewport.is-fullscreen) .browser-address-bar { position: fixed; left: 16px; right: 16px; top: 12px; height: 44px; z-index: 41; }
 .browser-panel .browser-resolution { display: grid; grid-template-columns: 1fr 1fr; }
 .browser-resolution label:first-of-type, .browser-resolution button { grid-column: 1 / -1; }
 .browser-panel details > summary { cursor: pointer; padding: 8px 0; color: var(--muted); font-size: 12px; }

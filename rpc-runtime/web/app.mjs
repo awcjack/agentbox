@@ -15,6 +15,7 @@ import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "
 import { mountBrowserPanel } from "./browser-panel.mjs";
 import { fetchDownload, saveDownload } from "./downloads.mjs";
 import { createFilePreview } from "./file-preview.mjs";
+import { initContextResize } from "./context-resize.mjs";
 import { canNavigatePromptHistory, createPromptHistory } from "./prompt-history.mjs";
 
 let preferenceStorage;
@@ -45,6 +46,7 @@ const rowSources = new Map();
 const renaming = new Set();
 
 initSidebarResize();
+initContextResize();
 
 const $ = (id) => document.getElementById(id);
 // Upgrade the HTML `open` fallback to a modal as early as possible so a later

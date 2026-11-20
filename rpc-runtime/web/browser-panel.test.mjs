@@ -486,6 +486,11 @@ test("wheel is intercepted only during takeover; resolution changes reach the br
   assert.equal(widthInput.value, "390"); assert.equal(heightInput.value, "844");
   const mutations = f.mutations("input").length;
   button("Expand preview").listeners.click(); assert.match(viewport.className, /is-expanded/);
+  assert.doesNotMatch(viewport.className, /is-fullscreen/);
+  button("Full screen").listeners.click(); assert.match(viewport.className, /is-fullscreen/);
+  assert.doesNotMatch(viewport.className, /is-expanded/);
+  button("Exit fullscreen").listeners.click(); assert.match(viewport.className, /is-expanded/);
+  button("Restore preview").listeners.click(); assert.equal(viewport.className, "browser-viewport");
   button("Fit preview").listeners.click(); assert.equal(viewport.className, "browser-viewport");
   assert.equal(f.mutations("input").length, mutations);
   widthInput.value = "2561"; widthInput.listeners.input(); button("Apply resolution").listeners.click(); await flush();

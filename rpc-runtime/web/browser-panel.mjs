@@ -246,15 +246,20 @@ export function mountBrowserPanel(root, options) {
   }
   const acquire = button(controls, "Take control", () => void controller.acquire());
   const release = button(controls, "Release control", () => void controller.release());
-  let expanded = false;
-  function setExpanded(value) {
-    expanded = value; viewport.className = `browser-viewport${expanded ? " is-expanded" : ""}`;
+  let viewMode = "normal";
+  function setViewMode(value) {
+    viewMode = value;
+    viewport.className = `browser-viewport${value === "normal" ? "" : ` is-${value}`}`;
     viewport.style.width = ""; viewport.style.height = "";
-    expand.textContent = expanded ? "Restore preview" : "Expand preview";
-    expand.setAttribute("aria-pressed", String(expanded));
+    expand.textContent = value === "expanded" ? "Restore preview" : "Expand preview";
+    expand.setAttribute("aria-pressed", String(value === "expanded"));
+    fullscreen.textContent = value === "fullscreen" ? "Exit fullscreen" : "Full screen";
+    fullscreen.setAttribute("aria-pressed", String(value === "fullscreen"));
   }
-  const expand = button(controls, "Expand preview", () => setExpanded(!expanded));
+  const expand = button(controls, "Expand preview", () => setViewMode(viewMode === "expanded" ? "normal" : "expanded"));
   expand.setAttribute("aria-pressed", "false");
+  const fullscreen = button(controls, "Full screen", () => setViewMode(viewMode === "fullscreen" ? "expanded" : "fullscreen"));
+  fullscreen.setAttribute("aria-pressed", "false");
   const resizeHint = node("span", "↘ Drag corner to resize", "browser-resize-hint");
   viewport.append(controls, resizeHint);
   let addressDraft = false;
@@ -279,7 +284,7 @@ export function mountBrowserPanel(root, options) {
   const go = button(addressBar, "Go", () => navigate({ action: "open", url: address.value.trim() }));
   go.setAttribute("aria-label", "Go to URL"); navigation.push(go);
   const previewOptions = node("div", "", "browser-preview-options");
-  button(previewOptions, "Fit preview", () => setExpanded(false));
+  button(previewOptions, "Fit preview", () => setViewMode("normal"));
   const dimensions = node("span", "", "field-note"); previewOptions.append(dimensions);
   const resolutionFields = node("fieldset", "", "browser-resolution"); resolutionFields.append(node("legend", "Browser viewport"));
   function resolutionField(label, input) { const wrap = node("label", label); wrap.append(input); resolutionFields.append(wrap); return input; }
