@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 // Private fd-only protocol. Never forward exception messages from either peer.
+export const BROWSER_OPERATION_TIMEOUT_MS = 8000;
+export const BROWSER_REQUEST_TIMEOUT_MS = 10000;
+
 const MAX_RECORD = 1024 * 1024;
 const MAX_BACKLOG = 2 * MAX_RECORD;
 const OPERATIONS = new Set(["status", "frame", "acquire", "renew", "release", "input"]);
@@ -84,8 +87,8 @@ function transport(stream, onRecord, onClose) {
   };
 }
 
-export function createBrowserClient(stream, { timeoutMs = 10000, maxPending = 4 } = {}) {
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 10000
+export function createBrowserClient(stream, { timeoutMs = BROWSER_REQUEST_TIMEOUT_MS, maxPending = 4 } = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > BROWSER_REQUEST_TIMEOUT_MS
     || !Number.isSafeInteger(maxPending) || maxPending < 1 || maxPending > 4) throw new TypeError("Invalid browser channel limits");
   const pending = new Map();
   const wire = transport(stream, (record) => {
@@ -129,22 +132,35 @@ export function serveBrowserChannel(stream, handler) {
       return;
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => wire.close(), 10000);
+    // Soft cancellation asks work to release its authority, but only settlement
+    // permits a response. Uncooperative work still closes the bridge at the hard deadline.
+    const workTimer = setTimeout(() => controller.abort(safeError("browser_failed")), BROWSER_OPERATION_TIMEOUT_MS);
+    const timer = setTimeout(() => wire.close(), BROWSER_REQUEST_TIMEOUT_MS);
+    workTimer.unref?.();
     timer.unref?.();
-    pending.set(record.id, { controller, timer });
+    pending.set(record.id, { controller, timer, workTimer });
     const { nativeSessionId, operation, payload, principal } = record;
     Promise.resolve().then(() => {
       if (controller.signal.aborted) throw safeError("browser_unavailable");
       return handler({ nativeSessionId, operation, payload, principal }, controller.signal);
     }).then((data) => {
-      if (!controller.signal.aborted) wire.write({ version: 1, type: "response", id: record.id, ok: true, data: data ?? null });
+      if (wire.closed) return;
+      if (controller.signal.aborted) {
+        wire.write({ version: 1, type: "response", id: record.id, ok: false, error: { code: "browser_failed", message: MESSAGES.browser_failed } });
+      } else {
+        wire.write({ version: 1, type: "response", id: record.id, ok: true, data: data ?? null });
+      }
     }, (error) => {
-      if (controller.signal.aborted) return;
-      const safe = safeError(error?.code);
+      if (wire.closed) return;
+      const safe = safeError(controller.signal.aborted ? "browser_failed" : error?.code);
       wire.write({ version: 1, type: "response", id: record.id, ok: false, error: { code: safe.code, message: safe.message } });
-    }).finally(() => { clearTimeout(timer); pending.delete(record.id); });
+    }).finally(() => { clearTimeout(workTimer); clearTimeout(timer); pending.delete(record.id); });
   }, () => {
-    for (const { controller, timer } of pending.values()) { clearTimeout(timer); controller.abort(safeError("browser_unavailable")); }
+    for (const { controller, timer, workTimer } of pending.values()) {
+      clearTimeout(workTimer);
+      clearTimeout(timer);
+      controller.abort(safeError("browser_unavailable"));
+    }
     pending.clear();
   });
   return { close: wire.close };

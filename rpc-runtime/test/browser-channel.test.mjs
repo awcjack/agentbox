@@ -4,7 +4,7 @@ import { Duplex } from "node:stream";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
-import { createBrowserClient, serveBrowserChannel } from "../browser-channel.mjs";
+import { BROWSER_OPERATION_TIMEOUT_MS, BROWSER_REQUEST_TIMEOUT_MS, createBrowserClient, serveBrowserChannel } from "../browser-channel.mjs";
 
 const NATIVE = "3d90a428-2ed7-4a53-8aef-b5f5489f0e63";
 function pair() {
@@ -148,6 +148,68 @@ test("oversized results and write backlog close rather than buffer without bound
 });
 
 
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test("soft deadline cancels cooperative work without closing the bridge", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const [a, b] = pair();
+  const client = createBrowserClient(a);
+  t.after(() => client.close());
+  let signal, calls = 0;
+  serveBrowserChannel(b, (_request, incoming) => {
+    calls++;
+    if (calls > 1) return { healthy: true };
+    signal = incoming;
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("private cancellation details")), { once: true });
+    });
+  });
+  const pending = assert.rejects(client.request(NATIVE, "acquire"), { code: "browser_failed", message: "Browser operation failed" });
+  await flush();
+  t.mock.timers.tick(BROWSER_OPERATION_TIMEOUT_MS - 1);
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(1);
+  await pending;
+  await flush();
+  assert.equal(signal.aborted, true);
+  assert.equal(client.closed, false);
+  assert.deepEqual(await client.request(NATIVE, "status"), { healthy: true });
+  await flush();
+  // Both deadlines of settled requests must be cleared.
+  t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS);
+  assert.equal(client.closed, false);
+  assert.equal(calls, 2);
+});
+
+test("soft cancellation waits for an ignoring handler and rejects its late success", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const [a, b] = pair();
+  t.after(() => a.destroy());
+  const responses = [];
+  a.on("data", (chunk) => responses.push(JSON.parse(chunk.toString())));
+  let signal, finish;
+  serveBrowserChannel(b, (_request, incoming) => {
+    signal = incoming;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  a.write(JSON.stringify(record()) + "\n");
+  await flush();
+  t.mock.timers.tick(BROWSER_OPERATION_TIMEOUT_MS);
+  await flush();
+  assert.equal(signal.aborted, true);
+  assert.equal(b.destroyed, false);
+  assert.deepEqual(responses, []);
+  t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS - BROWSER_OPERATION_TIMEOUT_MS - 1);
+  await flush();
+  assert.deepEqual(responses, []);
+  finish({ private: "must not be returned" });
+  await flush();
+  assert.deepEqual(responses, [{ version: 1, type: "response", id: "opaque-id", ok: false,
+    error: { code: "browser_failed", message: "Browser operation failed" } }]);
+  t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS);
+  assert.equal(b.destroyed, false);
+});
+
 test("server deadline aborts even when the client never sets a deadline", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const [a, b] = pair();
@@ -156,9 +218,42 @@ test("server deadline aborts even when the client never sets a deadline", async 
   a.write(JSON.stringify(record()) + "\n");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(signal.aborted, false);
-  t.mock.timers.tick(10000);
+  t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS);
   assert.equal(signal.aborted, true);
   assert.equal(b.destroyed, true);
+});
+
+for (const closure of ["hard deadline", "EOF"]) test(`${closure} aborts work and ignores late completion`, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const [a, b] = pair();
+  let signal, finish, calls = 0;
+  const responses = [];
+  a.on("data", (chunk) => responses.push(chunk));
+  serveBrowserChannel(b, (_request, incoming) => {
+    calls++;
+    signal = incoming;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  a.write(JSON.stringify(record()) + "\n");
+  await flush();
+  assert.equal(signal.aborted, false);
+  if (closure === "hard deadline") {
+    t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS - 1);
+    assert.equal(signal.aborted, true);
+    assert.equal(b.destroyed, false);
+    assert.deepEqual(responses, []);
+    t.mock.timers.tick(1);
+  } else {
+    a.end();
+    await flush();
+  }
+  assert.equal(signal.aborted, true);
+  assert.equal(b.destroyed, true);
+  finish({ late: true });
+  await flush();
+  t.mock.timers.tick(BROWSER_REQUEST_TIMEOUT_MS);
+  assert.deepEqual(responses, []);
+  assert.equal(calls, 1);
 });
 
 test("real inherited fd3 is duplex and timeout EOF aborts the child handler", { timeout: 10000 }, async (t) => {
