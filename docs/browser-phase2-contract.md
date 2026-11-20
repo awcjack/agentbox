@@ -39,10 +39,15 @@ Exports:
 - Version 1 JSONL, LF-only framing, maximum record 1 MiB, bounded requests and
   write backlog. Correlated opaque request IDs, request deadline, fail closed on
   malformed/oversized protocol, reject on EOF. No stdout or filesystem discovery.
-  Client and server deadlines are at most 10 seconds. Timeout closes the bridge
+  The server cancels handler work after 8 seconds, leaving 2 seconds for cleanup
+  before the hard 10-second client/server deadlines. It waits for handler settlement
+  before returning sanitized `browser_failed`, never a late success, and retains
+  the bridge. No mutation is retried; interrupted page work remains quarantined.
+  Read-only, launch-denied takeover inventory does not journal page mutations.
+  Unsettled work at the hard deadline or a protocol failure closes the bridge
   permanently and aborts handlers; the HTTP layer reports `browser_bridge_closed`
   and the UI stops polling with process-restart guidance. This intentionally
-  avoids reuse of an ambiguous mutation transport.
+  avoids reuse while ambiguous work is still running.
 - Request `{version:1,type:"request",id,nativeSessionId,operation,payload,principal}`;
   response `{version:1,type:"response",id,ok:true,data}` or
   `{version:1,type:"response",id,ok:false,error:{code,message}}`.

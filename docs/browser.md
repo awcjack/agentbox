@@ -394,8 +394,13 @@ outside this cooperative arbitration boundary.
 
 RPC uses a private inherited descriptor, never a discoverable socket or CDP URL.
 Requests have a hard 10-second bridge deadline, separate from model tool timeouts.
-A timeout/protocol failure closes the bridge permanently, revokes control and
-requires restarting that conversation process; reopening the pane is insufficient.
+After 8 seconds the bridge cancels slow work, waiting for cleanup before returning
+an error without closing the connection. Takeover inventory is read-only and
+launch-denied, so cancellation there does not quarantine a healthy browser.
+Interrupted page actions still require explicit browser recovery and are never
+retried. Work that does not settle by the hard deadline, or a protocol failure,
+closes the bridge permanently, revokes control and requires restarting that
+conversation process; reopening the pane is insufficient.
 The UI stops polling and reports this condition. Preview size/encoding failures
 alone do not make a healthy browser uncertain.
 
