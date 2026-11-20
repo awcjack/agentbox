@@ -420,6 +420,14 @@ export function mountBrowserPanel(root, options) {
     }
   });
   refs.addEventListener("change", () => { click.disabled = fill.disabled = !controller.getState().canInput || !refs.value; });
+  // Restore presentation only, after the mode controls have been initialized.
+  // Never hydrate frames, leases, navigation or input drafts from viewState.
+  const initialView = options.viewState;
+  setViewMode(["normal", "expanded", "fullscreen"].includes(initialView?.mode) ? initialView.mode : "normal");
+  viewport.style.width = typeof initialView?.width === "string" ? initialView.width : "";
+  viewport.style.height = typeof initialView?.height === "string" ? initialView.height : "";
   controller.start();
-  return { dispose() { direct.dispose(); controller.dispose(); shownFrame = null; shownRefs = ""; image.removeAttribute("src"); address.value = keyboard.value = text.value = key.value = url.value = ""; root.replaceChildren(); } };
+  return {
+    getViewState() { return { mode: viewMode, width: viewport.style.width, height: viewport.style.height }; },
+    dispose() { direct.dispose(); controller.dispose(); shownFrame = null; shownRefs = ""; image.removeAttribute("src"); address.value = keyboard.value = text.value = key.value = url.value = ""; root.replaceChildren(); } };
 }

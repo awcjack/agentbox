@@ -541,3 +541,38 @@ test("app lifecycle seams dispose browser before auth reset and preserve file mo
   assert.match(html, /id="open-browser"/);
   assert.match(html, /img-src[^;]*data:/);
 });
+
+for (const mode of ["normal", "expanded", "fullscreen"]) {
+  test(`layout snapshot restores ${mode} and dimensions without restoring browser authority or drafts`, async () => {
+    const doc = { createElement: tag => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+    const f = fixture();
+    const viewState = { mode, width: "875px", height: "62vh", frameId: "old-frame", leaseId: "old-lease", text: "private draft", url: "https://draft.test/" };
+    const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time, viewState });
+    const all = el => [el, ...el.children.flatMap(all)], nodes = all(root);
+    const viewport = nodes.find(n => n.className?.startsWith("browser-viewport"));
+    const expected = { mode, width: "875px", height: "62vh" };
+    assert.deepEqual(mounted.getViewState(), expected);
+    assert.equal(viewport.className, `browser-viewport${mode === "normal" ? "" : ` is-${mode}`}`);
+    const pressed = label => nodes.find(n => n.tag === "button" && n.textContent === label).attributes["aria-pressed"];
+    assert.equal(pressed(mode === "expanded" ? "Restore preview" : "Expand preview"), String(mode === "expanded"));
+    assert.equal(pressed(mode === "fullscreen" ? "Exit fullscreen" : "Full screen"), String(mode === "fullscreen"));
+    await flush();
+    assert.deepEqual(mounted.getViewState(), expected);
+    assert.equal(f.calls.filter(c => c.body).length, 0);
+    assert.ok(nodes.filter(n => n.tag === "textarea").every(n => n.value === ""));
+    assert.equal(nodes.find(n => n.attributes["aria-label"] === "Browser URL").value, "https://example.test/start");
+    viewport.style.width = "940px";
+    const snapshot = mounted.getViewState();
+    assert.equal(snapshot.width, "940px");
+    snapshot.mode = "fullscreen"; snapshot.width = "1px";
+    assert.deepEqual(mounted.getViewState(), { ...expected, width: "940px" });
+    nodes.find(n => n.tag === "button" && n.textContent === "Fit preview").listeners.click();
+    assert.deepEqual(mounted.getViewState(), { mode: "normal", width: "", height: "" });
+    nodes.find(n => n.tag === "button" && n.textContent === "Take control").listeners.click();
+    await flush();
+    mounted.dispose(); await flush();
+    assert.equal(f.mutations("release").length, 1);
+    assert.equal(f.mutations("input").length, 0);
+    assert.equal(f.time.size, 0);
+  });
+}
