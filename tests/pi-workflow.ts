@@ -289,6 +289,7 @@ assert.match(resumed.details.results[0].stderr, /No project session found/, "res
 assert.equal(resumed.details.results[0].taskId, resumeId)
 assert.deepEqual(spawnCalls.at(-1)!.args.slice(0, 7), ["--mode", "json", "-p", "--exclude-tools", "task", "--session", resumeId])
 assert.equal(spawnCalls.at(-1)!.stdin, "continue review")
+assert.equal(spawnCalls.at(-1)!.args.includes("--session-dir"), false, "missing getSessionFile keeps resume routing")
 
 const unknownResumeCallCount = spawnCalls.length
 const unknownResume = await resumedHarness.tools.get("task").execute("task-3", {
@@ -298,6 +299,35 @@ const unknownResume = await resumedHarness.tools.get("task").execute("task-3", {
 }, undefined, undefined, context([taskState]))
 assert.equal(unknownResume.details.results[0].status, "failed")
 assert.equal(spawnCalls.length, unknownResumeCallCount)
+
+// Persisted parents route both fresh and resumed children into the same custom directory.
+// Keep the default fixture context API minimal to cover older/missing getSessionFile.
+for (const sessionFile of ["/tmp/custom rpc sessions/parent.jsonl", undefined, "", "parent.jsonl"]) {
+  const storage = harness({ readFile: async () => config, spawn: successfulSpawn })
+  const storageContext = context([], {
+    sessionManager: { getBranch: () => [], getSessionFile: () => sessionFile },
+  })
+  await storage.handler("session_start")({}, storageContext)
+  const invoke = (params: any) => storage.tools.get("task").execute(
+    "storage-task", params, undefined, undefined, storageContext,
+  )
+  const fresh = await invoke({ role: "scout", prompt: "fresh storage" })
+  const freshCall = spawnCalls.at(-1)!
+  const again = await invoke({ role: "scout", prompt: "resume storage", resume: fresh.details.results[0].taskId })
+  assert.equal(fresh.details.results[0].status, "completed")
+  assert.equal(again.details.results[0].status, "completed")
+  assert.ok(freshCall.args.includes("--session-id"))
+  assert.ok(spawnCalls.at(-1)!.args.includes("--session"))
+  for (const call of [freshCall, spawnCalls.at(-1)!]) {
+    if (sessionFile?.startsWith("/")) {
+      assert.equal(call.args.filter((arg) => arg === "--session-dir").length, 1)
+      assert.equal(call.args[call.args.indexOf("--session-dir") + 1], "/tmp/custom rpc sessions")
+    } else {
+      assert.equal(call.args.includes("--session-dir"), false, "unavailable paths must not become directory arguments")
+    }
+  }
+}
+assert.equal(reviewerCall.args.includes("--session-dir"), false, "missing getSessionFile keeps default routing")
 
 let cancellationSignal = ""
 let markCancellationStarted: () => void = () => {}

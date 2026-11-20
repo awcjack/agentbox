@@ -522,7 +522,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
       config: WorkflowConfig,
       cwd: string,
       signal: AbortSignal | undefined,
-      inherited: { provider?: string; model?: string; thinking?: string },
+      inherited: { provider?: string; model?: string; thinking?: string; sessionDir?: string },
       onProgress: (progress: { taskId: string; steps: number; output: string; outputTruncated: boolean; approvalClosed?: string }) => void,
       approvalContext: ApprovalContext,
       toolCallId: string,
@@ -607,6 +607,7 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
         const args = ["--mode", "json", "-p", "--exclude-tools", "task"]
         if (job.resume) args.push("--session", taskId)
         else args.push("--session-id", taskId)
+        if (inherited.sessionDir) args.push("--session-dir", inherited.sessionDir)
         const provider = job.provider ?? role.provider ?? inherited.provider
         const model = job.model ?? role.model ?? inherited.model
         const thinking = role.thinking ?? inherited.thinking
@@ -992,7 +993,11 @@ export function createPiWorkflowExtension(dependencies: PiWorkflowDependencies =
           }
           const requested = Number.isInteger(params.concurrency) ? params.concurrency : config.maxConcurrency
           const concurrency = Math.max(1, Math.min(requested, effectiveLimit(config), limiter.limit, jobs.length))
+          // Route children alongside the persisted parent, including custom RPC storage.
+          // Ephemeral sessions (and older contexts without this API) keep Pi's defaults.
+          const sessionFile = ctx.sessionManager.getSessionFile?.()
           const inherited = {
+            sessionDir: typeof sessionFile === "string" && isAbsolute(sessionFile) ? dirname(sessionFile) : undefined,
             provider: typeof ctx.model?.provider === "string" ? ctx.model.provider : undefined,
             model: typeof ctx.model?.id === "string" ? ctx.model.id : undefined,
             thinking: typeof ctx.thinkingLevel === "string" ? ctx.thinkingLevel : undefined,
