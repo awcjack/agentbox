@@ -57,6 +57,18 @@ test("recents prefer live sessions and keep resumeable history", () => {
   assert.deepEqual(resolved.map((entry) => [entry.session.id, entry.historical]), [["runtime-1", false], ["native-2", true]]);
 });
 
+test("recents follow native identity when a finished runtime is reaped or reopened", () => {
+  const recent = [{ id: "old-runtime", nativeSessionId: "native", profile: "work" }];
+  const saved = { id: "native", profile: "work" };
+  const historical = resolveRecentEntries(recent, { history: [saved] });
+  assert.deepEqual(historical, [{ session: saved, historical: true }]);
+  const reopened = { id: "new-runtime", nativeSessionId: "native", profile: "work" };
+  assert.deepEqual(resolveRecentEntries(recent, { sessions: [reopened], history: [saved] }), [{ session: reopened, historical: false }]);
+  assert.deepEqual(resolveRecentEntries(recent, { history: [{ ...saved, profile: "other" }] }), []);
+  assert.deepEqual(resolveRecentEntries(recent, { sessions: [reopened], filter: "other" }), []);
+  assert.deepEqual(resolveRecentEntries(recent, { history: [saved], isArchived: () => true }), []);
+});
+
 test("recents omit archived conversations even when history still lists them", () => {
   const active = { id: "native-open", profile: "default", name: "Open", archived: false };
   const archived = { id: "native-archived", profile: "work", name: "Archived", archived: true };

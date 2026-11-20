@@ -1009,6 +1009,7 @@ function rememberRecent(session) {
   if (!session?.id) return;
   const entry = {
     id: session.id,
+    nativeSessionId: session.nativeSessionId,
     title: displayTitle(session),
     profile: session.profile || "",
     historical: Boolean(session.archived),

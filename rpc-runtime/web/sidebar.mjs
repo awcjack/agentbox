@@ -31,9 +31,11 @@ export function resolveRecentEntries(recentSessions, {
 } = {}) {
   return recentSessions
     .map((entry) => {
-      const liveMatch = sessions.find((session) => session.id === entry.id);
+      const inProfile = (session) => (!filter || session.profile === filter) && (!entry.profile || session.profile === entry.profile);
+      const liveMatch = sessions.find((session) => inProfile(session) && (session.id === entry.id
+        || (entry.nativeSessionId && session.nativeSessionId === entry.nativeSessionId)));
       if (liveMatch) return { session: liveMatch, historical: false };
-      const historyMatch = history.find((session) => session.id === entry.id && (!filter || session.profile === filter));
+      const historyMatch = history.find((session) => inProfile(session) && (session.id === entry.id || session.id === entry.nativeSessionId));
       if (
         historyMatch
         && !activeNative.has(`${historyMatch.profile}:${historyMatch.id}`)
