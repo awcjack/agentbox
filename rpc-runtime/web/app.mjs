@@ -173,6 +173,7 @@ function updateControls() {
   if (previewBinding && (previewBinding.ctx !== ctx || previewBinding.nativeId !== ctx?.meta.nativeSessionId || !canDownloadFile(ctx))) closeContextPane();
   $("open-browser").disabled = !browserViewAvailable(ctx);
   if (browserPanel && (!browserViewAvailable(ctx) || browserBinding?.ctx !== ctx || browserBinding?.nativeId !== ctx?.meta.nativeSessionId)) closeContextPane();
+  if (ctx?.restorePane) restoreContextPane(ctx);
   $("export-conversation").disabled = !canExportConversation(ctx);
   $("export-conversation").textContent = ctx?.record.exporting ? "Exporting..." : "Export JSON";
   $("settings").disabled = !canChangeConversation(ctx) || ctx.record.settingsBusy;
@@ -1029,7 +1030,49 @@ function forgetRecent(...ids) {
   try { preferenceStorage?.setItem(recentsKey, JSON.stringify(recentSessions)); } catch { /* Browser storage may be blocked. */ }
 }
 
-function closeContextPane() {
+function rememberContextPane(ctx) {
+  const pane = $("context-pane");
+  // A rapid A → B → A switch may happen before A finished restoring.
+  if (!ctx || (ctx.restorePane && pane.hidden)) return;
+  ctx.record.paneState = {
+    nativeId: ctx.meta.nativeSessionId,
+    mode: pane.hidden ? null : pane.dataset.mode,
+    path: $("context-pane-path").title,
+    width: $("workspace").style.getPropertyValue("--context-width"),
+    scrollTop: $("context-pane-body").scrollTop,
+    browser: browserPanel?.getViewState(),
+  };
+}
+
+function restoreContextPane(ctx) {
+  if (!ctx.restorePane) return;
+  const saved = ctx.record.paneState;
+  if (!saved || saved.nativeId !== ctx.meta.nativeSessionId) {
+    ctx.restorePane = false; delete ctx.record.paneState; return;
+  }
+  if (!ctx.ready || !ctx.online || !active(ctx)) return;
+  if (saved.mode === "browser" && !browserViewAvailable(ctx)) return;
+  if (saved.mode === "workspace-file" && (!canDownloadFile(ctx) || ctx.record.downloading)) return;
+  ctx.restorePane = false;
+  if (saved.width) $("workspace").style.setProperty("--context-width", saved.width);
+  else $("workspace").style.removeProperty("--context-width");
+  if (saved.mode === "browser") openBrowserPane({ viewState: saved.browser, focus: false });
+  else if (saved.mode === "file") openContextPane(saved.path);
+  else if (saved.mode === "workspace-file") {
+    // Re-read under the selected session's credentials; never retain file blobs
+    // or let a response from the previous selection reopen this pane.
+    const revision = contextRevision + 1;
+    void downloadWorkspaceFile(ctx, saved.path, { preview: true }).then(() => {
+      if (active(ctx) && contextRevision === revision) $("context-pane-body").scrollTop = saved.scrollTop;
+    });
+    return;
+  }
+  $("context-pane-body").scrollTop = saved.scrollTop;
+}
+
+function closeContextPane({ remember = false } = {}) {
+  if (remember) rememberContextPane(current);
+  else if (current) { delete current.record.paneState; current.restorePane = false; }
   closeSubagentPane();
   contextRevision++;
   previewBinding = null;
@@ -1051,7 +1094,7 @@ function closeContextPane() {
   delete pane.dataset.mode;
 }
 
-function openBrowserPane() {
+function openBrowserPane({ viewState = null, focus = true } = {}) {
   const ctx = current;
   if (!browserViewAvailable(ctx)) return;
   closeContextPane();
@@ -1068,10 +1111,10 @@ function openBrowserPane() {
   const browserApi = createTransport(() => ownToken);
   browserBinding = { ctx, nativeId: ctx.meta.nativeSessionId };
   browserPanel = mountBrowserPanel($("context-pane-body"), {
-    sessionId: ctx.id, nativeSessionId: browserBinding.nativeId,
+    sessionId: ctx.id, nativeSessionId: browserBinding.nativeId, viewState,
     request: (route, options) => browserApi.request(route, options),
   });
-  $("context-pane-body").focus();
+  if (focus) $("context-pane-body").focus();
 }
 
 function openContextPane(path) {
@@ -1525,6 +1568,7 @@ function renderApprovals(ctx) {
 
 function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
+    delete ctx.record.paneState; ctx.restorePane = false;
     closeSubagentPane();
     if (browserBinding?.ctx === ctx) closeContextPane();
     cancelModels(ctx); ctx.modelsRequested = true; ctx.record.models = [];
@@ -1945,7 +1989,7 @@ function closeTab(id) {
   const index = openTabs.indexOf(id);
   openTabs = openTabs.filter((value) => value !== id);
   if (current?.id === id) {
-    closeContextPane();
+    closeContextPane({ remember: true });
     current.controller.abort(); clearTimeout(current.refreshTimer); selection++;
     current = null;
     const next = sessions.find((session) => session.id === openTabs[Math.min(index, openTabs.length - 1)]);
@@ -1964,13 +2008,16 @@ function activate(meta, { reconnect = false } = {}) {
   updateTabTitle(meta.id);
   // Selecting the current conversation is navigation, not a reconnect request.
   if (!reconnect && current?.id === meta.id && active(current)) { drawer(false); return; }
+  closeContextPane({ remember: true });
   selection++;
   if (current) { current.controller.abort(); clearTimeout(current.refreshTimer); }
-  const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, bash: null, ready: false, online: false, cursor: 0 };
+  const ctx = { id: meta.id, meta, record: record(meta.id), controller: new AbortController(), state: {}, stateRevision: 0, uiRevision: 0, tools: new Map(), partial: null, bash: null, ready: false, online: false, cursor: 0, restorePane: true };
+  const paneWidth = ctx.record.paneState?.width;
+  if (paneWidth) $("workspace").style.setProperty("--context-width", paneWidth);
+  else $("workspace").style.removeProperty("--context-width");
   ctx.record.models = [];
   current = ctx; followBottom = true; setComposerCompact(false);
   rememberRecent(meta);
-  closeContextPane();
   $("approvals").replaceChildren(); restoreDraft(); renderMessages(); renderSessions(); renderModels(ctx); drawer(false);
   showNotice(ctx.record.notice?.message || "", ctx.record.notice?.error);
   runSession(ctx);

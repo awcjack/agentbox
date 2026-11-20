@@ -531,7 +531,7 @@ test("URL bar reflects acknowledged location, preserves a draft through refresh,
 test("app lifecycle seams dispose browser before auth reset and preserve file mode", async () => {
   const app = await readFile(new URL("./app.mjs", import.meta.url), "utf8");
   assert.match(app, /function logout[^]*?closeContextPane\(\)[^]*?token = ""/);
-  assert.match(app, /function closeTab[^]*?if \(current\?\.id === id\) \{\s*closeContextPane\(\)/);
+  assert.match(app, /function closeTab[^]*?if \(current\?\.id === id\) \{\s*closeContextPane\(\{ remember: true \}\)/);
   assert.match(app, /function openContextPane\(path\)[^]*?closeContextPane\(\)[^]*?pane.dataset.mode = "file"/);
   assert.match(app, /visibilitychange[^]*?document.hidden && browserPanel\) closeContextPane\(\)/);
   assert.match(app, /browserBinding\?\.ctx === ctx\) closeContextPane\(\)/);
