@@ -3,6 +3,15 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { createBrowserController, validateFrame, validateInput, mountBrowserPanel, FRAME_TTL, RENEW_INTERVAL } from "./browser-panel.mjs";
 
+test("level-one expansion remains resizable and keeps its corner hint", async () => {
+  const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
+  assert.match(css, /\.browser-viewport\.is-expanded\s*\{[^}]*resize:\s*both/);
+  assert.match(css, /\.browser-viewport\.is-fullscreen\s*\{[^}]*resize:\s*none/);
+  const hiddenHintSelectors = [...css.matchAll(/([^{}]+)\{\s*display:\s*none;\s*\}/g)]
+    .map(match => match[1]).filter(selector => selector.includes("browser-resize-hint"));
+  assert.deepEqual(hiddenHintSelectors.map(selector => selector.trim()), [".browser-viewport.is-fullscreen .browser-resize-hint"]);
+});
+
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 function deferred() { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; }
 function clock() {

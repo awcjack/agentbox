@@ -692,7 +692,7 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .browser-frame[hidden] { display: none; }
 .browser-frame[data-stale="true"] { opacity: .55; }
 .browser-viewport { position: relative; width: 100%; min-width: min(240px, 100%); min-height: 160px; aspect-ratio: 16 / 9; max-width: 100%; max-height: 75dvh; resize: both; overflow: hidden; border: 1px solid #333; border-radius: 8px; background: #090909; }
-.browser-viewport.is-expanded { height: min(65dvh, 720px); resize: none; }
+.browser-viewport.is-expanded { height: min(65dvh, 720px); resize: both; }
 /* Expand within the workspace: keep sessions, conversation and composer accessible. */
 @media (min-width: 721px) {
   .workspace.context-open:has(.browser-viewport.is-expanded) {
@@ -715,7 +715,7 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .browser-control-row .text-button:first-child:not(:disabled) { background: var(--accent); color: #201912; border-radius: 5px; }
 .browser-control-row[data-held="true"] .text-button:first-child { display: none; }
 .browser-control-row[data-held="false"] .text-button:nth-child(2) { display: none; }
-.browser-viewport:is(.is-expanded, .is-fullscreen) .browser-resize-hint { display: none; }
+.browser-viewport.is-fullscreen .browser-resize-hint { display: none; }
 .browser-resize-hint { position: absolute; right: 18px; bottom: 6px; font-size: 9px; color: #bbb; pointer-events: none; text-shadow: 0 1px 2px #000; }
 .browser-preview-options { display: flex; align-items: center; gap: 10px; }
 .browser-address-bar { display: flex; align-items: center; gap: 3px; min-width: 0; background: #1e1e1e; padding: 4px; border: 1px solid var(--border); border-radius: 8px; }
