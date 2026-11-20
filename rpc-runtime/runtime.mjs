@@ -1,9 +1,9 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile, rm, stat } from "node:fs/promises";
+import { constants, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile, rm, stat, open, opendir, realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
 import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, rebaseHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
@@ -15,6 +15,77 @@ import { createBrowserClient } from "./browser-channel.mjs";
 import { createPostBroker } from "./post-broker.mjs";
 import { discoverOrphanSessionDirs, discoverWorkspaceProfiles, PROFILE_NAME_RE } from "./discover-profiles.mjs";
 import { messageTitle } from "./web/session-title.mjs";
+
+const TASK_ID_RE = /^pi-workflow-[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const MAX_ENTRIES = 10_000;
+
+function taskIds(details) {
+  return [details?.jobs, details?.results].flatMap((items) => Array.isArray(items)
+    ? items.filter((item) => TASK_ID_RE.test(item?.taskId ?? "")).map((item) => item.taskId) : []);
+}
+
+// Progress alone is not authority: its call must exist on the current parent branch.
+function parentHasTask(data, taskId, progress, nativeSessionId) {
+  if (!Array.isArray(data?.entries) || data.entries.length > MAX_ENTRIES) throw new Error("invalid parent snapshot");
+  const branch = conversationBranch(data);
+  return branch.some(({ type, message }) => type === "message" && (
+    (message?.role === "toolResult" && message.toolName === "task" && taskIds(message.details).includes(taskId))
+    || (message?.role === "assistant" && Array.isArray(message.content) && message.content.some((block) =>
+      block?.type === "toolCall" && block.name === "task"
+      && progress?.get(block.id)?.nativeSessionId === nativeSessionId
+      && progress.get(block.id).taskIds.includes(taskId)))
+  ));
+}
+
+// Only the inherited primary directory is searched, never caller-supplied paths or
+// orphan directories. A directory fd pins traversal on Linux, including renames.
+async function readSubagentHistory(profile, taskId, maxBytes) {
+  if (!TASK_ID_RE.test(taskId) || !profile.sessionDir) throw new Error("history unavailable");
+  const root = resolve(profile.sessionDir);
+  if (await realpath(root) !== root) throw new Error("symlink directory");
+  const directory = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  let match;
+  try {
+    const base = process.platform === "linux" ? `/proc/self/fd/${directory.fd}` : root;
+    const scan = await opendir(base);
+    let visited = 0;
+    for await (const entry of scan) {
+      if (++visited > MAX_ENTRIES) throw new Error("too many files");
+      if (!entry.isFile() || !entry.name.endsWith(`_${taskId}.jsonl`)) continue;
+      const handle = await open(join(base, entry.name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > maxBytes) throw new Error("invalid history size");
+        const buffer = Buffer.alloc(info.size);
+        let offset = 0;
+        while (offset < buffer.length) {
+          const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+          if (!bytesRead) throw new Error("history truncated");
+          offset += bytesRead;
+        }
+        // Pi appends newline-terminated records. Ignore only the uncommitted tail.
+        const end = buffer.lastIndexOf(10);
+        if (end < 0) throw new Error("missing header");
+        const lines = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, end)).split("\n");
+        if (lines.length > MAX_ENTRIES + 1) throw new Error("too many entries");
+        const [header, ...entries] = lines.map((line) => JSON.parse(line));
+        if (header.type !== "session" || header.version !== 3 || header.id !== taskId || header.cwd !== profile.cwd) throw new Error("invalid header");
+        const leafId = entries.at(-1)?.id ?? null;
+        const branch = conversationBranch({ entries, leafId });
+        if (match) throw new Error("ambiguous history");
+        match = { leafId, messages: branch.filter((entry) => entry.type === "message").map(({ id, parentId, message }) => ({ entryId: id, parentId, message })) };
+      } finally { await handle.close(); }
+    }
+    if (await realpath(root) !== root) throw new Error("directory changed");
+    const current = await open(root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    try {
+      const a = await directory.stat(), b = await current.stat();
+      if (a.dev !== b.dev || a.ino !== b.ino) throw new Error("directory changed");
+    } finally { await current.close(); }
+    if (!match) throw new Error("history unavailable");
+    return match;
+  } finally { await directory.close(); }
+}
 
 const WEB_DIR = new URL("./web/", import.meta.url);
 const WEB_ASSET_DENY = new Set([
@@ -743,6 +814,7 @@ class Session extends EventEmitter {
     this.profile = profile;
     this.resume = resume ?? null;
     this.nativeSessionId = resume ?? id;
+    this.subagentProgress = new Map();
     this.name = name ?? null;
     this.folder = folder;
     this.previewName = null;
@@ -950,6 +1022,14 @@ class Session extends EventEmitter {
     }
     if (["message_start", "message_end"].includes(record.type) && !this.previewName) {
       this.previewName = messageTitle([record.message]) || null;
+    }
+    // Retain bounded progress, but authorize it only against a current get_entries
+    // task call and the native identity at the time the update was received.
+    if (record.type === "tool_execution_update" && record.toolName === "task" && typeof record.toolCallId === "string") {
+      const ids = taskIds(record.partialResult?.details).slice(0, 256);
+      this.subagentProgress.delete(record.toolCallId);
+      this.subagentProgress.set(record.toolCallId, { nativeSessionId: this.nativeSessionId, taskIds: ids });
+      if (this.subagentProgress.size > 256) this.subagentProgress.delete(this.subagentProgress.keys().next().value);
     }
     let approvalOwner;
     if (record.type === "extension_ui_request" && record.method === "select" && typeof record.title === "string" && record.title.startsWith("Pi child approval ")) {
@@ -1673,11 +1753,47 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         return json(response, 201, { session: session.metadata() });
       }
 
-      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads|downloads|browser(?:\/frame|\/control)?))?$/.exec(url.pathname);
+      const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|events|ui|conversation|export|auto|uploads|downloads|browser(?:\/frame|\/control)?|subagents\/[^/]+))?$/.exec(url.pathname);
       if (!match || !SESSION_ID_RE.test(match[1])) throw new HttpError(404, "not_found", "route not found");
       const session = sessions.get(match[1]);
       if (!session) throw new HttpError(404, "session_not_found", "session not found");
       const action = match[2];
+      if (action?.startsWith("subagents/")) {
+        authenticate(request, config, "sessions:read");
+        if (request.method !== "GET") throw new HttpError(405, "method_not_allowed", "subagent transcripts are read-only");
+        const taskId = action.slice("subagents/".length);
+        if (!TASK_ID_RE.test(taskId)) throw new HttpError(400, "invalid_task_id", "a workflow task UUID is required");
+        for (const command of ["get_state", "get_entries"]) {
+          if (!session.profile.allowedCommands.has(command)) throw new HttpError(403, "command_forbidden", `subagent reads require allowed command ${command}`);
+        }
+        const child = session.child, nativeSessionId = session.nativeSessionId;
+        const validate = () => {
+          if (!request.headers["x-pi-session-id"]) throw new HttpError(400, "invalid_session_precondition", "X-Pi-Session-Id is required for subagent reads");
+          checkNativePrecondition(request, session, sessions.get(session.id));
+          if (session.child !== child || session.nativeSessionId !== nativeSessionId) throw new HttpError(409, "conversation_stale", "parent changed during subagent read");
+          if (session.status !== "running") throw new HttpError(409, "session_not_running", "parent session is not running");
+          if (session.conversationLocked) throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
+        };
+        validate();
+        const state = await session.sendCommand({ type: "get_state" }, true);
+        validate();
+        if (!state.success || state.data?.sessionId !== nativeSessionId) throw new HttpError(409, "conversation_stale", "parent identity could not be confirmed");
+        const entries = await session.sendCommand({ type: "get_entries" }, true);
+        validate();
+        let authorized = false;
+        try {
+          if (!entries.success) throw new Error();
+          authorized = parentHasTask(entries.data, taskId, session.subagentProgress, nativeSessionId);
+        } catch { throw new HttpError(502, "invalid_snapshot", "Pi did not return a valid parent tree"); }
+        if (!authorized) throw new HttpError(404, "subagent_not_found", "task is not a child of this parent branch");
+        // Authorization must precede all filesystem access, including directory scans.
+        let transcript;
+        try { transcript = await readSubagentHistory(session.profile, taskId, config.limits.maxRecordBytes); }
+        catch { throw new HttpError(404, "subagent_history_unavailable", "unique bounded child history is not available"); }
+        validate();
+        return json(response, 200, { nativeSessionId, taskId, ...transcript });
+      }
+
       if (["browser", "browser/frame", "browser/control"].includes(action)) {
         const token = authenticate(request, config, "sessions:read");
         authenticate(request, config, "browser:read");
@@ -2111,4 +2227,4 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
   return { config, server, sessions, listen, close };
 }
 
-export const internals = { attachLfJsonReader, HARD_FORBIDDEN_COMMANDS, discoverWorkspaceProfiles, PROFILE_NAME_RE };
+export const internals = { parentHasTask, readSubagentHistory, attachLfJsonReader, HARD_FORBIDDEN_COMMANDS, discoverWorkspaceProfiles, PROFILE_NAME_RE };
