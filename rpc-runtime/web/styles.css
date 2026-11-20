@@ -685,6 +685,25 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
   }
 }
 
+/* Read-only child drill-in keeps the parent conversation/composer mounted. */
+.subagent-open { margin: 8px 12px; color: var(--accent); }
+.subagent-viewer { position: absolute; inset: 0; z-index: 20; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+.subagent-viewer-header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+.subagent-viewer-header > button { flex-shrink: 0; }
+.subagent-viewer-header > button:first-child { color: var(--accent); }
+.subagent-viewer-title { flex: 1; min-width: 140px; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.subagent-viewer-title strong { font-size: 14px; }
+.subagent-viewer-note, .subagent-viewer-status { margin: 0; padding: 8px 18px; font: 11px/1.6 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.subagent-viewer-note { background: var(--surface); }
+.subagent-viewer-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.subagent-messages { width: 100%; }
+@media (max-width: 720px) {
+  .subagent-viewer-header { padding: 8px; gap: 6px; }
+  .subagent-viewer-title { order: 3; flex-basis: 100%; }
+  .subagent-viewer-header > button:last-child { margin-left: auto; }
+  .subagent-messages { padding: 12px; }
+}
+
 /* Authenticated main-tab preview; direct input requires an explicit lease. */
 .browser-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .browser-panel p { margin: 0; overflow-wrap: anywhere; }

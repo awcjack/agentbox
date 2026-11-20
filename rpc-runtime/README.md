@@ -507,6 +507,29 @@ and all `/v1` routes require `Authorization: Bearer <token>` and the listed scop
 An Origin header is optional for non-browser callers except browser control
 POSTs; when present, it must exactly match `allowedOrigins`.
 
+### Read-only subagent conversations
+
+Expand a task card and choose **Open child conversation** to inspect the child's
+saved prompts, thinking, tool calls/results, images and responses, rather than
+only its capped task output. The viewer updates every two seconds while open.
+**Back to main session** (or Escape) returns to the still-mounted parent with its
+draft and conversation position preserved. Viewing never starts, resumes or sends
+messages to a child; parent work continues in the background.
+
+`GET /v1/sessions/:id/subagents/:taskId` requires `sessions:read`, profile
+`get_state`/`get_entries` permissions, and `X-Pi-Session-Id` bound to the current
+running, unlocked parent. Only task IDs authorized by structured results or
+current-branch task progress are readable. Responses contain the parent
+`nativeSessionId`, child `taskId`, `leafId`, and `messages` entries with
+`entryId`, `parentId`, and the original Pi `message`.
+
+History must be a unique, bounded regular JSONL file in the parent's primary
+profile session directory, with matching task ID and cwd. Symlinks, caller paths
+and unrelated histories are rejected. Incomplete trailing records are ignored
+while children append messages. Updated workflow children inherit the persisted
+parent's session directory; older children saved elsewhere may be unavailable.
+This viewer does not add child sessions to the supervisor's writable session list.
+
 ### Managed browser preview and control
 
 With a browser-enabled image/configuration, the **Browser** pane previews the

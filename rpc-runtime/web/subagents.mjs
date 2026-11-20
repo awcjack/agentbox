@@ -1,7 +1,7 @@
 import { element, renderMarkdown } from "./markdown.mjs";
 
 // Return null for other tools or unstructured errors so the generic renderer can handle them.
-export function renderSubagents(call, result, key) {
+export function renderSubagents(call, result, key, { onOpen } = {}) {
   if ((call.name || result?.toolName) !== "task") return null;
   let args = call.arguments ?? result?.args;
   if (typeof args === "string") {
@@ -30,6 +30,12 @@ export function renderSubagents(call, result, key) {
     summary.append(element("span", "tool-state", status.replaceAll("_", " ")));
     card.append(summary);
     if (job.taskId) card.append(element("div", "tool-label", `${job.resumed ? "RESUMED CHILD" : "CHILD"}: ${job.taskId}`));
+    if (typeof onOpen === "function" && typeof job.taskId === "string" && /^pi-workflow-[0-9a-f-]{36}$/i.test(job.taskId)) {
+      const open = element("button", "text-button subagent-open", "Open child conversation");
+      open.type = "button";
+      open.addEventListener("click", () => onOpen(job));
+      card.append(open);
+    }
     if (Number.isInteger(job.steps)) card.append(element("div", "tool-label", `${job.steps} assistant steps`));
     if (typeof job.prompt === "string") card.append(element("div", "tool-label", "TASK"), element("pre", "", job.prompt));
     if (typeof job.output === "string" && job.output) card.append(renderMarkdown(job.output));

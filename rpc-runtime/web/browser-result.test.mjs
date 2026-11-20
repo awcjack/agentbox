@@ -9,7 +9,7 @@ import { toolPreview } from "./tool-display.mjs";
 // Exercise the existing generic app renderer, not a browser-specific frontend.
 const source = readFileSync(new URL("./app.mjs", import.meta.url), "utf8");
 function renderer() {
-  const sandbox = { element, imageSource, renderMarkdown, renderSubagents, toolPreview };
+  const sandbox = { element, imageSource, renderMarkdown, renderSubagents, toolPreview, current: null };
   vm.createContext(sandbox);
   vm.runInContext(
     source.slice(source.indexOf("function renderContent("), source.indexOf("function rememberRecent("))

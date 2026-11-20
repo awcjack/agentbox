@@ -1,6 +1,7 @@
 import { ApiError, retryCatalogRead, createTransport, eventCursor, messageKey, messageText, messageEntry, updatePartial, visibleMessages } from "./transport.mjs";
 import { copyText, element, imageSource, renderMarkdown } from "./markdown.mjs";
 import { renderSubagents } from "./subagents.mjs";
+import { mountSubagentViewer } from "./subagent-viewer.mjs";
 import { compareArchivedSessions, resolveRecentEntries, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, pinnedFoldersForProfile, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries, partitionProjectEntries } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
@@ -76,6 +77,7 @@ let current = null, sessions = [], profiles = [], history = [], readOnly = false
 let endTarget = null, deleteDenied = false;
 let conversationTarget = null, settingsTarget = null;
 let browserPanel = null, browserBinding = null;
+let subagentViewer = null;
 let filePreview = null, previewBinding = null, contextRevision = 0, contextText = null;
 const records = new Map();
 const baseTitle = document.title;
@@ -1028,6 +1030,7 @@ function forgetRecent(...ids) {
 }
 
 function closeContextPane() {
+  closeSubagentPane();
   contextRevision++;
   previewBinding = null;
   contextText = null;
@@ -1153,8 +1156,32 @@ function flushFileChanges(parent, store, turnKey) {
   parent.append(renderFileChangesCard(summary, `changes:${turnKey}`));
 }
 
+function closeSubagentPane() {
+  const viewer = subagentViewer;
+  subagentViewer = null;
+  viewer?.dispose();
+}
+
+function openSubagentPane(ctx, job) {
+  if (!active(ctx) || !ctx.meta.nativeSessionId) return;
+  closeContextPane();
+  const nativeSessionId = ctx.meta.nativeSessionId;
+  const conversation = $("conversation"), top = conversation.scrollTop, following = followBottom;
+  subagentViewer = mountSubagentViewer(document.querySelector(".main"), {
+    sessionId: ctx.id, nativeSessionId, taskId: job.taskId, role: job.role,
+    request: (route, options) => api.request(route, options),
+    valid: () => active(ctx) && ctx.meta.nativeSessionId === nativeSessionId,
+    onClose: () => {
+      closeSubagentPane();
+      followBottom = following;
+      conversation.scrollTop = top;
+    },
+  });
+}
+
 function renderTool(call, result, key) {
-  const subagents = renderSubagents(call, result, key);
+  const ctx = current;
+  const subagents = renderSubagents(call, result, key, { onOpen: (job) => openSubagentPane(ctx, job) });
   if (subagents) return subagents;
   const detail = element("details", `tool-detail${result?.isError ? " error" : ""}`);
   detail.dataset.detailKey = `tool:${key}`;
@@ -1498,6 +1525,7 @@ function renderApprovals(ctx) {
 
 function applyMeta(ctx, meta) {
   if (ctx.meta?.nativeSessionId && ctx.meta.nativeSessionId !== meta.nativeSessionId) {
+    closeSubagentPane();
     if (browserBinding?.ctx === ctx) closeContextPane();
     cancelModels(ctx); ctx.modelsRequested = true; ctx.record.models = [];
     ctx.record.messages = []; ctx.record.messagesNativeId = null; delete ctx.record.promptRecall;
