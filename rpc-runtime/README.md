@@ -910,7 +910,7 @@ same-named files in separate checkouts can be selected explicitly; for example,
 `/download /workspace/brian/use-brian/apps/app-web/AGENTS.md`. Use matching quotes
 around paths with spaces if desired. This is a frontend command, not an upstream
 Pi RPC command or a tool available to the model.
-The web **Preview file…** action and assistant local-file link labels use this
+The web **Open file…** action and assistant local-file link labels use this
 same endpoint and authorization, not a public URL or managed browser session.
 They open the existing Browser/file right pane without a modal; its header's
 **Download file** action saves the fetched bytes without another read. Opening a
@@ -920,6 +920,13 @@ UTF-8 text and Markdown previews are capped at 1 MiB; raster images use
 local Blob URLs, PDFs use a sandboxed browser viewer when supported, and HTML/SVG
 are shown only as inert source. Unsupported files remain downloadable. Closing or
 changing session/conversation revokes preview media URLs; logout clears previews.
+Switching between sessions remembers each right pane's open/closed state, file
+path or Browser view, pane width, scroll position, and Browser expansion/display
+size for the current page lifetime. Returning restores that session's view after
+it reconnects; workspace files are re-read with its current authorization.
+Browser control is released on departure and is never reacquired automatically.
+Frames, leases and input drafts are not restored. Explicitly closing a pane,
+replacing its native conversation, or logging out clears its saved view.
 The backend always returns octet-stream; it never serves workspace HTML inline.
 The bearer token must grant **both** `sessions:read` and `sessions:write`
 (filesystem access is more sensitive than reading a transcript), and the session
