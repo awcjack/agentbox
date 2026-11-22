@@ -834,7 +834,13 @@ user message on that branch. Both actions require read/write scopes,
 allowed `get_state`, `get_entries` and `prompt` commands, fully persisted Pi v3
 history in the profile-owned directory, and an idle agent with no queue or pending
 dialogs. Fork also requires `sessions:create`. Both need one spare `maxSessions`
-slot to verify the replacement before changing anything.
+slot to verify the replacement before changing anything. Approved workspace
+subdirectories and orphan-project history directories are accepted, as with
+resume; children are published in the profile's primary session directory.
+A `history_unavailable` error distinguishes an unresolved source, unsupported
+format, a file exceeding `maxRecordBytes`, and persisted entries that differ from
+Pi's in-memory snapshot. The size limit applies to the entire source JSONL file,
+not just the selected branch; an administrator can raise it for larger histories.
 
 The response is `{session, draft: {text, images}}`. Fork copies history through
 the selected assistant message (inclusive), returns an empty draft
