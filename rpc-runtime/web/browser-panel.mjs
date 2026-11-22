@@ -308,7 +308,8 @@ export function mountBrowserPanel(root, options) {
       if (accepted) resolutionDraft = false;
     }).finally(() => { resizing = false; applyResolution.disabled = !controller.getState().canInput; });
   });
-  const resolutionNote = node("p", "Viewport size in CSS pixels. Take control to apply. Dragging the preview changes its display size.", "field-note");
+  const resolutionNote = node("p", "Viewport size in CSS pixels. Take control to apply.", "field-note");
+  resolutionNote.append(node("span", " Dragging the preview changes its display size.", "browser-desktop-hint"));
   const actions = node("fieldset"); actions.append(node("legend", "Human browser input"));
   function field(label, el) { const wrap = node("label", label); wrap.append(el); actions.append(wrap); return el; }
   const refs = field("Accessibility reference", node("select"));

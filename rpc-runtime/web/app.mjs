@@ -91,6 +91,8 @@ const conversation = $("conversation");
 let followBottom = true, renderPending = false;
 let commandItems = [], commandIndex = 0, commandKey = "", dismissedCommands = null;
 const composeArea = document.querySelector(".compose-area");
+const phoneLayout = window.matchMedia("(max-width: 720px)");
+const messagePlaceholder = () => phoneLayout.matches ? "Message Pi · / commands" : "Ask anything, type / for commands, or ! for shell...";
 let promptExpanded = false;
 function setComposerCompact(compact) {
   composeArea.classList.toggle("compact", compact);
@@ -233,7 +235,7 @@ function updateControls() {
   $("thinking-level").hidden = shellMode;
   $("prompt").placeholder = shellMode
     ? (shellDraft.excludeFromContext ? "!!command — run shell, hide output from the model" : "!command — run shell immediately")
-    : "Ask anything, type / for commands, or ! for shell...";
+    : messagePlaceholder();
   $("composer-foot-left").innerHTML = shellMode
     ? "<kbd>Enter</kbd> run <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>Esc</kbd> clear !"
     : "<kbd>Enter</kbd> send <span class=\"foot-divider\">/</span> <kbd>Shift Enter</kbd> new line <span class=\"foot-divider\">/</span> <kbd>↑↓</kbd> history <span class=\"foot-divider\">/</span> <kbd>/</kbd> commands";
@@ -361,12 +363,36 @@ function commandKeydown(event) {
   return false;
 }
 
+const compactHeader = window.matchMedia("(max-width: 1000px)");
+const sidebar = $("sidebar");
+const main = document.querySelector(".main");
+const actionsToggle = $("actions-toggle");
+const sessionTools = $("session-tools");
+const contextPane = $("context-pane");
+let contextReturnFocus;
+
+function syncWorkspaceInert() {
+  const drawerOpen = sidebar.classList.contains("open");
+  main.inert = drawerOpen || (compactHeader.matches && !contextPane.hidden);
+  contextPane.inert = drawerOpen;
+}
+
+function sessionActions(open, { restoreFocus = false } = {}) {
+  actionsToggle.setAttribute("aria-expanded", String(open && compactHeader.matches));
+  if (restoreFocus && compactHeader.matches) actionsToggle.focus();
+}
+
 function drawer(open) {
-  $("sidebar").classList.toggle("open", open);
+  open &&= phoneLayout.matches;
+  const wasOpen = sidebar.classList.contains("open");
+  sidebar.classList.toggle("open", open);
+  if (open) sessionActions(false);
+  sidebar.inert = phoneLayout.matches && !open;
   $("drawer-shade").hidden = !open;
   $("open-drawer").setAttribute("aria-expanded", String(open));
-  document.querySelector(".main").inert = open;
+  syncWorkspaceInert();
   if (open) $("close-drawer").focus();
+  else if (wasOpen && phoneLayout.matches) $("open-drawer").focus();
 }
 function updateTabTitle(viewedId = document.visibilityState === "visible" && document.hasFocus() ? current?.id : null) {
   document.title = attentionTitle(attention.update(sessions.filter((session) => !records.get(session.id)?.ending), viewedId), baseTitle);
@@ -383,7 +409,7 @@ sessionPreview.hidden = true;
 document.body.append(sessionPreview);
 function hideSessionPreview() { sessionPreview.hidden = true; }
 function previewSession(button) {
-  if (!$('workspace').classList.contains('sidebar-collapsed') || window.matchMedia('(max-width: 720px)').matches) return;
+  if (!$('workspace').classList.contains('sidebar-collapsed') || phoneLayout.matches) return;
   sessionPreview.textContent = button.title;
   sessionPreview.hidden = false;
   const rect = button.getBoundingClientRect();
@@ -1070,6 +1096,23 @@ function restoreContextPane(ctx) {
   $("context-pane-body").scrollTop = saved.scrollTop;
 }
 
+function revealContextPane() {
+  contextReturnFocus = main.contains(document.activeElement) ? document.activeElement : null;
+  contextPane.hidden = false;
+  $("workspace").classList.add("context-open");
+  syncWorkspaceInert();
+  if (compactHeader.matches) $("close-context-pane").focus();
+}
+
+function dismissContextPane() {
+  const returnFocus = contextReturnFocus;
+  closeContextPane();
+  if (compactHeader.matches) {
+    if (returnFocus?.isConnected && returnFocus.getClientRects().length && !returnFocus.disabled) returnFocus.focus();
+    else actionsToggle.focus();
+  }
+}
+
 function closeContextPane({ remember = false } = {}) {
   if (remember) rememberContextPane(current);
   else if (current) { delete current.record.paneState; current.restorePane = false; }
@@ -1087,7 +1130,9 @@ function closeContextPane({ remember = false } = {}) {
   const pane = $("context-pane");
   if (!pane || pane.hidden) return;
   pane.hidden = true;
+  contextReturnFocus = null;
   $("workspace").classList.remove("context-open");
+  syncWorkspaceInert();
   $("context-pane-body").replaceChildren();
   $("context-pane-path").textContent = "";
   $("context-pane-path").title = "";
@@ -1103,7 +1148,7 @@ function openBrowserPane({ viewState = null, focus = true } = {}) {
   pane.setAttribute("aria-label", "Browser preview and human control");
   $("context-pane-path").textContent = "Browser · main conversation";
   $("close-context-pane").setAttribute("aria-label", "Close browser preview");
-  pane.hidden = false; $("workspace").classList.add("context-open");
+  revealContextPane();
   $("open-browser").setAttribute("aria-expanded", "true");
   // Capture both identity and auth BEFORE cleanup/replacement/logout. A late
   // acquire can then release only its original session, never the new selection.
@@ -1114,7 +1159,7 @@ function openBrowserPane({ viewState = null, focus = true } = {}) {
     sessionId: ctx.id, nativeSessionId: browserBinding.nativeId, viewState,
     request: (route, options) => browserApi.request(route, options),
   });
-  if (focus) $("context-pane-body").focus();
+  if (focus && !compactHeader.matches) $("context-pane-body").focus();
 }
 
 function openContextPane(path) {
@@ -1141,8 +1186,7 @@ function openContextPane(path) {
   } else {
     body.append(element("pre", "context-pane-code", preview.text));
   }
-  pane.hidden = false;
-  $("workspace").classList.add("context-open");
+  revealContextPane();
 }
 
 function fileChangeRow(file) {
@@ -1333,7 +1377,8 @@ function patchTranscript(parent, next) {
 let transcriptContext = null;
 function renderMessages() {
   const ctx = current, root = $("messages");
-  if (transcriptContext !== ctx) { root.replaceChildren(); transcriptContext = ctx; }
+  const contextChanged = transcriptContext !== ctx;
+  if (contextChanged) { root.replaceChildren(); transcriptContext = ctx; }
   const next = document.createElement("div");
   const open = new Set([...root.querySelectorAll("details[open]")].map((node) => node.dataset.detailKey));
   const previousTop = conversation.scrollTop;
@@ -1444,8 +1489,12 @@ function renderMessages() {
   // Keep the in-flight shell card expanded so streamed output stays visible.
   for (const node of next.querySelectorAll("details.tool-detail.running")) node.open = true;
   patchTranscript(root, next);
-  $("welcome").hidden = Boolean(root.childElementCount);
-  if (followBottom) conversation.scrollTop = conversation.scrollHeight;
+  const welcome = $("welcome");
+  const showingWelcome = !root.childElementCount;
+  const resetWelcome = contextChanged || welcome.hidden;
+  welcome.hidden = !showingWelcome;
+  if (phoneLayout.matches && showingWelcome) conversation.scrollTop = resetWelcome ? 0 : previousTop;
+  else if (followBottom) conversation.scrollTop = conversation.scrollHeight;
   else conversation.scrollTop = previousTop;
   $("jump-latest").hidden = followBottom || !root.childElementCount;
 }
@@ -1839,7 +1888,7 @@ async function downloadWorkspaceFile(ctx, filePath, { preview = false } = {}) {
     $("context-pane-path").title = filePath;
     $("download-context-file").hidden = false;
     $("context-pane-body").replaceChildren(element("p", "context-pane-empty", "Loading file preview…"));
-    pane.hidden = false; $("workspace").classList.add("context-open");
+    revealContextPane();
   }
   const ownPane = contextRevision;
   const valid = () => active(ctx) && selection === ownSelection && epoch === ownEpoch
@@ -2651,8 +2700,29 @@ $("refresh-sessions").addEventListener("click", () => {
 $("profile-filter").addEventListener("change", () => { renderSessions(); refreshSessions(); });
 $("dismiss-notice").addEventListener("click", () => { showNotice(""); if (current) current.record.notice = null; });
 $("open-drawer").addEventListener("click", () => drawer(true));
-$("close-drawer").addEventListener("click", () => { drawer(false); $("open-drawer").focus(); });
+$("close-drawer").addEventListener("click", () => drawer(false));
 $("drawer-shade").addEventListener("click", () => drawer(false));
+phoneLayout.addEventListener("change", () => {
+  drawer(false);
+  if (!$("composer").classList.contains("shell-mode")) $("prompt").placeholder = messagePlaceholder();
+});
+compactHeader.addEventListener("change", () => {
+  sessionActions(false);
+  syncWorkspaceInert();
+  if (compactHeader.matches && !contextPane.hidden && !contextPane.contains(document.activeElement)) $("close-context-pane").focus();
+});
+const actionsOpen = () => actionsToggle.getAttribute("aria-expanded") === "true";
+actionsToggle.addEventListener("click", () => sessionActions(!actionsOpen()));
+const isInSessionActions = (target) => actionsToggle.contains(target) || sessionTools.contains(target);
+document.addEventListener("pointerdown", (event) => {
+  if (actionsOpen() && !isInSessionActions(event.target)) sessionActions(false);
+});
+document.addEventListener("focusin", (event) => {
+  if (actionsOpen() && !isInSessionActions(event.target)) sessionActions(false);
+});
+sessionTools.addEventListener("click", (event) => {
+  if (actionsOpen() && event.target.closest(".text-button")) sessionActions(false, { restoreFocus: true });
+}, { capture: true });
 let lastConversationTop = conversation.scrollTop;
 conversation.addEventListener("scroll", () => {
   const gap = conversation.scrollHeight - conversation.scrollTop - conversation.clientHeight;
@@ -2672,13 +2742,20 @@ for (const button of document.querySelectorAll(".starter")) button.addEventListe
   current.record.promptRecall?.history.resetNavigation();
   current.record.draft.text = button.dataset.prompt; current.record.draft.version++; restoreDraft(); $("prompt").focus();
 });
-$("close-context-pane").addEventListener("click", () => closeContextPane());
+$("close-context-pane").addEventListener("click", dismissContextPane);
 $("open-browser").addEventListener("click", openBrowserPane);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("context-pane").hidden) { closeContextPane(); event.preventDefault(); return; }
-  if (event.key === "Escape" && $("sidebar").classList.contains("open")) { drawer(false); $("open-drawer").focus(); }
-  if (event.key === "Tab" && $("sidebar").classList.contains("open")) {
-    const controls = [...$("sidebar").querySelectorAll("button:not(:disabled), select:not(:disabled)")];
+  if (event.defaultPrevented || event.isComposing || event.target.closest?.("dialog")) return;
+  if (event.key === "Escape") {
+    if (actionsOpen()) sessionActions(false, { restoreFocus: true });
+    else if (sidebar.classList.contains("open")) drawer(false);
+    else if (!contextPane.hidden) dismissContextPane();
+    else return;
+    event.preventDefault(); return;
+  }
+  if (event.key === "Tab" && sidebar.classList.contains("open")) {
+    const controls = [...sidebar.querySelectorAll("button:not(:disabled), select:not(:disabled), summary")]
+      .filter((control) => control.getClientRects().length && !control.closest("[hidden]"));
     const first = controls[0], last = controls[controls.length - 1];
     if (event.shiftKey && event.target === first) { event.preventDefault(); last?.focus(); }
     else if (!event.shiftKey && event.target === last) { event.preventDefault(); first?.focus(); }

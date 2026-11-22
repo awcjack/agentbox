@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="color-scheme" content="dark">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'">
@@ -13,7 +13,7 @@
 </head>
 <body>
   <div class="workspace" id="workspace">
-    <button class="drawer-shade" id="drawer-shade" aria-label="Close sessions" hidden></button>
+    <button class="drawer-shade" id="drawer-shade" aria-label="Close sessions" tabindex="-1" hidden></button>
     <aside class="sidebar" id="sidebar" aria-label="Session navigation">
       <div class="brand"><span class="brand-mark" aria-hidden="true">pi</span><span>Pi agent<span class="brand-sub">AGENTBOX</span></span><button id="close-drawer" class="icon-button mobile-only" aria-label="Close sessions">&times;</button></div>
       <button id="new-session" class="new-session" aria-label="New session" title="New session" disabled><span aria-hidden="true">+</span> <span class="new-session-label">New session</span> <kbd>N</kbd></button>
@@ -33,13 +33,16 @@
         <button id="open-drawer" class="icon-button mobile-only" aria-label="Open sessions" aria-expanded="false" aria-controls="sidebar">&#9776;</button>
         <div class="session-heading"><h1 id="session-title">Pi coding workspace</h1><p id="session-subtitle">Code, tools, and persistent conversations.</p></div>
         <span id="session-status" class="status-pill">WORKSPACE</span>
-        <button id="auto-mode" class="auto-toggle" type="button" aria-label="Auto permission mode" aria-pressed="false" title="Auto mode is off. Normal permission rules apply." disabled>Auto: off</button>
-        <button id="fast-mode" class="auto-toggle" type="button" aria-label="OpenAI fast mode" aria-pressed="false" aria-describedby="fast-mode-cost fast-mode-help" disabled>Fast: unknown</button>
-        <span id="fast-mode-cost" class="sr-only">Opt-in priority service may incur extra cost. New parent sessions start off; spawned subagents inherit this session's mode. Not a saved default.</span>
-        <span id="fast-mode-help" class="sr-only" role="status"></span>
-        <button id="open-browser" class="text-button" type="button" aria-controls="context-pane" aria-expanded="false" disabled title="View the main conversation’s browser and explicitly take human control">Browser</button>
-        <button id="export-conversation" class="text-button" disabled title="Download the complete conversation tree as JSON, including tool output and embedded attachments. Reopen archived sessions first; wait for the agent to be idle.">Export JSON</button>
-        <button id="end-session" class="text-button" disabled>End &amp; archive</button>
+        <button id="actions-toggle" class="text-button" type="button" aria-label="Session actions" aria-controls="session-tools" aria-expanded="false">Actions <span aria-hidden="true">▾</span></button>
+        <div id="session-tools" class="session-tools" role="group" aria-label="Session actions">
+          <button id="auto-mode" class="auto-toggle" type="button" aria-label="Auto permission mode" aria-pressed="false" title="Auto mode is off. Normal permission rules apply." disabled>Auto: off</button>
+          <button id="fast-mode" class="auto-toggle" type="button" aria-label="OpenAI fast mode" aria-pressed="false" aria-describedby="fast-mode-cost fast-mode-help" disabled>Fast: unknown</button>
+          <span id="fast-mode-cost" class="sr-only">Opt-in priority service may incur extra cost. New parent sessions start off; spawned subagents inherit this session's mode. Not a saved default.</span>
+          <span id="fast-mode-help" class="sr-only" role="status"></span>
+          <button id="open-browser" class="text-button" type="button" aria-controls="context-pane" aria-expanded="false" disabled title="View the main conversation’s browser and explicitly take human control">Browser</button>
+          <button id="export-conversation" class="text-button" disabled title="Download the complete conversation tree as JSON, including tool output and embedded attachments. Reopen archived sessions first; wait for the agent to be idle.">Export JSON</button>
+          <button id="end-session" class="text-button" disabled>End &amp; archive</button>
+        </div>
       </header>
       <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="Dismiss notification">&times;</button></div>
       <div id="conversation" class="conversation" tabindex="0" aria-label="Conversation">

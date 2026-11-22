@@ -93,7 +93,7 @@ function harness(messages = [], request = async () => ({ data: {} })) {
   for (const [start, end] of [
     ["function active(ctx)", "function showNotice("],
     ["function canWrite(", "function canChangeConversation("],
-    ["function hideCommandSuggestions(", "function drawer("],
+    ["function hideCommandSuggestions(", "const compactHeader"],
     ["function promptHistory(", "function renderApprovals("],
   ]) vm.runInContext(section(start, end), h);
   vm.runInContext(section('$("composer").addEventListener("submit"', '$("stop").addEventListener'), h);
