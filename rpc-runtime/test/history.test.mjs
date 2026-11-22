@@ -97,6 +97,27 @@ test("conversation history publishes a private v3 child including compaction and
   assert.equal(await resolveHistorySession(profile, OLD_ID), path);
 });
 
+test("conversation history accepts approved subdirectory and orphan-project sources", async (t) => {
+  for (const orphan of [false, true]) {
+    const { root, profile } = await fixture(t);
+    profile.allowSubdirectories = true;
+    const sourceRoot = orphan ? join(root, "orphan") : root;
+    if (orphan) {
+      await mkdir(sourceRoot);
+      profile.extraSessionDirs = [sourceRoot];
+    }
+    const entries = [{ type: "message", id: "u", parentId: null, message: { role: "user", content: "hello" } }];
+    const source = join(sourceRoot, `${ID}.jsonl`);
+    const original = `${header(ID, "/workspace/project")}\n${JSON.stringify(entries[0])}\n`;
+    await writeFile(source, original);
+    const path = await createConversationHistory(profile, ID, { entries, leafId: "u" }, entries, OLD_ID, 4096);
+    assert.equal(join(path, ".."), root);
+    assert.equal(await resolveHistorySession(profile, OLD_ID), path);
+    assert.equal(JSON.parse((await readFile(path, "utf8")).split("\n")[0]).cwd, profile.cwd);
+    assert.equal(await readFile(source, "utf8"), original);
+  }
+});
+
 test("conversation history fails closed on unpersisted, oversized, old-version, ambiguous and symlink sources", async (t) => {
   const { root, profile } = await fixture(t);
   const source = join(root, `${ID}.jsonl`);
@@ -109,7 +130,7 @@ test("conversation history fails closed on unpersisted, oversized, old-version, 
     assert.equal(await readFile(source, "utf8"), text);
   }
   await writeFile(source, valid);
-  await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 10));
+  await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 10), /exceeding maxRecordBytes \(10\)/);
   const duplicate = join(root, `duplicate_${ID}.jsonl`);
   await writeFile(duplicate, valid);
   await assert.rejects(createConversationHistory(profile, ID, snapshot, [], OLD_ID, 4096));

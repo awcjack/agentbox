@@ -166,28 +166,37 @@ export async function rebaseHistorySession(profile, id, saved, maxBytes) {
   }
 }
 
+export class ConversationHistoryError extends Error {
+  constructor(message) { super(message); this.name = "ConversationHistoryError"; }
+}
+
 // Read-only validation of the source. All writes go to an exclusively created
 // child file, published only when complete. No client-supplied paths are used.
 export async function createConversationHistory(profile, sourceId, snapshot, prefix, id, maxBytes) {
   if (!NATIVE_SESSION_ID_RE.test(id) || id === sourceId) throw new Error("invalid child session ID");
   const source = await resolveHistorySession(profile, sourceId);
-  if (!source) throw new Error("source history is not uniquely persisted");
+  if (!source) throw new ConversationHistoryError("source history could not be uniquely resolved in this profile's session directories");
   const handle = await open(source, READ_FLAGS);
   try {
-    const parsed = await readHeader(handle, sourceId, profile.cwd);
-    if (!parsed || parsed.header.version !== 3 || parsed.info.size > maxBytes) throw new Error("unsupported source history");
+    const parsed = await readHeader(handle, sourceId, profile.cwd, profile.allowSubdirectories);
+    if (!parsed || parsed.header.version !== 3) throw new ConversationHistoryError("source history must use Pi session format v3 with a matching session ID and workspace");
+    if (parsed.info.size > maxBytes) throw new ConversationHistoryError(`source history is ${parsed.info.size} bytes, exceeding maxRecordBytes (${maxBytes}); ask the administrator to raise this limit`);
     const buffer = Buffer.alloc(parsed.info.size + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const after = await handle.stat();
     if (bytesRead !== parsed.info.size || after.size !== parsed.info.size || after.mtimeMs !== parsed.info.mtimeMs) {
-      throw new Error("source history changed");
+      throw new ConversationHistoryError("source history changed while being read; wait for Pi to settle and retry");
     }
     const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead));
     const entries = text.trimEnd().split("\n").map((line) => JSON.parse(line));
-    if (!isDeepStrictEqual(entries.slice(1), snapshot.entries)) throw new Error("source history is not fully persisted");
+    if (!isDeepStrictEqual(entries.slice(1), snapshot.entries)) throw new ConversationHistoryError("persisted source history does not match Pi's in-memory entries; wait for Pi to settle and retry");
   } finally { await handle.close(); }
+  const roots = await historyDirectories(profile);
+  if (!roots.includes(resolve(source, ".."))) throw new ConversationHistoryError("source history directory changed; refresh and retry");
+  // An orphan project's source may live in an extra session directory. Publish
+  // the child in the primary directory owned by the selected profile.
   const root = await historyDirectory(profile);
-  if (!root || resolve(source, "..") !== root) throw new Error("source directory changed");
+  if (!root) throw new ConversationHistoryError("profile's primary session directory is unavailable");
   const timestamp = new Date().toISOString();
   const path = join(root, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
   const temporary = join(root, `.conversation-${id}.tmp`);

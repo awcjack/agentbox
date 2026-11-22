@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer } from "node:http";
 import { normalize as normalizePath } from "node:path";
-import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, rebaseHistorySession, createConversationHistory, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
+import { normalizeSessionFolder, sessionFolderDirectory, writeSessionFolder, listSessionFolders, deleteSessionFolder, sessionFolderMatches, archiveHistory, listHistory, moveHistorySession, resolveHistorySession, rebaseHistorySession, createConversationHistory, ConversationHistoryError, conversationBranch, conversationDraft, NATIVE_SESSION_ID_RE } from "./history.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { browseFolders, containsFolder, selectFolder } from "./folders.mjs";
 import { buildSandboxLaunch } from "./sandbox.mjs";
@@ -1940,7 +1940,10 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           const prefix = snapshot.branch.slice(0, index + (body.action === "fork" ? 1 : 0));
           let path;
           try { path = await createConversationHistory(session.profile, snapshot.nativeSessionId, snapshot.data, prefix, nativeId, config.limits.maxRecordBytes); }
-          catch { throw new HttpError(409, "history_unavailable", "source must have complete, unique v3 persisted history within maxRecordBytes; no source files were changed"); }
+          catch (error) {
+            const reason = error instanceof ConversationHistoryError ? error.message : "source history could not be safely read or the child history could not be published";
+            throw new HttpError(409, "history_unavailable", `${reason}; no source files were changed`);
+          }
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
           try {
             child = new Session({ id: body.action === "fork" ? uuid() : session.id, profileName: session.profileName, profile: session.profile,

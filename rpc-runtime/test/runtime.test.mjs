@@ -752,6 +752,31 @@ async function conversationFixture(t, overrides = {}, options = {}) {
     act: (changes = {}, requestOptions = {}) => request(f.baseUrl, route, { method: "POST", body: { ...body, ...(changes.action === "revert" ? { entryId: "u2" } : {}), ...changes }, ...requestOptions }) };
 }
 
+test("fork and revert accept persisted history from an approved workspace subdirectory", async (t) => {
+  for (const action of ["fork", "revert"]) {
+    const f = await conversationFixture(t);
+    const original = (await readFile(f.path, "utf8")).replace('"cwd":"/workspace"', '"cwd":"/workspace/project"');
+    await writeFile(f.path, original);
+    assert.equal((await f.act({ action })).response.status, 200);
+    assert.equal(await readFile(f.path, "utf8"), original);
+  }
+});
+
+test("conversation errors distinguish size limits from unpersisted entries without exposing paths", async (t) => {
+  const f = await conversationFixture(t);
+  await writeFile(f.path, (await readFile(f.path, "utf8")) + " ".repeat(64 * 1024));
+  let result = await f.act();
+  assert.equal(result.body.error.code, "history_unavailable");
+  assert.match(result.body.error.message, /exceeding maxRecordBytes \(65536\)/);
+  assert.equal(result.body.error.message.includes(f.root), false);
+  await f.persist();
+  f.source.entries.at(-1).message.content = "not persisted";
+  result = await f.act({ action: "revert" });
+  assert.equal(result.body.error.code, "history_unavailable");
+  assert.match(result.body.error.message, /does not match Pi's in-memory entries/);
+  assert.equal(f.children.length, 1);
+});
+
 test("thinking levels use model-reported values and changing them requires write scope", async (t) => {
   const reader = "thinking-reader", writer = "thinking-writer";
   const cfg = config({ allowedCommands: undefined, auth: { tokens: [
