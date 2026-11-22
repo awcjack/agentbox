@@ -15,7 +15,7 @@ import { modelKey, readHiddenModels, saveHiddenModels, visibleModels } from "./m
 import { readRememberedToken, saveRememberedToken, clearRememberedToken } from "./auth-storage.mjs";
 import { mountBrowserPanel } from "./browser-panel.mjs";
 import { fetchDownload, saveDownload } from "./downloads.mjs";
-import { createFilePreview } from "./file-preview.mjs";
+import { createFilePreview, isMediaPreviewPath } from "./file-preview.mjs";
 import { initContextResize } from "./context-resize.mjs";
 import { canNavigatePromptHistory, createPromptHistory } from "./prompt-history.mjs";
 
@@ -1189,12 +1189,20 @@ function openContextPane(path) {
   revealContextPane();
 }
 
-function fileChangeRow(file) {
+function fileChangeRow(ctx, file) {
   const row = element("li", "file-changes-row");
   const open = element("button", "file-changes-path", file.path);
   open.type = "button";
   open.title = `Preview ${file.path}`;
-  open.addEventListener("click", () => openContextPane(file.path));
+  open.addEventListener("click", () => {
+    if (!active(ctx)) return;
+    // Tool messages have text excerpts, not the bytes of a changed image or PDF.
+    if (isMediaPreviewPath(file.path) && canDownloadFile(ctx)) {
+      void downloadWorkspaceFile(ctx, file.path, { preview: true });
+    } else {
+      openContextPane(file.path);
+    }
+  });
   row.append(open);
   const stats = element("span", "file-changes-counts");
   stats.append(
@@ -1206,7 +1214,7 @@ function fileChangeRow(file) {
   return row;
 }
 
-function renderFileChangesCard(summary, key) {
+function renderFileChangesCard(ctx, summary, key) {
   const article = element("article", "message changes-card");
   article.dataset.messageKey = key;
   const card = element("div", "file-changes");
@@ -1222,13 +1230,13 @@ function renderFileChangesCard(summary, key) {
   card.append(header);
   const previewLimit = 3;
   const list = element("ul", "file-changes-list");
-  for (const file of summary.files.slice(0, previewLimit)) list.append(fileChangeRow(file));
+  for (const file of summary.files.slice(0, previewLimit)) list.append(fileChangeRow(ctx, file));
   card.append(list);
   if (summary.files.length > previewLimit) {
     const more = element("details", "file-changes-more");
     more.dataset.detailKey = `${key}:more`;
     const rest = element("ul", "file-changes-list");
-    for (const file of summary.files.slice(previewLimit)) rest.append(fileChangeRow(file));
+    for (const file of summary.files.slice(previewLimit)) rest.append(fileChangeRow(ctx, file));
     more.append(element("summary", "", `Show ${summary.files.length - previewLimit} more files`), rest);
     card.append(more);
   }
@@ -1236,11 +1244,11 @@ function renderFileChangesCard(summary, key) {
   return article;
 }
 
-function flushFileChanges(parent, store, turnKey) {
+function flushFileChanges(ctx, parent, store, turnKey) {
   const summary = summarizeFileChanges(store);
   store.clear();
   if (!summary.files.length) return;
-  parent.append(renderFileChangesCard(summary, `changes:${turnKey}`));
+  parent.append(renderFileChangesCard(ctx, summary, `changes:${turnKey}`));
 }
 
 function closeSubagentPane() {
@@ -1394,7 +1402,7 @@ function renderMessages() {
     const message = messages[index];
     if (message.role === "toolResult") continue;
     if (message.role === "user") {
-      flushFileChanges(next, turnChanges, turnKey);
+      flushFileChanges(ctx, next, turnChanges, turnKey);
       turnKey = messageKey(message) || `user:${index}`;
     }
     const article = element("article", `message ${message.role === "user" ? "user" : "assistant"}`);
@@ -1470,7 +1478,7 @@ function renderMessages() {
     if (change) accumulateChange(turnChanges, change);
     next.append(renderTool(call, result, id));
   }
-  flushFileChanges(next, turnChanges, turnKey);
+  flushFileChanges(ctx, next, turnChanges, turnKey);
   if (ctx.bash?.running) {
     const article = element("article", "message assistant");
     article.dataset.messageKey = "bash:live";

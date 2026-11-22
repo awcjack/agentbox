@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { isMediaPreviewPath } from "./file-preview.mjs";
 
 const source = readFileSync(new URL("./app.mjs", import.meta.url), "utf8");
 function harness() {
@@ -22,7 +23,7 @@ function harness() {
     token: "fixture", mounts: [], disposed: 0,
     $: node, closeSubagentPane() {},
     contextPane: node("context-pane"), contextReturnFocus: null,
-    compactHeader: { matches: false }, document: { activeElement: null },
+    compactHeader: { matches: false }, document: { activeElement: null, createTextNode: textContent => ({ textContent }) },
     main: { contains: () => false }, syncWorkspaceInert() {},
     active: ctx => h.current === ctx,
     browserViewAvailable: ctx => h.current === ctx && ctx.ready && ctx.online && ctx.readable !== false,
@@ -35,10 +36,15 @@ function harness() {
     visibleMessages: () => [],
     findFilePreview: (_messages, _results, path) => ({ path, text: "Preview text" }),
     isMarkdownPath: () => false, pathBreadcrumb: value => value,
-    element: (_tag, _class, text) => ({ textContent: text }),
+    isMediaPreviewPath, formatDiffCount: String,
+    element: (_tag, _class, text) => ({
+      textContent: text, children: [],
+      append(...children) { this.children.push(...children); },
+      addEventListener(name, listener) { this[name] = listener; },
+    }),
   };
   vm.createContext(h);
-  vm.runInContext(source.slice(source.indexOf("function rememberContextPane("), source.indexOf("function fileChangeRow(")), h);
+  vm.runInContext(source.slice(source.indexOf("function rememberContextPane("), source.indexOf("function renderFileChangesCard(")), h);
   const session = id => ({ id, meta: { nativeSessionId: `native-${id}` }, record: { messages: [] }, tools: new Map(), ready: true, online: true });
   return { h, node, session, widths };
 }
@@ -71,6 +77,32 @@ test("switching A → B → A restores each pane independently and disposes brow
   assert.equal(node("context-pane-path").title, "/workspace/b.txt");
   assert.equal(node("context-pane-body").scrollTop, 50);
   assert.equal(widths.get("--context-width"), "360px");
+});
+
+test("Edited files only read workspace media on click in the owning, eligible session", () => {
+  const { h, node, session } = harness();
+  const a = session("a"); h.current = a;
+  const reads = [];
+  h.downloadWorkspaceFile = (ctx, path, options) => reads.push([ctx, path, options.preview]);
+  const button = path => h.fileChangeRow(a, { path, added: 1, removed: 0 }).children[0];
+  const image = button("assets/hero image.PNG");
+  const pdf = button("docs/report.pdf");
+  const text = button("notes.txt");
+  assert.equal(reads.length, 0, "rendering a card does not read files");
+  image.click(); pdf.click(); text.click();
+  assert.deepEqual(reads, [[a, "assets/hero image.PNG", true], [a, "docs/report.pdf", true]]);
+  assert.equal(node("context-pane").dataset.mode, "file");
+  assert.equal(node("context-pane-path").title, "notes.txt");
+  assert.equal(node("context-pane-body").children[0].textContent, "Preview text");
+
+  a.writable = false;
+  image.click();
+  assert.equal(node("context-pane").dataset.mode, "file", "read-only sessions keep transcript previews");
+  h.current = session("b");
+  const revision = h.contextRevision;
+  pdf.click();
+  assert.equal(h.contextRevision, revision, "a stale row cannot replace the current pane");
+  assert.equal(reads.length, 2);
 });
 
 test("pending restoration survives rapid switches, waits for readiness, and never retakes control", () => {

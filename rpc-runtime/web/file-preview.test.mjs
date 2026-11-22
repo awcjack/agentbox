@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createFilePreview } from "./file-preview.mjs";
+import { createFilePreview, isMediaPreviewPath } from "./file-preview.mjs";
 
 function fixtures() {
   class Node {
     constructor(tag) { this.tag = tag; this.children = []; this.attributes = {}; this._text = ""; }
-    append(...nodes) { this.children.push(...nodes); }
+    append(...nodes) { for (const node of nodes) node.parent = this; this.children.push(...nodes); }
+    remove() { this.parent.children = this.parent.children.filter(node => node !== this); }
+    addEventListener(name, listener) { this[`on${name}`] = listener; }
     setAttribute(name, value) { this.attributes[name] = value; }
     set textContent(value) { this._text = value; this.children = []; }
     get textContent() { return this._text + this.children.map(child => child.textContent).join(""); }
@@ -99,6 +101,7 @@ for (const [extension, type] of Object.entries({
   webp: "image/webp", bmp: "image/bmp", avif: "image/avif", pdf: "application/pdf",
 })) {
   test(`${extension} uses a MIME-typed URL, safe attributes, and idempotent disposal`, async () => {
+    assert.equal(isMediaPreviewPath(`/workspace/screenshots/file.${extension.toUpperCase()}`), true);
     const f = fixtures();
     const preview = await createFilePreview(new Blob(["data"], { type: "application/octet-stream" }), `file.${extension}`, f);
     const media = preview.node.children[0];
@@ -117,6 +120,30 @@ for (const [extension, type] of Object.entries({
     assert.equal(preview.node.children.length, 0);
   });
 }
+
+test("text, active source, and unknown binary paths don't use the workspace media preview", () => {
+  for (const name of ["notes.md", "file.svg", "file.SVGZ", "file.html", "file.xhtml", "data.bin", "png", "image.png/README"]) {
+    assert.equal(isMediaPreviewPath(name), false, name);
+  }
+});
+
+test("an image decode error shows download guidance only while the preview is current", async () => {
+  const f = fixtures();
+  let valid = true;
+  const blob = new Blob(["not an image"]);
+  const preview = await createFilePreview(blob, "bad.png", { ...f, valid: () => valid });
+  preview.node.children[0].onerror();
+  assert.equal(preview.node.children[0].tag, "p");
+  assert.match(preview.node.textContent, /could not be displayed.*Download file/);
+  preview.dispose();
+  assert.deepEqual(f.revoked, ["blob:test-1"]);
+
+  const stale = await createFilePreview(blob, "stale.png", { ...f, valid: () => valid });
+  valid = false;
+  stale.node.children[0].onerror();
+  assert.equal(stale.node.textContent, "");
+  stale.dispose();
+});
 
 test("recognized raster MIME works for extensionless files", async () => {
   const f = fixtures();

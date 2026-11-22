@@ -6,6 +6,22 @@ const RASTER_TYPES = {
 const SOURCE_EXTENSIONS = new Set(["svg", "svgz", "html", "htm", "xhtml"]);
 const SOURCE_TYPES = new Set(["image/svg+xml", "text/html", "application/xhtml+xml"]);
 
+function previewFormat(filename, type = "") {
+  const extension = /\.([^.]+)$/.exec(String(filename ?? "").split(/[\\/]/).pop())?.[1].toLowerCase();
+  const mime = type.split(";", 1)[0].trim().toLowerCase();
+  // Active source formats must never be promoted to an image/frame by a conflicting MIME.
+  const sourceOnly = SOURCE_EXTENSIONS.has(extension) || SOURCE_TYPES.has(mime);
+  if (sourceOnly) return { extension, sourceOnly };
+  const raster = (Object.hasOwn(RASTER_TYPES, extension) ? RASTER_TYPES[extension] : null)
+    || Object.values(RASTER_TYPES).find(type => type === mime);
+  const pdf = extension === "pdf" || mime === "application/pdf";
+  return { extension, sourceOnly, mediaType: raster || (pdf ? "application/pdf" : null) };
+}
+
+export function isMediaPreviewPath(path) {
+  return Boolean(previewFormat(path).mediaType);
+}
+
 /** Local-only preview. renderMarkdown must be a safe renderer and receives only text,
  * never file-link callbacks. The caller owns dispose(), including on stale results.
  */
@@ -32,24 +48,24 @@ export async function createFilePreview(blob, filename, {
   };
   if (!current()) return result;
 
-  const extension = String(filename ?? "").split(/[\\/]/).pop().split(".").pop().toLowerCase();
-  const mime = String(blob.type || "").split(";", 1)[0].trim().toLowerCase();
-  // Active source formats must never be promoted to an image/frame by a conflicting MIME.
-  const sourceOnly = SOURCE_EXTENSIONS.has(extension) || SOURCE_TYPES.has(mime);
-  const raster = sourceOnly ? null : (Object.hasOwn(RASTER_TYPES, extension) ? RASTER_TYPES[extension] : null)
-    || Object.values(RASTER_TYPES).find(type => type === mime);
-  const pdf = !sourceOnly && (extension === "pdf" || mime === "application/pdf");
-  if (raster || pdf) {
-    const media = doc.createElement(raster ? "img" : "iframe");
-    if (raster) {
+  const { extension, sourceOnly, mediaType } = previewFormat(filename, blob.type);
+  if (mediaType) {
+    const pdf = mediaType === "application/pdf";
+    const media = doc.createElement(pdf ? "iframe" : "img");
+    if (!pdf) {
       media.alt = String(filename ?? "Image preview");
+      media.addEventListener("error", () => {
+        if (!current()) return;
+        media.remove();
+        message("This image could not be displayed. Use Download file to open it locally.");
+      }, { once: true });
     } else {
       media.title = "PDF preview";
       media.setAttribute("sandbox", "");
     }
     media.setAttribute("referrerpolicy", "no-referrer");
     if (!current()) return result;
-    const url = urls.createObjectURL(blob.slice(0, blob.size, raster || "application/pdf"));
+    const url = urls.createObjectURL(blob.slice(0, blob.size, mediaType));
     objectUrls.push(url);
     media.src = url;
     node.append(media);
