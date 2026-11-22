@@ -232,9 +232,12 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   an **Edited N files** card with approximate `+`/`-` line counts from tool
   arguments (not a git diff). The first three paths are listed; the rest expand
   under **Show more files**. Failed tool results are omitted. No undo/backend.
-  Click a path to open a desktop **file preview** pane (Markdown rendered safely,
-  other text as monospace) sourced from the latest matching write/edit/read in the
-  transcript. Escape or × closes the pane; it is not a live filesystem browser.
+  Click a path to open the **file preview** pane. Text previews use the latest
+  matching write/edit/read in the transcript (safe Markdown or monospace text).
+  For raster images (PNG, JPEG, GIF, WebP, BMP, AVIF) and PDFs, an online,
+  writable session opens the current workspace file using the same authenticated
+  preview and download as **Open file…**. Historical or read-only sessions keep
+  the transcript view. Escape or × closes the pane.
 - Confirm, select, input, and editor approvals, including cancellation and
   supervisor-driven expiry/resolution across browsers. Approval edits and message
   drafts survive session switches within the current tab, not reload/logout.
