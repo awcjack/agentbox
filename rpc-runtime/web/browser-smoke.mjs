@@ -8,9 +8,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { normalizeFolder } from "./sidebar.mjs";
 
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
-const output = process.env.SMOKE_OUTPUT_DIR || tmpdir();
-assert.ok((await stat(output)).isDirectory(), "Screenshot output directory must already exist");
+const serveOnly = process.argv.includes("--serve");
+const responsiveOnly = process.argv.includes("--responsive");
 const models = [
   { provider: "fixture", id: "pi-fast", name: "Pi Fast", input: ["text", "image"] },
   { provider: "fixture", id: "pi-reasoning", name: "Pi Reasoning", input: ["text", "image"] },
@@ -123,9 +122,15 @@ const server = createServer(async (request, response) => {
       archived.add(historical[1]);
       response.writeHead(204); response.end(); return;
     }
-    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|export|auto|downloads))?$/.exec(url.pathname);
+    const match = /^\/v1\/sessions\/([^/]+)(?:\/(rpc|ui|events|conversation|export|auto|downloads|browser))?$/.exec(url.pathname);
     const session = match && sessions.get(match[1]);
     if (!session) return json(response, 404, { error: { code: "session_not_found", message: "Session not found" } });
+    if (match[2] === "browser") {
+      assert.equal(request.method, "GET", "the fixture never controls a managed browser");
+      assert.equal(request.headers["x-pi-session-id"], session.nativeSessionId);
+      return json(response, 200, { version: 1, nativeSessionId: session.nativeSessionId, browserSessionId: "fixture-browser", available: true, ready: false,
+        permissions: { view: true, control: false }, capabilities: { liveView: true }, control: { mode: "agent" } });
+    }
     if (match[2] === "downloads") {
       assert.equal(request.method, "POST");
       const previewFixtures = {
@@ -301,8 +306,16 @@ const server = createServer(async (request, response) => {
     json(response, 200, result);
   } catch (error) { serverErrors.push(error.stack); if (!response.headersSent) json(response, 500, { error: { message: error.message } }); else response.destroy(); }
 });
-await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+await new Promise((resolve) => server.listen(serveOnly ? Number(process.env.PORT || 4173) : 0, "127.0.0.1", resolve));
 const origin = `http://127.0.0.1:${server.address().port}`;
+if (serveOnly) {
+  console.log(`Pi RPC fixture: ${origin} (test token: smoke-token)`);
+  await new Promise((resolve) => server.once("close", resolve));
+  process.exit(0);
+}
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || "playwright");
+const output = process.env.SMOKE_OUTPUT_DIR || tmpdir();
+assert.ok((await stat(output)).isDirectory(), "Screenshot output directory must already exist");
 const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}) });
 
 async function until(check, label) {
@@ -324,8 +337,109 @@ async function noOverflow(page) {
   }), { document: true, workspace: true });
 }
 
+async function responsiveSmoke() {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, reducedMotion: "reduce" });
+  const page = await context.newPage(); page.setDefaultTimeout(12_000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  const el = (id) => page.locator(`#${id}`);
+  const screenshot = (name) => page.screenshot({ path: join(output, `pi-responsive-${name}.png`) });
+  const toggle = el("actions-toggle"), pane = el("context-pane"), sidebar = el("sidebar");
+  const prompt = el("prompt"), close = el("close-context-pane");
+  const mainInert = () => page.locator(".main").evaluate((node) => node.inert);
+  const focused = (locator) => locator.evaluate((node) => node === document.activeElement);
+  try {
+    await page.goto(origin); await login(page); await noOverflow(page);
+    assert.equal(await sidebar.evaluate((node) => node.inert), true, "closed drawer is not keyboard-accessible");
+    await screenshot("welcome");
+    await el("open-drawer").tap();
+    assert.equal(await focused(el("close-drawer")), true);
+    assert.equal(await mainInert(), true);
+    await screenshot("drawer");
+    await el("new-session").tap();
+    await page.setViewportSize({ width: 320, height: 640 });
+    await el("new-name").fill("Responsive layout check"); await el("create-session").tap();
+    await until(() => el("session-status").textContent().then((text) => text === "READY"), "session ready");
+    assert.equal(await el("conversation").evaluate((node) => node.scrollTop), 0, "new phone session starts at the welcome heading");
+    const session = [...sessions.values()][0];
+    await prompt.fill("Show a wide table and a workspace link"); await el("send").tap();
+    await page.getByText("Show a wide table and a workspace link", { exact: true }).waitFor();
+    const wide = "abcdefghij".repeat(32);
+    complete(session, { role: "assistant", content: [{ type: "text", text: `# Responsive layout fixture\n\n[Open the report](/workspace/project/preview.md)\n\n| Name | ${wide} |\n| --- | --- |\n| Report | Long table content |\n\n\`\`\`text\n${wide}\n\`\`\`` }], timestamp: ++tick });
+    session.streaming = false; emit(session, { type: "agent_end" });
+    const link = page.getByRole("button", { name: "Preview Open the report" });
+    await link.waitFor(); await noOverflow(page);
+    await prompt.fill("Draft survives responsive views");
+    await noOverflow(page);
+    const usable = await page.locator("#conversation").boundingBox();
+    assert.ok(usable.height > 160, "320px phone leaves room for the transcript");
+    await screenshot("phone");
+    await toggle.tap(); await screenshot("actions");
+    await el("auto-mode").focus(); await page.keyboard.press("Escape");
+    assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+    assert.equal(await focused(toggle), true);
+    await toggle.tap(); await el("open-browser").tap();
+    await page.getByText("The agent has not opened a browser.", { exact: false }).waitFor();
+    assert.equal(await mainInert(), true);
+    const phonePane = { x: 0, y: 0, width: 320, height: 640 };
+    assert.deepEqual(await pane.boundingBox(), phonePane);
+    assert.equal(await el("context-resizer").isVisible(), false);
+    await page.getByRole("button", { name: "Expand preview", exact: true }).tap();
+    assert.deepEqual(await pane.boundingBox(), phonePane, "expanding does not split a phone screen");
+    assert.equal(await page.locator(".browser-viewport").evaluate((node) => getComputedStyle(node).resize), "none");
+    await page.getByRole("button", { name: "Full screen", exact: true }).tap();
+    await page.getByRole("button", { name: "Exit fullscreen", exact: true }).tap();
+    await screenshot("browser"); await page.keyboard.press("Escape");
+    assert.equal(await pane.isVisible(), false);
+    assert.equal(await focused(toggle), true);
+    await link.tap(); await page.locator("#context-pane-body h1").waitFor();
+    await el("download-context-file").waitFor(); await screenshot("file");
+    assert.equal(await focused(close), true);
+    const download = page.waitForEvent("download"); await el("download-context-file").tap();
+    assert.equal((await download).suggestedFilename(), "preview.md");
+    await close.tap();
+    assert.equal(await mainInert(), false);
+    assert.equal(await prompt.inputValue(), "Draft survives responsive views");
+    await el("open-drawer").tap();
+    await page.setViewportSize({ width: 768, height: 1024 });
+    await until(async () => !await mainInert(), "tablet restores conversation after drawer closes");
+    await noOverflow(page); await screenshot("tablet");
+    assert.equal(await el("drawer-shade").isVisible(), false);
+    assert.equal(await el("sidebar-resizer").isVisible(), true);
+    assert.equal(await toggle.isVisible(), true);
+    const tabletMain = await page.locator(".main").boundingBox();
+    await toggle.tap(); await el("open-browser").tap();
+    await page.getByRole("button", { name: "Expand preview", exact: true }).tap();
+    assert.deepEqual(await pane.boundingBox(), tabletMain, "tablet preview fills the conversation column, not the sidebar");
+    assert.equal(await sidebar.evaluate((node) => node.inert), false);
+    assert.equal(await mainInert(), true);
+    await screenshot("tablet-preview");
+    await close.tap();
+    await page.setViewportSize({ width: 667, height: 375 });
+    const question = requestUi(session, { method: "confirm", title: "Review changes on a short screen?", message: "This synthetic request verifies the action buttons remain reachable." });
+    const confirm = page.getByRole("button", { name: "Confirm", exact: true });
+    await confirm.waitFor(); await noOverflow(page); await screenshot("landscape");
+    await confirm.tap();
+    await until(() => !session.pendingUi.some(({ id }) => id === question), "landscape approval submitted");
+    await el("send").waitFor();
+    const send = await el("send").boundingBox();
+    assert.ok(send.y + send.height <= 375, "composer fits after a landscape approval");
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    assert.equal(await toggle.isVisible(), false);
+    assert.equal(await el("open-browser").isVisible(), true, "desktop keeps inline actions");
+    await link.click(); await page.locator("#context-pane-body h1").waitFor();
+    assert.equal(await mainInert(), false, "desktop keeps the composer available alongside the preview");
+    assert.equal(await el("context-resizer").isVisible(), true);
+    await noOverflow(page); await screenshot("desktop");
+    assert.deepEqual(errors, []); assert.deepEqual(serverErrors, []);
+    console.log("Responsive browser smoke passed: 320px and 390px phones, 667px landscape, 768px tablet, 1440px desktop");
+  } finally { await context.close(); }
+}
+
 try {
-  for (const [label, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]]) {
+  if (responsiveOnly) await responsiveSmoke();
+  else for (const [label, viewport] of [["desktop", { width: 1440, height: 1000 }], ["mobile", { width: 390, height: 844 }]]) {
     const context = await browser.newContext({ viewport, isMobile: label === "mobile", hasTouch: label === "mobile", deviceScaleFactor: 1 });
     const page = await context.newPage(); page.setDefaultTimeout(12_000);
     const errors = [];
@@ -335,6 +449,11 @@ try {
     };
     watch(page);
     const openSidebar = async () => { if (label === "mobile") await page.locator("#open-drawer").click(); };
+    const clickAction = async (id) => {
+      const toggle = page.locator("#actions-toggle");
+      if (await toggle.isVisible() && await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
+      await page.locator(`#${id}`).click();
+    };
     const drawerClosed = async () => assert.deepEqual(await page.evaluate(() => ({
       open: document.querySelector("#sidebar").classList.contains("open"),
       expanded: document.querySelector("#open-drawer").getAttribute("aria-expanded"),
@@ -621,10 +740,10 @@ try {
       await page.evaluate(() => document.querySelector("#composer-scroll-fixture").remove());
       assert.equal(await page.locator("#prompt").inputValue(), "Draft while syncing");
       assert.equal(await page.locator("#auto-mode").getAttribute("aria-pressed"), "false");
-      await page.locator("#auto-mode").click();
+      await clickAction("auto-mode");
       await until(() => page.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "true"), "auto on confirmed");
       await until(() => page.locator("#auto-mode").isEnabled(), "auto toggle ready");
-      await page.locator("#auto-mode").click();
+      await clickAction("auto-mode");
       await until(() => page.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "false"), "auto off confirmed");
       assert.deepEqual(calls.filter((call) => call.id === session.id && call.auto).map((call) => call.auto.enabled), [true, false]);
       const openSettings = async () => {
@@ -635,7 +754,7 @@ try {
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
       assert.match(await page.locator("#fast-mode-cost").textContent(), /extra cost/);
       session.holdFast = true;
-      await page.locator("#fast-mode").click();
+      await clickAction("fast-mode");
       await until(() => Boolean(session.releaseFast), "fast command pending");
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false", "no optimistic enable");
       assert.equal(await page.locator("#settings").isDisabled(), true, "settings locked during fast command");
@@ -653,14 +772,14 @@ try {
       await until(() => page.locator("#session-title").textContent().then((text) => text === session.name), "A selected");
       await until(() => page.locator("#fast-mode").isEnabled(), "A restored");
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "true", "returning to A retains on");
-      await page.locator("#fast-mode").click();
+      await clickAction("fast-mode");
       await until(() => page.locator("#settings").isEnabled(), "fast off settled");
       await until(() => page.locator("#fast-mode").isEnabled(), "fast metadata refreshed");
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
       assert.equal(await page.locator("#prompt").inputValue(), "Draft while syncing", "fast preserves draft");
       // A successful prompt response alone must not enable priority billing.
       session.ignoreFast = true;
-      await page.locator("#fast-mode").click();
+      await clickAction("fast-mode");
       await until(() => page.locator("#settings").isEnabled(), "ignored fast command settled");
       await until(() => page.locator("#fast-mode").isEnabled(), "ignored fast metadata refreshed");
       assert.equal(await page.locator("#fast-mode").getAttribute("aria-pressed"), "false");
@@ -889,7 +1008,7 @@ try {
       // Preview uses the same authenticated file read, never the managed browser.
       const previewFile = async (path) => {
         page.once("dialog", (dialog) => dialog.accept(path));
-        await page.locator("#open-file").click();
+        await clickAction("open-file");
         await page.locator('#context-pane[data-mode="workspace-file"]').waitFor();
         await until(() => page.locator("#download-context-file").isEnabled(), "workspace preview loaded");
       };
@@ -1081,7 +1200,7 @@ try {
       if (label === "mobile") await observer.locator("#open-drawer").click();
       await observer.locator(".session-item").filter({ hasText: session.name }).click();
       await observer.locator(".approval").waitFor();
-      await page.locator("#auto-mode").click();
+      await clickAction("auto-mode");
       await until(() => observer.locator("#auto-mode").getAttribute("aria-pressed").then((value) => value === "true"), "auto mode synchronized across tabs");
       assert.equal(await observer.locator(".approval").count(), 1, "toggling auto does not answer an existing approval");
       await noOverflow(page);
@@ -1175,9 +1294,9 @@ try {
       assert.equal(calls.filter((call) => call.id === session.id && call.command?.type === "prompt").length, promptsBeforeArchive, "/archive does not prompt Pi");
       await page.locator("#cancel-end").click();
       assert.ok(sessions.has(session.id), "cancelling /archive keeps process");
-      await page.locator("#end-session").click(); await page.locator("#cancel-end").click();
+      await clickAction("end-session"); await page.locator("#cancel-end").click();
       assert.ok(sessions.has(session.id), "cancelling confirmation keeps process");
-      await page.locator("#end-session").click(); await page.locator("#end-form button[type=submit]").click();
+      await clickAction("end-session"); await page.locator("#end-form button[type=submit]").click();
       await until(() => !sessions.has(session.id), "DELETE frees runtime session");
       await until(() => page.locator("#session-title").textContent().then((text) => text === "Pi coding workspace"), "ended selection cleared");
       await openSidebar();
@@ -1199,7 +1318,7 @@ try {
       assert.ok(resumed && resumed.id !== session.id);
       assert.equal(await page.locator("article.assistant").count(), 1);
       const downloadPromise = page.waitForEvent("download");
-      await page.locator("#export-conversation").click();
+      await clickAction("export-conversation");
       const download = await downloadPromise;
       assert.equal(download.suggestedFilename(), `conversation-${session.nativeSessionId}.json`);
       const exported = JSON.parse(await readFile(await download.path(), "utf8"));
@@ -1207,7 +1326,7 @@ try {
       assert.deepEqual(exported.entries.map((entry) => entry.message), resumed.messages);
       await download.delete();
       // Re-archive the reopened conversation and retrieve it once more.
-      await page.locator("#end-session").click(); await page.locator("#end-form button[type=submit]").click();
+      await clickAction("end-session"); await page.locator("#end-form button[type=submit]").click();
       await until(() => !sessions.has(resumed.id), "re-archive frees resumed process");
       await openSidebar();
       await historical.waitFor();
@@ -1491,7 +1610,7 @@ try {
     } finally { await context.close(); }
   }
   assert.deepEqual(serverErrors, []);
-  if (process.env.SETTINGS_ONLY !== "1" && process.env.FOLDERS_TABS_ONLY !== "1") console.log(`Screenshots: ${join(output, "pi-workspace-desktop.png")} and ${join(output, "pi-workspace-mobile.png")}`);
+  if (!responsiveOnly && process.env.SETTINGS_ONLY !== "1" && process.env.FOLDERS_TABS_ONLY !== "1") console.log(`Screenshots: ${join(output, "pi-workspace-desktop.png")} and ${join(output, "pi-workspace-mobile.png")}`);
 } finally {
   await browser.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
 }
