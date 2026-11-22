@@ -1261,7 +1261,12 @@ test("web assets are public and allowlisted without weakening API authentication
   assert.match(page.headers.get("content-security-policy"), /frame-ancestors 'none'/);
   assert.match(page.headers.get("content-security-policy"), /img-src 'self' data: blob:;/);
   assert.match(page.headers.get("content-security-policy"), /frame-src blob:;/);
-  assert.match(await page.text(), /Pi agent/);
+  const html = await page.text();
+  assert.match(html, /Pi agent/);
+  // Browsers enforce the meta policy in addition to the response header.
+  const metaCsp = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/i)?.[1];
+  assert.match(metaCsp, /img-src 'self' data: blob:;/);
+  assert.match(metaCsp, /frame-src blob:;/);
   for (const asset of ["app.mjs", "transport.mjs", "markdown.mjs", "subagents.mjs", "sidebar.mjs", "attention.mjs", "tool-display.mjs", "commands.mjs", "thinking.mjs", "attachments.mjs", "prompt-history.mjs", "session-title.mjs", "model-visibility.mjs", "auth-storage.mjs", "downloads.mjs", "file-preview.mjs", "styles.css", "icon.svg"]) {
     const response = await fetch(`${baseUrl}/${asset}`);
     assert.equal(response.status, 200);
