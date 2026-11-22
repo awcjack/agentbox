@@ -15,8 +15,13 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
 
 ## Features
 
-- Responsive chat workspace with a mobile session drawer, profile filtering,
-  named sessions, and persisted-history resume. The denser charcoal sidebar lists
+- Responsive chat workspace with profile filtering, named sessions, and
+  persisted-history resume. At 1000px and below, **Actions** contains the session
+  controls, including Browser, Open file, Export JSON, and End & archive. At
+  720px and below, the sidebar becomes a **Sessions** drawer and file and Browser
+  previews fill the workspace. On tablets, previews fill the conversation column
+  while leaving the sidebar available. Close the preview to return to the same draft.
+  Wider layouts keep the resizable sidebar and inline actions. The charcoal sidebar lists
   browser **Recents** first, then **Projects** (one root per configured/discovered
   profile, with that profile's cwd), then a quieter **Archived** disclosure.
   Archiving removes a conversation from Recents (and from this browser's saved
@@ -165,7 +170,9 @@ with the browser's actual origin. Use HTTPS or a trusted private VPN.
   sensitive data. Browser download settings may ask where to save them.
 - **Preview file…** accepts the same workspace paths and uses the same authenticated
   file-read endpoint and 16 MiB limit. It reuses the Browser/file preview right pane,
-  not a modal dialog, so the conversation remains interactive. Opening a file
+  not a separate window. On desktop the conversation remains interactive beside
+  the preview; on phones and tablets the preview takes over the conversation
+  until closed. Opening a file
   replaces Browser and releases any human-control lease. It displays UTF-8 text, safe
   Markdown,
   raster images, and PDFs (when supported by the browser's sandboxed viewer).
@@ -425,6 +432,14 @@ npm install --prefix /tmp/opencode-work/opencode --no-save --no-audit --no-fund 
 PLAYWRIGHT_MODULE=/tmp/opencode-work/opencode/node_modules/playwright/index.mjs \
 SMOKE_OUTPUT_DIR=/tmp/opencode-work/opencode node web/browser-smoke.mjs
 ```
+
+Pass `--responsive` to run the layout smoke and write `pi-responsive-*.png`
+for phones (320×640 and 390×844), landscape (667×375), tablet (768×1024), and
+desktop (1440×1000). It exercises the session drawer and actions, long Markdown,
+file downloads, the Browser panel, landscape approval, and draft preservation
+while resizing. Use `node web/browser-smoke.mjs --serve` for manual verification
+without Playwright; open `http://127.0.0.1:4173` (or set `PORT`) and use the
+fixture-only token `smoke-token`. Neither mode connects to a real Pi session.
 
 Set `FOLDERS_TABS_ONLY=1` for session folders, heading creation, sidebar archive,
 tabs and catalog refresh on desktop/mobile.
