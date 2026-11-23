@@ -303,7 +303,11 @@ assert.equal(spawnCalls.length, unknownResumeCallCount)
 // Persisted parents route both fresh and resumed children into the same custom directory.
 // Keep the default fixture context API minimal to cover older/missing getSessionFile.
 for (const sessionFile of ["/tmp/custom rpc sessions/parent.jsonl", undefined, "", "parent.jsonl"]) {
-  const storage = harness({ readFile: async () => config, spawn: successfulSpawn })
+  const storage = harness({
+    readFile: async () => config,
+    getPiInvocation: (args: string[]) => ({ command: "/exact/pi", args }),
+    spawn: successfulSpawn,
+  })
   const storageContext = context([], {
     sessionManager: { getBranch: () => [], getSessionFile: () => sessionFile },
   })

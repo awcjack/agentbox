@@ -220,7 +220,7 @@ createPiWorkflowExtension({
 let active = 0
 let peak = 0
 const titles: string[] = []
-const ctx = { cwd: process.cwd(), hasUI: true, ui: { select: async (title: string) => {
+const ctx = { cwd: process.cwd(), sessionManager: { getBranch: () => [] }, hasUI: true, ui: { select: async (title: string) => {
   titles.push(title)
   peak = Math.max(peak, ++active)
   await delay(10)
