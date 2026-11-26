@@ -229,7 +229,7 @@ assert.match(
 )
 assert.equal(await toolCall({ toolName: "bash", input: { command: "go test ./..." } }, ctx), undefined)
 
-assert.deepEqual([...tools.keys()], ["report_execution_target", "web_search", "web_fetch", "code_diagnostics", "code_navigation"])
+assert.deepEqual([...tools.keys()], ["report_execution_target", "bulk_edit", "bulk_write", "web_search", "web_fetch", "code_diagnostics", "code_navigation"])
 assert.equal(lspCreated, 0, "the persistent LSP client must be initialized lazily")
 assert.match(
   (await toolCall({ toolName: "code_diagnostics", input: { path: ".env" } }, ctx)).reason,

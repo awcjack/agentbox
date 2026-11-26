@@ -159,11 +159,30 @@ in
         touch $out
       '';
 
+  pi-bulk-extension-test =
+    let
+      testSource = pkgs.runCommand "pi-bulk-extension-test-source" { } ''
+        mkdir -p $out/tests $out/extensions
+        cp ${./tests/pi-bulk.mjs} $out/tests/pi-bulk.mjs
+        cp ${./extensions/pi-bulk.ts} $out/extensions/pi-bulk.ts
+        cp ${./extensions/pi-policy.ts} $out/extensions/pi-policy.ts
+        cp ${./extensions/pi-approval.ts} $out/extensions/pi-approval.ts
+        cp ${./extensions/path-policy.ts} $out/extensions/path-policy.ts
+      '';
+    in
+    pkgs.runCommand "pi-bulk-extension-test" { nativeBuildInputs = [ pkgs.nodejs_22 ]; } ''
+      export HOME=$TMPDIR PI_CODING_AGENT_DIR=$TMPDIR/pi PI_OFFLINE=1
+      node --experimental-strip-types ${testSource}/tests/pi-bulk.mjs \
+        ${pi-coding-agent}/lib/node_modules/pi-monorepo
+      touch $out
+    '';
+
   pi-agentbox-extension-test =
     let
       testSource = pkgs.runCommand "pi-agentbox-extension-test-source" { } ''
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-agentbox.ts} $out/tests/pi-agentbox.ts
+        cp ${./extensions/pi-bulk.ts} $out/extensions/pi-bulk.ts
         cp ${./tests/pi-execution-target.ts} $out/tests/pi-execution-target.ts
         cp ${./extensions/execution-target.ts} $out/extensions/execution-target.ts
         cp ${./extensions/path-policy.ts} $out/extensions/path-policy.ts
@@ -340,6 +359,7 @@ in
       testSource = pkgs.runCommand "pi-cursor-integration-test-source" { } ''
         mkdir -p $out/tests $out/extensions
         cp ${./tests/pi-cursor.ts} $out/tests/pi-cursor.ts
+        cp ${./extensions/pi-bulk.ts} $out/extensions/pi-bulk.ts
         cp ${./extensions/execution-target.ts} $out/extensions/execution-target.ts
         cp ${./extensions/path-policy.ts} $out/extensions/path-policy.ts
         cp ${./extensions/pi-agentbox.ts} $out/extensions/pi-agentbox.ts

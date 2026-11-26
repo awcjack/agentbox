@@ -1479,6 +1479,8 @@ in
                 tools = [
                   "write"
                   "edit"
+                  "bulk_edit"
+                  "bulk_write"
                 ];
                 patterns = [
                   "/workspace"

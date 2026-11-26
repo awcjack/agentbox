@@ -337,6 +337,55 @@ assert.match((await call(aliases.toolCall, "bash", { command: "python3 -c \"prin
 assert.match((await call(aliases.toolCall, "mcp__files__read", { arguments: { path: "leak" } }, context({ cwd: root }))).reason, /sensitive path/)
 assert.match((await call(aliases.toolCall, "write", { path: "managed/new-policy.json" }, context({ cwd: root }))).reason, /Nix-store or managed/)
 
+// Bulk orchestration authorizes every destination, never replacement text.
+for (const tool of ["bulk_edit", "bulk_write"]) {
+  const file = (path: string) => tool === "bulk_edit"
+    ? { path, edits: [{ oldText: ".env", newText: "/managed/policy.json".repeat(10_000) }] }
+    : { path, content: "/managed/policy.json".repeat(10_000) }
+  const input = (...paths: string[]) => ({ files: paths.map(file) })
+  assert.equal(await call(aliases.toolCall, tool, input("alias/file.txt", "safe/new.txt"), context({ cwd: root })), undefined)
+  for (const path of [".env", "leak", "alias/.env"]) {
+    for (const paths of [["safe/file.txt", path], [path, "safe/file.txt"]]) {
+      assert.match((await call(aliases.toolCall, tool, input(...paths), context({ cwd: root }))).reason, /sensitive path/)
+    }
+  }
+  for (const path of ["/nix/store/hash-file", "/managed/policy.json", "/etc/agentbox/pi-runtime.json", "/home/agent/.pi/agent/extensions/policy.ts", "managed/new-policy.json"]) {
+    assert.match((await call(aliases.toolCall, tool, input("safe/file.txt", path), context({ cwd: root }))).reason, /Nix-store or managed/)
+  }
+  assert.match((await call(unresolved.toolCall, tool, input("README.md"))).reason, /canonicalize/)
+  for (const malformed of [
+    {}, { files: null }, { files: {} }, { files: [] },
+    ...[null, "README.md", {}, { path: null }, { path: 1 }, { path: [] }, { path: { nested: "README.md" } }, { path: "" }, { path: "   " }, { path: "bad\u0000path" }]
+      .map(entry => ({ files: [file("README.md"), entry] })),
+    input(...Array(101).fill("README.md")),
+    input("x".repeat(100_001)),
+  ]) {
+    assert.match((await call(immutable.toolCall, tool, malformed)).reason, /target limits/, `${tool}: malformed or over-limit destination`)
+  }
+  // Duplicate destinations still count towards the tool's 100-file limit.
+  assert.equal(await call(immutable.toolCall, tool, input(...Array(100).fill("README.md"))), undefined)
+  for (const decision of ["deny", "ask"]) {
+    const configured = harness(JSON.stringify({ version: 1, defaultDecision: "deny", rules: [
+      { tools: [tool], patterns: ["/workspace/**"], decision: "allow" },
+      { tools: [tool], patterns: ["**/restricted.txt"], decision },
+      { tools: ["edit", "write"], patterns: ["*"], decision: "deny" },
+    ] }))
+    assert.equal(await call(configured.toolCall, tool, input("README.md")), undefined)
+    for (const paths of [["README.md", "restricted.txt"], ["restricted.txt", "README.md"]]) {
+      assert.match((await call(configured.toolCall, tool, input(...paths))).reason, decision === "deny" ? /Denied/ : /approval was denied/)
+    }
+    // An allowed outer batch does not grant permission to nested primitives.
+    for (const nested of ["edit", "write"]) {
+      assert.match((await call(configured.toolCall, nested, { path: "README.md" })).reason, /Denied/)
+    }
+  }
+  const canonicalBulk = harness(JSON.stringify({ version: 1, defaultDecision: "deny", rules: [
+    { tools: [tool], patterns: [`${root}/safe/**`], decision: "allow" },
+  ] }))
+  assert.equal(await call(canonicalBulk.toolCall, tool, input("alias/file.txt"), context({ cwd: root })), undefined)
+  assert.match((await call(canonicalBulk.toolCall, tool, input("alias/file.txt", "outside.txt"), context({ cwd: root }))).reason, /Denied/)
+}
+
 const canonicalPolicy = harness(JSON.stringify({
   version: 1,
   defaultDecision: "deny",

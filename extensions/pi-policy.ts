@@ -154,8 +154,8 @@ export const TOOL_INPUT_TARGETS: Readonly<Record<string, readonly string[]>> = O
   write: ["path", "filePath", "file_path", "notebook_path"],
 })
 
-const FILE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "code_diagnostics", "code_navigation", "report_execution_target"])
-const WRITE_TOOLS = new Set(["write", "edit", "apply_patch", "patch", "delete", "move"])
+const FILE_TOOLS = new Set(["read", "write", "edit", "bulk_edit", "bulk_write", "grep", "find", "ls", "code_diagnostics", "code_navigation", "report_execution_target"])
+const WRITE_TOOLS = new Set(["write", "edit", "bulk_edit", "bulk_write", "apply_patch", "patch", "delete", "move"])
 const DECISIONS = new Set<Decision>(["allow", "ask", "deny"])
 const CONFIG_KEYS = new Set(["version", "defaultDecision", "timeout", "rules", "auto"])
 const AUTO_KEYS = new Set(["enable", "provider", "model", "timeout"])
@@ -330,7 +330,24 @@ function rawTargets(toolName: string, input: Record<string, unknown>) {
   const targets: PolicyTarget[] = []
   let complete = true
   const configured = TOOL_INPUT_TARGETS[toolName]
-  if (configured) {
+  if (toolName === "bulk_edit" || toolName === "bulk_write") {
+    // Only destinations are targets: replacement/content strings can be huge
+    // and are not paths. Nested edit/write calls retain their own authorization.
+    const files = input.files
+    complete = Array.isArray(files) && files.length > 0 && files.length <= 100
+    if (complete && Array.isArray(files)) {
+      for (const file of files) {
+        if (!isObject(file) || typeof file.path !== "string" || !file.path.trim() || file.path.includes("\u0000")) {
+          complete = false
+          break
+        }
+        if (!collectStringTargets(file.path, targets, 0, true)) {
+          complete = false
+          break
+        }
+      }
+    }
+  } else if (configured) {
     for (const key of configured) complete = collectStringTargets(input[key], targets, 0, FILE_TOOLS.has(toolName)) && complete
     if (toolName === "task" && Array.isArray(input.jobs)) {
       for (const job of input.jobs) {

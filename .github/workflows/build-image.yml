@@ -99,6 +99,7 @@ jobs:
           for test in \
             agent-archive-request-test \
             pi-agentbox-extension-test \
+            pi-bulk-extension-test \
             pi-browser-extension-test \
             pi-workflow-extension-test \
             pi-policy-extension-test \
