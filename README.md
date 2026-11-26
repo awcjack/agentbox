@@ -102,7 +102,7 @@ host mounts, network access, Docker access, and cloud permissions granted to it;
 scope each of those to the least privilege needed.
 
 Pi adds `web_search`, `web_fetch`, `code_diagnostics`, `code_navigation`,
-`report_execution_target`, `todo`, `question`, and `task`. Diagnostics and navigation lazily start and reuse
+`report_execution_target`, `bulk_edit`, `bulk_write`, `todo`, `question`, and `task`. Diagnostics and navigation lazily start and reuse
 language servers for Go, Nix, TypeScript/JavaScript, JSON, YAML, HTML, and CSS;
 diagnostics fall back to the existing deterministic type/syntax checks and still
 run automatically after `write`/`edit` alongside project tests. LSP output and
@@ -110,6 +110,53 @@ targets with disallowed file URIs are removed; free-form diagnostic and hover
 text is bounded but is not a sensitive-content filter. Search uses anonymous
 DuckDuckGo HTML or Jina Search with `JINA_API_KEY`; fetch only accepts public
 HTTPS URLs and output is bounded.
+
+### Multi-file edits and writes
+
+The bundled `extensions/pi-bulk.ts` adds multi-file tools without replacing Pi's
+single-file `edit` and `write`:
+
+```json
+{
+  "files": [
+    {"path": "src/example.ts", "edits": [{"oldText": "const a = 1;", "newText": "const a = 2;"}]},
+    {"path": "src/example2.ts", "edits": [{"oldText": "const b = 3;", "newText": "const b = 4;"}]}
+  ]
+}
+```
+
+Pass that object to `bulk_edit`. For `bulk_write`, use
+`{"files":[{"path":"a.txt","content":"first\n"},{"path":"b.txt","content":"second\n"}]}`
+(with JSON newline escapes). Prefer targeted edits to full rewrites. Each tool
+accepts 1–100 file entries; `bulk_edit` accepts 1–1000 replacements per file.
+Paths are limited to 4096 characters. Replacements within each file must be
+unique, non-overlapping matches against that file's original contents.
+
+The full input shape is checked upfront, but permissions and edit matches are
+checked as each file executes. Files run in order through Pi's nested
+`ctx.executeTool` API, retaining managed policy/approvals, canonical path checks,
+mutation queues, and post-edit diagnostics/tests. Default workspace policy
+allows the bulk names; custom policy rules must authorize both the bulk call
+and its nested `edit`/`write` calls. The outer bulk policy inspects all destination
+paths, not replacement text. Tools remain model-only orchestrators.
+
+**Batches are not transactions:** execution stops on the first error or
+cancellation, without rolling back earlier files. Results record each file as
+`completed`, `failed`, or `skipped`; a failed file might have changed, so inspect
+it before retrying. Long displayed paths are abbreviated; full paths remain in
+result details. Feedback is capped at 12000 characters/1800 lines plus a
+truncation notice. RPC edited-file summaries count only completed entries,
+including partial batches. Batching reduces tool-call/turn overhead, not the
+tokens needed to generate replacement contents.
+
+Verify with:
+
+```bash
+nix build .#pi-bulk-extension-test .#pi-policy-extension-test \
+  .#pi-agentbox-extension-test --print-build-logs --no-update-lock-file
+```
+
+### Managed workflow
 
 Workflow defaults provide `simple-task`, `explore`, and `general` roles without
 pinning a provider or model. Roles inherit the active Pi selection unless
