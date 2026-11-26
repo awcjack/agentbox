@@ -5,6 +5,11 @@ export function toolPreview(call, result) {
     try { args = JSON.parse(args); } catch { return shorten(args); }
   }
   if (!args || typeof args !== "object") return "";
+  const name = String(call.name || result?.toolName || "").trim().toLowerCase();
+  if ((name === "bulk_edit" || name === "bulk_write") && Array.isArray(args.files)) {
+    const paths = args.files.map((file) => file?.path).filter((path) => typeof path === "string" && path.trim());
+    return shorten(`${args.files.length} file${args.files.length === 1 ? "" : "s"}${paths.length ? `: ${paths.join(", ")}` : ""}`);
+  }
   const primary = ["command", "path", "file_path", "filePath", "query", "url", "pattern", "description", "prompt", "action"].find((key) => typeof args[key] === "string" && args[key].trim());
   return primary ? shorten(args[primary]) : "";
 }

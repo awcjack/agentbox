@@ -48,3 +48,22 @@ test("group consecutive thinking/tools from the same model without merging prose
     assert.equal(canGroupActions(boundary, action()), false);
   }
 });
+
+test("bulk previews show bounded file counts and paths without content or edits", () => {
+  const files = [
+    { path: "src/a", content: "PRIVATE CONTENT", edits: [{ oldText: "PRIVATE OLD", newText: "PRIVATE NEW" }] },
+    { path: "src/b", content: "PRIVATE CONTENT" },
+  ];
+  for (const name of ["bulk_write", "bulk_edit"]) {
+    assert.equal(toolPreview({ name, arguments: { files } }), "2 files: src/a, src/b");
+    assert.equal(toolPreview({ name, arguments: JSON.stringify({ files }) }), "2 files: src/a, src/b");
+    assert.equal(toolPreview({}, { toolName: name, args: { files } }), "2 files: src/a, src/b");
+    assert.equal(toolPreview({ name, arguments: { files: [files[0]] } }), "1 file: src/a");
+    assert.equal(toolPreview({ name, arguments: { files: [] } }), "0 files");
+    assert.equal(toolPreview({ name, arguments: { files: [null, {}] } }), "2 files");
+    const preview = toolPreview({ name, arguments: { files: [{ path: "a\nb" }, { path: "x".repeat(200) }] } });
+    assert.equal(preview.length, 140);
+    assert.ok(preview.startsWith("2 files: a b, "));
+    assert.ok(preview.endsWith("…"));
+  }
+});

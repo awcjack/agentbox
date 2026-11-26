@@ -1,7 +1,7 @@
 // Derive Codex-style Edited-files summaries from write/edit tool calls in the transcript.
 // Counts are approximate from tool arguments (not a real git diff).
 
-const WRITE_TOOLS = new Set(["write", "edit", "apply_patch", "patch", "delete", "move"]);
+const WRITE_TOOLS = new Set(["write", "edit", "apply_patch", "patch", "delete", "move", "bulk_edit", "bulk_write"]);
 const PATH_KEYS = ["path", "file_path", "filePath", "notebook_path", "destination", "dest", "target"];
 
 export function parseToolArgs(call, result) {
@@ -62,6 +62,27 @@ function editLineDelta(args) {
     return { added: lineCount(newText), removed: lineCount(oldText) };
   }
   return { added: 0, removed: 0 };
+}
+
+/** Return only confirmed batch entries; a parent error may still include completed files.
+ * Nested tool events/details are deliberately not traversed: the batch owns its changes.
+ */
+export function changesFromTool(call, result) {
+  const name = toolName(call, result);
+  if (name !== "bulk_edit" && name !== "bulk_write") {
+    const change = changeFromTool(call, result);
+    return change ? [change] : [];
+  }
+  const args = parseToolArgs(call, result);
+  const outcomes = result?.details?.files;
+  if (result?.running || !Array.isArray(args?.files) || !Array.isArray(outcomes)) return [];
+  return args.files.flatMap((file, index) => {
+    const outcome = outcomes[index];
+    if (!file || typeof file.path !== "string" || !file.path.trim()
+      || outcome?.status !== "completed" || outcome.path !== file.path) return [];
+    const change = changeFromTool({ name: name === "bulk_write" ? "write" : "edit", arguments: file });
+    return change ? [change] : [];
+  });
 }
 
 /** @returns {{ path: string, added: number, removed: number, op: string } | null} */

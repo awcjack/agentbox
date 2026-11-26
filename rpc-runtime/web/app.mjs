@@ -5,7 +5,7 @@ import { mountSubagentViewer } from "./subagent-viewer.mjs";
 import { compareArchivedSessions, resolveRecentEntries, initSidebarResize, sessionActivitySymbol, sessionFolderKey, normalizeFolder, readSessionFolders, saveSessionFolders, readPinnedFolders, savePinnedFolders, pinnedFoldersForProfile, initSessionDragDrop, folderOpenKey, isFolderOpen, partitionFolderEntries, partitionProjectEntries } from "./sidebar.mjs";
 import { attentionTitle, createAttentionTracker } from "./attention.mjs";
 import { canGroupActions, toolPreview } from "./tool-display.mjs";
-import { accumulateChange, changeFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
+import { accumulateChange, changesFromTool, createChangeAccumulator, formatDiffCount, summarizeFileChanges } from "./file-changes.mjs";
 import { findFilePreview, isMarkdownPath, pathBreadcrumb } from "./context-pane.mjs";
 import { archiveCommand, bangCommand, downloadCommand, commandQuery, commandSuggestions, fastModeControl } from "./commands.mjs";
 import { thinkingLevels, thinkingModelKey } from "./thinking.mjs";
@@ -1429,8 +1429,7 @@ function renderMessages() {
       } else if (block.type === "toolCall") {
         shown.add(block.id);
         const result = results.get(block.id);
-        const change = changeFromTool(block, result);
-        if (change) accumulateChange(turnChanges, change);
+        for (const change of changesFromTool(block, result)) accumulateChange(turnChanges, change);
         body.append(renderTool(block, result, block.id));
       } else renderContent(body, [block], message.role === "assistant" ? {
         onFilePreview: (filePath) => downloadWorkspaceFile(ctx, filePath, { preview: true }),
@@ -1474,8 +1473,7 @@ function renderMessages() {
   }
   for (const [id, result] of results) if (!shown.has(id)) {
     const call = { name: result.toolName, arguments: result.args };
-    const change = changeFromTool(call, result);
-    if (change) accumulateChange(turnChanges, change);
+    for (const change of changesFromTool(call, result)) accumulateChange(turnChanges, change);
     next.append(renderTool(call, result, id));
   }
   flushFileChanges(ctx, next, turnChanges, turnKey);
