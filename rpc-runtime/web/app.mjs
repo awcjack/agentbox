@@ -1725,6 +1725,10 @@ function handleEvent(ctx, frame) {
   } else if (["agent_end", "agent_settled", "turn_end"].includes(type)) {
     requestRefresh(ctx);
   } else if (type?.startsWith("tool_execution_")) {
+    // Nested calls belong to their parent (e.g. bulk_edit), not the transcript.
+    // Retaining them here creates orphan rows and double-counts file changes;
+    // get_messages never includes nested results to prune them on refresh.
+    if (event.parentToolCallId) return;
     const previous = ctx.tools.get(event.toolCallId) || {};
     const result = event.result || event.partialResult || {};
     ctx.tools.set(event.toolCallId, { ...previous, ...result, toolName: event.toolName || previous.toolName, args: event.args || previous.args, running: type !== "tool_execution_end", isError: event.isError || false });
