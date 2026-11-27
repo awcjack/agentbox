@@ -45,6 +45,8 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
       return config
     },
     signal: async (state: string) => { signals.push(state) },
+    // Policy fixtures must not load SDK settings or read global user defaults.
+    defaultsStore: async () => ({ read: () => ({}), setAuto: async () => {}, setModel: async () => {} }),
     ...overrides,
   })(pi)
   const command = (args: string, ctx = context()) => commands.get("auto").handler(args, ctx)
@@ -757,12 +759,19 @@ assert.deepEqual(hardDenials.state.titles, [], "human approval cannot override h
 // Configuration availability does not turn auto on. Each instance starts off.
 const toggled = harness(autoPolicy({ rules: stateRules }), { realpath: async (path: string) => path }, false)
 let toggleModels = 0, togglePrompts = 0
-const statuses: any[] = []
+const statuses: any[] = [], defaultStatuses: any[] = []
 const toggleContext = autoContext(async () => { toggleModels++; return verdict("allow") })
 toggleContext.hasUI = true
 toggleContext.mode = "rpc"
-toggleContext.ui = { setStatus: (key: string, value: string) => { assert.equal(key, "agentbox-auto"); statuses.push(JSON.parse(value)) }, notify: () => {}, select: async () => { togglePrompts++; return "Allow once" } }
+toggleContext.ui = { setStatus: (key: string, value: string) => {
+  if (key === "agentbox-auto") statuses.push(JSON.parse(value))
+  else {
+    assert.equal(key, "agentbox-default-model")
+    defaultStatuses.push(JSON.parse(value))
+  }
+}, notify: () => {}, select: async () => { togglePrompts++; return "Allow once" } }
 await toggled.lifecycle("session_start", toggleContext)
+assert.deepEqual(defaultStatuses, [{ scope: "global", model: null }])
 assert.deepEqual(statuses.at(-1), { available: true, enabled: false })
 assert.equal(await call(toggled.toolCall, "read", { path: "README.md" }, toggleContext), undefined)
 assert.equal(toggleModels, 0); assert.equal(togglePrompts, 1)
