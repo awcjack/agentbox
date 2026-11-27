@@ -180,7 +180,41 @@ const READ_COMMANDS = new Set([
 ]);
 
 const RESTORE_SETTINGS = Symbol("restore conversation settings");
-const RESTORE_COMMANDS = new Set(["set_model", "set_thinking_level", "set_auto_compaction", "set_steering_mode", "set_follow_up_mode"]);
+const RESTORE_COMMANDS = new Set(["get_state", "get_commands", "set_model", "set_thinking_level", "set_auto_compaction", "set_steering_mode", "set_follow_up_mode"]);
+const RESTORE_MODE_PROMPTS = new Set(["/auto on", "/auto off", "/auto review", "/fast on", "/fast off"]);
+
+function modeSelection(mode) {
+  return mode == null ? null : mode.review ? "review" : mode.enabled ? "on" : "off";
+}
+
+async function restoreMode(child, name, choice) {
+  const status = () => name === "auto" ? child.autoMode : child.fastMode;
+  if (choice === null || choice === modeSelection(status()) || (choice === "off" && !status()?.available)) return;
+  // Never send a slash command that Pi could treat as a model prompt. Require
+  // both the managed status and a registered extension command on the child.
+  const failure = () => new HttpError(409, "settings_restore_failed", `Pi did not preserve conversation ${name} mode`);
+  if (!status()?.available) throw failure();
+  const commands = await child.sendCommand({ type: "get_commands" }, RESTORE_SETTINGS);
+  if (!commands.success || !Array.isArray(commands.data?.commands)
+    || !commands.data.commands.some((command) => command?.name === name && command.source === "extension")) throw failure();
+  const result = await child.sendCommand({ type: "prompt", message: `/${name} ${choice}` }, RESTORE_SETTINGS);
+  if (!result.success || result.data?.disposition !== "handled" || modeSelection(status()) !== choice) throw failure();
+}
+
+async function restoreMetadataSelection(child, selection, nativeSessionId) {
+  const state = await child.sendCommand({ type: "get_state" }, RESTORE_SETTINGS);
+  if (!state.success || state.data?.sessionId !== nativeSessionId || state.data.isStreaming !== false || state.data.isCompacting !== false
+    || state.data.pendingMessageCount !== 0 || child.pendingUi.size || child.agentBusy) throw new HttpError(409, "settings_unavailable", "Pi was not ready to restore the saved selection");
+  const { model, thinkingLevel, fast } = selection;
+  if (state.data.model?.provider !== model.provider || state.data.model?.id !== model.id) {
+    const result = await child.sendCommand({ type: "set_model", provider: model.provider, modelId: model.id }, RESTORE_SETTINGS);
+    if (!result.success) return; // The saved model is no longer available. Keep Pi's fallback.
+  }
+  if (thinkingLevel !== undefined) await child.sendCommand({ type: "set_thinking_level", level: thinkingLevel }, RESTORE_SETTINGS);
+  if (fast && child.fastMode?.available && child.profile.allowedCommands.has("prompt")) {
+    await restoreMode(child, "fast", fast);
+  }
+}
 
 function conversationSettings(state) {
   if (typeof state.model?.provider !== "string" || typeof state.model?.id !== "string"
@@ -996,7 +1030,8 @@ class Session extends EventEmitter {
       try {
         const value = JSON.parse(record.statusText);
         if (value && typeof value.available === "boolean" && typeof value.enabled === "boolean"
-          && Object.keys(value).length === 2 && (!value.enabled || value.available)) this.autoMode = value;
+          && (!value.enabled || value.available) && (Object.keys(value).length === 2
+            || (Object.keys(value).length === 3 && value.review === true && value.available && !value.enabled))) this.autoMode = value;
       } catch { /* Unknown or malformed extension status cannot enable the toggle. */ }
     }
     if (record.type === "extension_ui_request" && record.method === "setStatus" && record.statusKey === "agentbox-fast") {
@@ -1133,7 +1168,8 @@ class Session extends EventEmitter {
   }
 
   sendCommand(command, conversationRead = false) {
-    const restoring = conversationRead === RESTORE_SETTINGS && this.conversationLocked && RESTORE_COMMANDS.has(command?.type);
+    const restoring = conversationRead === RESTORE_SETTINGS && this.conversationLocked && (RESTORE_COMMANDS.has(command?.type)
+      || (command?.type === "prompt" && this.profile.allowedCommands.has("prompt") && RESTORE_MODE_PROMPTS.has(command.message)));
     if (this.status !== "running") throw new HttpError(409, "session_not_running", "session is not running");
     if (this.conversationLocked && !restoring && !(conversationRead === true && READ_COMMANDS.has(command?.type))) {
       throw new HttpError(409, "conversation_locked", "conversation operation is in progress");
@@ -1710,7 +1746,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
         const creationKey = body.resume ? resumeKey : id;
         creating.add(creationKey);
         try {
-          const saved = body.resume ? await resolveHistorySession(profile, body.resume, { details: true }) : undefined;
+          const saved = body.resume ? await resolveHistorySession(profile, body.resume, { details: true, selection: true }) : undefined;
           const resumePath = saved?.path;
           if (saved && saved.cwd !== profile.cwd) {
             try { profile = (await selectFolder(config.profiles, saved.cwd, body.profile)).profile; }
@@ -1743,8 +1779,18 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           }
           if (shuttingDown) throw new HttpError(503, "shutting_down", "runtime is shutting down");
           session = new Session({ id, profileName: body.profile, profile, resume: body.resume, resumePath, name: body.name, folder, config, postBroker, spawnProcess, signalProcessGroup, now, uuid });
+          if (saved?.selection) {
+            session.conversationLocked = true;
+            preparing.add(session);
+            session.once("exit", () => preparing.delete(session));
+            await restoreMetadataSelection(session, saved.selection, body.resume);
+            if (shuttingDown || session.status !== "running") throw new HttpError(503, "resume_interrupted", "session stopped during resume");
+            session.conversationLocked = false;
+            preparing.delete(session);
+          }
           sessions.set(id, session);
         } catch (error) {
+          if (session && preparing.has(session)) await session.stop();
           if (error instanceof HttpError) throw error;
           throw new HttpError(502, "spawn_failed", `failed to start Pi RPC process: ${error.message}`);
         } finally {
@@ -1917,6 +1963,7 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
             throw new HttpError(409, "conversation_stale", "conversation identity or leaf changed; refresh before retrying");
           }
           const settings = conversationSettings(snapshot.state);
+          const auto = modeSelection(session.autoMode), fast = modeSelection(session.fastMode);
           const targetRole = body.action === "fork" ? "assistant" : "user";
           const index = snapshot.branch.findIndex((entry) => entry.id === body.entryId && entry.type === "message" && entry.message?.role === targetRole);
           if (index < 0) throw new HttpError(400, "invalid_entry", `entryId must select ${targetRole === "assistant" ? "an assistant" : "a user"} message on the current branch`);
@@ -1971,6 +2018,8 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
             const result = await child.sendCommand(command, RESTORE_SETTINGS);
             if (!result.success) throw new HttpError(409, "settings_restore_failed", "Pi rejected restoring conversation settings; source was not stopped");
           }
+          await restoreMode(child, "auto", auto);
+          await restoreMode(child, "fast", fast);
           const loaded = await readSnapshot(child);
           if (!isDeepStrictEqual(conversationSettings(loaded.state), settings)) throw new HttpError(409, "settings_restore_failed", "Pi did not preserve conversation settings; source was not stopped");
           const childRevision = child.revision;

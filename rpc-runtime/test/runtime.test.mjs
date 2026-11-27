@@ -853,6 +853,22 @@ test("conversation GET returns authoritative active-branch message IDs", async (
   assert.deepEqual(result.body.messages[2].message, f.source.entries[4].message);
 });
 
+test("revert does not replay a mode as a model prompt when the child lacks the extension command", async (t) => {
+  const f = await conversationFixture(t, {}, { onSpawn(child, args) {
+    child.output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-fast",
+      statusText: JSON.stringify({ available: true, enabled: !args.includes("--session") }) });
+    child.stdin.on("data", (chunk) => {
+      const command = JSON.parse(chunk.toString());
+      if (command.type === "get_commands") child.output({ type: "response", command: command.type, id: command.id, success: true,
+        data: { commands: [{ name: "fast", source: "prompt" }] } });
+    });
+  } });
+  assert.equal(f.runtime.sessions.get(f.id).fastMode.enabled, true);
+  assert.equal((await f.act({ action: "revert" })).body.error.code, "settings_restore_failed");
+  assert.doesNotMatch(f.children[1].input, /"type":"prompt"/);
+  assert.equal(f.runtime.sessions.get(f.id).status, "running");
+});
+
 test("conversation restores current settings rather than prefix defaults, without exposing internal setters", async (t) => {
   const f = await conversationFixture(t);
   Object.assign(f.source.state, { model: { provider: "other", id: "current" }, thinkingLevel: "high", autoCompactionEnabled: false, steeringMode: "all", followUpMode: "all" });

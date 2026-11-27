@@ -218,8 +218,8 @@ function updateControls() {
   const autoMode = ctx?.meta?.autoMode;
   $("auto-mode").disabled = !canWrite(ctx) || !autoMode?.available || ctx.record.autoModeBusy;
   $("auto-mode").setAttribute("aria-pressed", String(autoMode?.enabled === true));
-  $("auto-mode").textContent = ctx?.record.autoModeBusy || (ctx && !ctx.ready) ? "Auto: ..." : ctx && !autoMode ? "Auto: unknown" : autoMode?.enabled ? "Auto: on" : "Auto: off";
-  $("auto-mode").title = ctx && !autoMode ? "This Pi session has not reported auto-mode support. Deploy the updated runtime and policy extension, then start a new Pi session; the current mode cannot be confirmed." : !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply. This session's choice is retained on restart/resume." : "Auto mode is off. Normal permission rules apply. Click to enable for this session and retain its choice on restart/resume.";
+  $("auto-mode").textContent = ctx?.record.autoModeBusy || (ctx && !ctx.ready) ? "Auto: ..." : ctx && !autoMode ? "Auto: unknown" : autoMode?.enabled ? "Auto: on" : autoMode?.review ? "Auto: review" : "Auto: off";
+  $("auto-mode").title = ctx && !autoMode ? "This Pi session has not reported auto-mode support. Deploy the updated runtime and policy extension, then start a new Pi session; the current mode cannot be confirmed." : !autoMode?.available ? "Auto mode is unavailable in this session's policy." : autoMode.enabled ? "Auto-approve eligible calls. Anything it cannot approve asks you; explicit rules and safety guards still apply. This session's choice is retained on restart/resume." : autoMode.review ? "Review mode checks default asks and may request human approval. Click to switch to Auto, or use /auto off to disable Review." : "Auto mode is off. Normal permission rules apply. Click to enable for this session and retain its choice on restart/resume.";
   $("prompt").disabled = !ctx || readOnly;
   const shellDraft = bangCommand(draft?.text?.trim() || "");
   const shellMode = Boolean(shellDraft);

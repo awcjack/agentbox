@@ -101,7 +101,29 @@ async function readHeader(handle, id, cwd, allowSubdirectories = false) {
   return { info, header, lines };
 }
 
-export async function resolveHistorySession(profile, id, { details = false } = {}) {
+// Pi 1.5.2 treats a metadata-only history (e.g. revert before the first
+// prompt) like a fresh session and appends its defaults on open. Capture the
+// selected settings before launch. Normal conversations use Pi's native restore.
+function metadataSelection({ info, header, lines }) {
+  if (header.version !== 3 || info.size > WINDOW_BYTES) return undefined;
+  try {
+    const entries = lines.filter(line => line.trim()).map(line => JSON.parse(line));
+    if (entries.some(entry => ["message", "custom_message", "compaction", "branch_summary"].includes(entry.type))) return undefined;
+    const branch = conversationBranch({ entries, leafId: entries.at(-1)?.id ?? null });
+    const model = branch.findLast(entry => entry.type === "model_change");
+    const thinking = branch.findLast(entry => entry.type === "thinking_level_change");
+    if (typeof model?.provider !== "string" || typeof model.modelId !== "string") return undefined;
+    const fast = entries.findLast(entry => entry.type === "custom" && entry.customType === "agentbox-fast-mode")?.data;
+    return {
+      model: { provider: model.provider, id: model.modelId },
+      thinkingLevel: typeof thinking?.thinkingLevel === "string" ? thinking.thinkingLevel : undefined,
+      fast: fast?.version === 1 && fast.sessionId === header.id && fast.enabled === true
+        && fast.provider === model.provider && fast.modelId === model.modelId ? "on" : null,
+    };
+  } catch { return undefined; }
+}
+
+export async function resolveHistorySession(profile, id, { details = false, selection = false } = {}) {
   if (typeof id !== "string" || !NATIVE_SESSION_ID_RE.test(id)) return null;
   try {
     const roots = await historyDirectories(profile);
@@ -122,7 +144,7 @@ export async function resolveHistorySession(profile, id, { details = false } = {
           const parsed = await readHeader(handle, id, profile.cwd, profile.allowSubdirectories);
           if (!parsed) continue;
           if (match) return null;
-          match = details ? { path, cwd: parsed.header.cwd } : path;
+          match = details ? { path, cwd: parsed.header.cwd, ...(selection && { selection: metadataSelection(parsed) }) } : path;
         } catch { /* Corrupt, unreadable or replaced entries are not sessions. */ }
         finally { await handle?.close(); }
       }
