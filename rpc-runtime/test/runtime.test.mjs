@@ -603,6 +603,22 @@ test("expired approval replies remain single-use and never reach Pi", async (t) 
   assert.deepEqual((await request(f.baseUrl, `/v1/sessions/${session.id}`)).body.session.pendingUi, []);
 });
 
+test("saved global default model metadata distinguishes unknown, unset, and selected", async (t) => {
+  const f = await fixture(t);
+  const session = (await request(f.baseUrl, "/v1/sessions", { method: "POST", body: { profile: "default" } })).body.session;
+  const metadata = async () => (await request(f.baseUrl, `/v1/sessions/${session.id}`)).body.session;
+  assert.equal(session.defaultModel, null);
+  const status = (statusText) => f.children[0].output({ type: "extension_ui_request", method: "setStatus", statusKey: "agentbox-default-model", statusText });
+  for (const model of [null, { provider: "codex-work", id: "Org/TargetModel" }]) {
+    status(JSON.stringify({ scope: "global", model }));
+    assert.deepEqual((await metadata()).defaultModel, { scope: "global", model });
+  }
+  for (const value of ["broken", '{}', '{"scope":"project","model":null}', '{"scope":"global","model":{"provider":1,"id":"x"}}']) {
+    status(value);
+    assert.equal((await metadata()).defaultModel, null);
+  }
+});
+
 test("auto mode changes require write scope, native identity, extension support and prompt permission", async (t) => {
   const reader = "read-only-token";
   const f = await fixture(t, config({ auth: { tokens: [

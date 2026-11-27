@@ -185,8 +185,11 @@ function updateControls() {
     } else {
       const supported = ctx.commands?.some((command) => command.name === "agentbox-defaults");
       const disabled = !supported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
-      for (const id of ["save-default-model", "save-default-auto", "show-defaults", "default-auto"]) $(id).disabled = disabled;
+      for (const id of ["save-default-model", "save-selected-default-model", "default-model", "save-default-auto", "show-defaults", "default-auto"]) $(id).disabled = disabled;
       $("save-default-model").disabled ||= !ctx.state.model;
+      $("save-selected-default-model").disabled ||= !$("default-model").value;
+      const saved = ctx.meta.defaultModel;
+      $("settings-default-model").textContent = saved ? `Saved global default: ${saved.model ? `${saved.model.provider}/${saved.model.id}` : "unset (Pi chooses)"}` : "Saved global default: unknown; use Show saved defaults to refresh.";
       const subagentsSupported = ctx.commands?.some((command) => command.name === "agentbox-subagents");
       for (const id of ["subagent-cap", "save-subagent-cap", "reset-subagent-cap", "show-subagent-cap"]) $(id).disabled = !subagentsSupported || !canChangeConversation(ctx) || ctx.record.settingsBusy;
       $("subagent-help").textContent = ctx.commandLoading ? "Checking command support..." : subagentsSupported ? "Status and results appear in session notifications. No chat draft or attachments are sent." : ctx.commandError || "This Pi process does not register /agentbox-subagents. Start a new session with the updated extension. Nothing will be sent to the model.";
@@ -982,7 +985,7 @@ function refreshModels(ctx, force = false) {
     if (!valid()) return;
     ctx.record.models = value?.data?.models || [];
     renderModels(ctx);
-    if ($("settings-dialog").open && settingsTarget?.ctx === ctx) renderModelVisibility(ctx);
+    if ($("settings-dialog").open && settingsTarget?.ctx === ctx) { renderModelVisibility(ctx); renderDefaultModels(ctx); updateControls(); }
   }).catch((error) => {
     if (valid()) report(error, ctx, { command: "get_available_models" });
   }).finally(() => ctx.controller.signal.removeEventListener("abort", abort));
@@ -1741,7 +1744,7 @@ function handleEvent(ctx, frame) {
     // Metadata, not replay, decides which dialogs are still pending.
     if (dialogMethods.has(event.method)) { ctx.uiRevision++; requestRefresh(ctx); }
     else if (event.method === "notify") showNotice(event.message || "Agent notification", event.notifyType === "error");
-    else if (event.method === "setStatus" && ["agentbox-auto", "agentbox-fast"].includes(event.statusKey)) requestRefresh(ctx);
+    else if (event.method === "setStatus" && ["agentbox-auto", "agentbox-fast", "agentbox-default-model"].includes(event.statusKey)) requestRefresh(ctx);
   } else if (type === "supervisor") {
     if (["conversation_replacing", "conversation_source_exited"].includes(event.event)) {
       cancelModels(ctx);
@@ -2214,19 +2217,35 @@ function openNew({ folder, profile } = {}) {
   $("new-name").focus();
 }
 
-$("settings").addEventListener("click", () => {
+function renderDefaultModels(ctx) {
+  const root = $("default-model"), previous = root.value;
+  root.replaceChildren(element("option", "", "Select a model"));
+  root.firstChild.value = "";
+  for (const model of ctx.record.models) {
+    const option = element("option", "", `${model.provider}/${model.id}`);
+    option.value = `${model.provider}/${model.id}`;
+    root.append(option);
+  }
+  const saved = ctx.meta.defaultModel?.model;
+  root.value = previous || (saved ? `${saved.provider}/${saved.id}` : "");
+}
+$("settings").addEventListener("click", async () => {
   const ctx = current;
   if (!canChangeConversation(ctx) || ctx.record.settingsBusy) return;
   settingsTarget = { ctx, nativeId: ctx.meta.nativeSessionId };
   drawer(false);
   $("default-auto").value = "off";
+  $("default-model").value = "";
   $("subagent-cap").value = "";
   $("model-visibility-search").value = "";
   $("model-visibility-status").textContent = "";
   renderModelVisibility(ctx);
+  renderDefaultModels(ctx);
   $("settings-dialog").showModal();
-  if (ctx.commands === undefined && !ctx.commandLoading) loadCommands(ctx);
+  const target = settingsTarget;
   updateControls();
+  if (ctx.commands === undefined && !ctx.commandLoading) await loadCommands(ctx);
+  if (settingsTarget === target) await runSettingsCommand("agentbox-defaults", "status", target);
 });
 $("hide-profile-section").addEventListener("change", () => {
   hideProfile = $("hide-profile-section").checked;
@@ -2259,7 +2278,8 @@ async function runSettingsCommand(command, args = "", target = settingsTarget) {
   // Share the prompt lock without touching the composer draft. Close the modal
   // before dispatch so extension select/confirm requests remain accessible.
   ctx.record.settingsBusy = true; ctx.record.sending = true;
-  $("settings-dialog").close(); updateControls();
+  if (!(command === "agentbox-defaults" && args === "status")) $("settings-dialog").close();
+  updateControls();
   try {
     await rpc(ctx, { type: "prompt", message: `/${command}${args ? ` ${args}` : ""}` }, true, target.nativeId);
   } catch (error) {
@@ -2277,6 +2297,11 @@ $("fast-mode").addEventListener("click", () => {
   if (!ctx) return;
   const target = { ctx, nativeId: ctx.meta.nativeSessionId };
   return runSettingsCommand("fast", ctx.meta.fastMode?.enabled ? "off" : "on", target);
+});
+$("default-model").addEventListener("change", updateControls);
+$("save-selected-default-model").addEventListener("click", () => {
+  const value = $("default-model").value;
+  if (settingsTarget?.ctx.record.models.some((model) => `${model.provider}/${model.id}` === value)) runSettingsCommand("agentbox-defaults", `model ${value}`);
 });
 $("save-default-model").addEventListener("click", () => runSettingsCommand("agentbox-defaults", "model current"));
 $("save-default-auto").addEventListener("click", () => runSettingsCommand("agentbox-defaults", $("default-auto").value === "on" ? "auto on" : "auto off"));

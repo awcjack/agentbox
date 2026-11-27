@@ -874,6 +874,7 @@ class Session extends EventEmitter {
     this.settledEventId = null;
     this.autoMode = null;
     this.fastMode = null;
+    this.defaultModel = null;
     this.autoModeChanging = false;
     this.agentReady = false;
     this.agentCompacting = false;
@@ -962,6 +963,7 @@ class Session extends EventEmitter {
       settledEventId: this.settledEventId,
       autoMode: this.autoMode,
       fastMode: this.fastMode,
+      defaultModel: this.defaultModel,
       status: this.status,
       activity: this.status !== "running" ? this.status
         : [...this.pendingUi.values()].some(({ request }) => ["confirm", "select"].includes(request.method)) ? "waiting_action"
@@ -1041,6 +1043,15 @@ class Session extends EventEmitter {
         if (value && typeof value.available === "boolean" && typeof value.enabled === "boolean"
           && Object.keys(value).length === 2 && (!value.enabled || value.available)) this.fastMode = value;
       } catch { /* Never infer paid mode from malformed or missing extension status. */ }
+    }
+    if (record.type === "extension_ui_request" && record.method === "setStatus" && record.statusKey === "agentbox-default-model") {
+      this.defaultModel = null;
+      try {
+        const value = JSON.parse(record.statusText);
+        if (value?.scope === "global" && (value.model === null || (typeof value.model?.provider === "string" && typeof value.model?.id === "string"))) {
+          this.defaultModel = { scope: "global", model: value.model === null ? null : { provider: value.model.provider, id: value.model.id } };
+        }
+      } catch { /* Missing or malformed status is unknown, not unset. */ }
     }
     if (record.type !== "response") this.revision++;
     if (["agent_start", "auto_retry_start", "auto_compaction_start"].includes(record.type)) this.agentBusy = true;

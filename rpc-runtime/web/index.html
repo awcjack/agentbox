@@ -108,8 +108,12 @@
       <h2 id="settings-title">Settings</h2>
       <p>Defaults apply to future fresh sessions. The current session's model and auto mode are unchanged. Resumed sessions keep their own state.</p>
       <p id="settings-model"></p>
-      <button id="save-default-model" class="primary-button" type="button">Use current model as default</button>
-      <p class="field-note">To save a different model with this command, first select it in a session's model selector.</p>
+      <p id="settings-default-model" role="status"></p>
+      <p class="field-note">Saved globally for this Pi agent, across projects. Not a project-specific setting.</p>
+      <label for="default-model">Default model for future fresh sessions</label>
+      <select id="default-model"></select>
+      <button id="save-selected-default-model" class="primary-button" type="button">Save selected default model</button>
+      <button id="save-default-model" class="text-button" type="button">Use current model as default</button>
       <label for="default-auto">Default auto for future sessions</label>
       <select id="default-auto"><option value="off">Off</option><option value="on">On (requires confirmation)</option></select>
       <p class="field-note">This is a proposed value, not the saved setting. Auto on broadly authorizes asks; managed denials and safety guards still apply.</p>

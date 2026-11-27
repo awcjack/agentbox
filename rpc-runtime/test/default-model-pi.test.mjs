@@ -57,6 +57,12 @@ test("saved default survives live selections and restores in new web sessions", 
   const temporary = { provider: "openai", model: "gpt-4o-mini" };
   const first = await create();
   assert.deepEqual(await model(first), temporary);
+  // Direct Settings selection must save a default without changing live state.
+  await rpc(first, { type: "prompt", message: `/agentbox-defaults model ${saved.provider}/${saved.model}` });
+  assert.deepEqual(await model(first), temporary);
+  assert.deepEqual(JSON.parse(await readFile(settingsPath)).agentboxDefaultModel, saved);
+  const metadata = (await request(`/v1/sessions/${first.id}`)).session;
+  assert.deepEqual(metadata.defaultModel, { scope: "global", model: { provider: saved.provider, id: saved.model } });
   await rpc(first, { type: "set_model", provider: saved.provider, modelId: saved.model });
   // Exactly the command sent by web Settings / Save current model.
   await rpc(first, { type: "prompt", message: "/agentbox-defaults model current" });

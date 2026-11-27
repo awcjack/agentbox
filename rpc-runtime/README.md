@@ -72,16 +72,21 @@ Open **Settings** in the session sidebar (the sessions drawer on mobile) with an
 idle, writable session selected. The dialog uses the policy extension's existing
 `/agentbox-defaults` command; it never writes settings files itself:
 
-- **Use current model as default** sends `model current`. To save another model,
-  first choose it in the session's model selector, then open Settings.
+- The dialog displays the **saved global default model** separately from the
+  current session model. Unknown metadata is not treated as an unset default.
+- **Save selected default model** sends `model <provider>/<id>` from the model
+  picker, without changing the current session. **Use current model as default**
+  remains available and sends `model current`.
 - **Save default auto** sends `auto off` or `auto on`. On requires the extension's
   explicit confirmation, shown in the normal agent-request UI after the dialog
   closes. Cancelling or declining does not enable the default.
 - **Show saved defaults** sends `status`; the extension reports saved values in
-  the session notification. The dialog's auto selector is a proposed value, not
+  the session notification and refreshes the saved-model display without closing
+  Settings. The dialog's auto selector is a proposed value, not
   an indication of the saved default. RPC acceptance alone is not proof of saving.
 
-These are global Pi defaults for future fresh sessions, not changes to the
+These defaults are global across projects sharing the Pi agent directory, not
+project-specific. They apply to future fresh sessions, not changes to the
 selected session's live model or auto mode. Resuming a session does not apply
 fresh-session defaults. Managed policy can still make auto unavailable.
 
