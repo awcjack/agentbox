@@ -636,26 +636,28 @@ are `{"id":"...","confirmed":true}`, `{"id":"...","value":"..."}`, or
 Session metadata includes `name`, `cwd`, `nativeSessionId`, `latestEventId`, and an
 optional initial `folder` label. It also includes
 pending UI requests. `autoMode` is `null` until the policy extension announces
-support, then `{available, enabled}`. Auto restores the conversation's last explicit
-choice on restart/resume, including from “PICK UP WHERE YOU LEFT OFF”; without a
-saved choice, resumed conversations start off. Managed `auto.enable` must still
-permit it. Fresh sessions alone may use an explicitly saved global default. The web toggle requires write
+support, then `{available, enabled}` (with `review: true` when in Review mode).
+Auto restores the conversation's saved choice on restart/resume, including from
+“PICK UP WHERE YOU LEFT OFF”; without a saved choice, resumed conversations start
+off. Managed `auto.enable` must still permit it. Fresh sessions alone consult an
+explicitly saved global default; when enabled, that choice is saved to the native
+session. The web toggle requires write
 scope and allowed `prompt`, binds the request to the displayed native session,
 and sends the policy extension's `/auto on` or `/auto off` command. It waits for
 confirmed state, never optimistically enables auto, and never retries failed
 writes. State changes synchronize through the existing SSE/metadata flow.
-Forks and workflow children do not inherit saved Auto authorization. Resuming or
-replacing a process for the same native conversation restores its own choice.
+Explicit supervisor fork/revert retains the source's current Auto choice in the
+new native conversation. Workflow children do not inherit saved Auto authorization.
 The browser never copies Auto state between sessions or persists it globally.
 
 `fastMode` is likewise `null` until the managed `pi-openai-fast` extension reports
 `{available, enabled}` through `agentbox-fast` status. The active-session toolbar’s OpenAI fast mode control (beside Auto, not global Settings)
 affects only the selected session; switching sessions reflects their own confirmed mode. It sends `/fast on|off` through native-session-bound prompt RPC and waits for refreshed
-metadata. This is not a saved global preference: new parent Pi processes start off.
-Managed subagents inherit the parent's live mode at spawn (including resumed jobs),
-only for supported OpenAI/Codex providers. Already-running children are unchanged.
-It requires idle writable state and resets on session or
-model changes. Only OpenAI/Codex providers are supported; premium pricing/credits
+metadata. Fresh sessions start off. Reopening a saved conversation or using
+supervisor fork/revert retains its choice. Selecting a different model turns Fast
+back off. Managed subagents inherit the parent's live mode at spawn (including
+resumed jobs); already-running children are unchanged. It requires idle writable
+state. Only OpenAI/Codex providers are supported; premium pricing/credits
 may apply. This option is distinct from reasoning effort and auto permissions.
 
 `activity` distinguishes `starting`, `running`,
@@ -849,9 +851,9 @@ leaving the source running. Revert copies history before the selected user
 message, restores its text/images as an unsent draft, and switches the existing
 supervisor slot to a new native history while retaining the original file for
 resume. Neither action undoes filesystem changes or tool side effects.
-The current model, thinking level, auto-compaction and queue delivery modes are
-restored and verified on the new child. Preparation failures can leave an unused
-child history file; the original file is never rewritten.
+The current model, thinking level, Auto/Review, OpenAI Fast, auto-compaction and
+queue delivery modes are restored and verified on the new child. Preparation
+failures can leave an unused child history file; the original file is never rewritten.
 
 Browser RPC/UI writes include `X-Pi-Session-Id` to bind mutations to the displayed
 native conversation. Stale writes return 409 `conversation_stale` without being

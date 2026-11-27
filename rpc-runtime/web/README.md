@@ -502,18 +502,19 @@ The toolbar's Auto toggle saves an explicit on/off choice with the native
 conversation through the policy extension. Restarting Pi and resuming it from
 **PICK UP WHERE YOU LEFT OFF** restores that choice; the UI displays the restored
 `autoMode` metadata rather than persisting permission in browser storage.
-Other sessions, forks, and workflow children do not inherit it. Managed policy
-must still permit Auto, and managed denials remain enforced. Conversations with
-no saved choice resume off. This is separate from Settings' global defaults for
-future fresh sessions. `/auto review` also restores its saved review choice,
-but the Auto button remains off because review is not automatic approval.
+Fork and revert retain the source's current Auto choice; unrelated sessions and
+workflow children do not inherit it. Managed policy must still permit Auto, and
+managed denials remain enforced. Conversations with no saved choice resume off.
+This is separate from Settings' global defaults for future fresh sessions.
+`/auto review` is also retained and displayed as Review, not automatic approval.
 
 ### OpenAI fast mode
 
 The active-session toolbar beside Auto offers an opt-in **OpenAI fast mode** toggle
 with an extra-cost warning, not a global Settings preference. Switching sessions
 shows the selected session’s confirmed mode; enabling A does not enable B.
-It starts off for each parent Pi process and is not persisted as a browser or
+It starts off in fresh sessions. Reopen, fork, and revert retain the session's
+choice; changing the selected model turns Fast off. It is not a browser or
 future-session default. Managed subagents inherit the parent's live mode at spawn,
 including resumed jobs; existing children are not changed retroactively. A child
 using an unsupported provider does not send the premium tier. The control sends `/fast on` or `/fast off` through the native-conversation-bound

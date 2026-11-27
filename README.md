@@ -532,8 +532,9 @@ paid service tier, not a lower thinking level or a different model. Enable it
 while idle using **Fast** beside Auto in the active session's toolbar, or use `/fast on`, `/fast off`,
 and `/fast status` in Pi. The managed extension sets `service_tier: "priority"`
 in the actual request payload for native OpenAI, personal Codex, and Codex Work;
-custom/proxy providers are excluded. It defaults **off**, is not a saved default,
-and resets on model selection, session start/switch/fork. Each managed subagent
+custom/proxy providers are excluded. It defaults **off** and resets when the model
+changes. Pi RPC retains the choice on resume and supervisor fork/revert; it is
+not a global default. The interactive CLI resets it on session changes. Each managed subagent
 inherits the parent's effective Fast mode when it actually spawns, including
 resumed jobs; queued jobs read the live mode when their slot opens. Unsupported
 child providers ignore it. Changing the parent does not retroactively change
@@ -668,16 +669,18 @@ An explicit `/auto` choice (including `review`) is saved with that native conver
 not in global settings or browser storage. Restarting Pi or resuming from
 **PICK UP WHERE YOU LEFT OFF** restores its last choice; switching sessions loads
 that session's own choice. Tree navigation cannot resurrect an older Auto-on after
-an explicit off. Forks/new sessions and workflow children do not inherit a parent's
-saved authorization. Old conversations without a saved choice resume off; a global
-default alone is not copied into their history. Set Auto once to retain it.
+an explicit off. Pi RPC fork/revert keeps the source's current choice in the new
+native session; unrelated sessions and workflow children do not inherit it. If a
+fresh RPC session starts with Auto enabled by a saved global default, that choice
+is saved to its history. Older conversations without a saved choice resume off.
 
 Turning Auto off revokes live authorization immediately and saves off for later
 resumes; it does not answer an already open approval dialog. Managed policy must
 still permit Auto. Invalid saved entries fail closed. If saving fails, live Auto
 is disabled and an error warns that restarting may restore an older saved choice.
-Pi normally flushes a brand-new conversation to disk after its first assistant
-reply; retention before that point follows Pi's normal session persistence. This change requires rebuilding/redeploying Agentbox and
+Pi normally writes a brand-new conversation to disk when the first user or
+assistant message is saved; selections alone do not create a history file.
+This change requires rebuilding/redeploying Agentbox and
 starting a new Pi process; editing the source does not change a running wrapper.
 
 Workflow child approval requests are automatically answered by the parent while
@@ -762,9 +765,9 @@ use the `openai` provider and an available model such as `gpt-4.1-mini` instead.
 Model catalog presence does not guarantee account access; verify a live request
 before using review. Unsupported or unconfigured models fall back to human
 approval in review only. An explicit review choice is saved and restored with
-the same conversation, like on/off; forks and workflow children do not inherit
-that saved choice. The web toggle reports auto off during review;
-`/auto status` reports the specific mode. The `auto` defaults are `enable = false`,
+the same conversation, like on/off. Pi RPC fork/revert retains it, but workflow
+children do not inherit it. The web toolbar and `/auto status` report Review
+separately from Auto-on. The `auto` defaults are `enable = false`,
 `provider = ""`, `model = ""`, and `timeout = 30000`.
 
 In review, only unmatched `defaultDecision = "ask"` decisions are classified.
