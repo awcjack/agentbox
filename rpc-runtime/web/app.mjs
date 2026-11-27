@@ -47,7 +47,7 @@ const rowSources = new Map();
 const renaming = new Set();
 
 initSidebarResize();
-initContextResize();
+const paneResize = initContextResize();
 
 const $ = (id) => document.getElementById(id);
 // Upgrade the HTML `open` fallback to a modal as early as possible so a later
@@ -1159,7 +1159,7 @@ function openBrowserPane({ viewState = null, focus = true } = {}) {
   const browserApi = createTransport(() => ownToken);
   browserBinding = { ctx, nativeId: ctx.meta.nativeSessionId };
   browserPanel = mountBrowserPanel($("context-pane-body"), {
-    sessionId: ctx.id, nativeSessionId: browserBinding.nativeId, viewState,
+    sessionId: ctx.id, nativeSessionId: browserBinding.nativeId, viewState, paneResize,
     request: (route, options) => browserApi.request(route, options),
   });
   if (focus && !compactHeader.matches) $("context-pane-body").focus();

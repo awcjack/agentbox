@@ -3,11 +3,12 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { createBrowserController, validateFrame, validateInput, mountBrowserPanel, FRAME_TTL, RENEW_INTERVAL } from "./browser-panel.mjs";
 
-test("desktop expansion remains resizable and fullscreen hides the resize hint", async () => {
+test("the custom resize handle is at the bottom-left and hidden in fullscreen and compact layouts", async () => {
   const css = await readFile(new URL("./styles.css", import.meta.url), "utf8");
-  assert.match(css, /\.browser-viewport\.is-expanded\s*\{[^}]*resize:\s*both/);
-  assert.match(css, /\.browser-viewport\.is-fullscreen\s*\{[^}]*resize:\s*none/);
-  assert.match(css, /\.browser-viewport\.is-fullscreen \.browser-resize-hint\s*\{\s*display:\s*none;/);
+  assert.match(css, /\.browser-resize-handle\s*\{[^}]*left:\s*0;\s*bottom:\s*0;/);
+  assert.match(css, /\.browser-viewport\.is-fullscreen \.browser-resize-handle\s*\{\s*display:\s*none;/);
+  assert.match(css, /\.browser-resize-handle, \.browser-desktop-hint\s*\{\s*display:\s*none;/);
+  assert.doesNotMatch(css, /\.browser-viewport[^{}]*\{[^}]*resize:\s*both/);
 });
 
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -674,6 +675,45 @@ test("hiding the host tab leaves the same pane mounted and resumes read-only", a
   mounted.dispose();
 });
 
+test("corner drag shrinks and grows the pane with the preview without sending browser input", async () => {
+  const doc = { createElement: tag => new FakeElement(tag, doc), defaultView: { innerHeight: 960 } }, root = new FakeElement("div", doc);
+  const f = fixture(); let paneWidth = 600, capture;
+  const paneResize = { getWidth: () => paneWidth, setWidth: width => { paneWidth = width; } };
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time, paneResize });
+  await flush();
+  const all = el => [el, ...el.children.flatMap(all)], nodes = all(root);
+  const viewport = nodes.find(n => n.className === "browser-viewport");
+  viewport.getBoundingClientRect = () => ({ height: parseInt(viewport.style.height) || 320 });
+  const handle = nodes.find(n => n.className === "browser-resize-handle");
+  assert.ok(viewport.children.includes(handle));
+  handle.focus = () => {};
+  handle.setPointerCapture = id => { capture = id; };
+  handle.hasPointerCapture = id => id === capture;
+  handle.releasePointerCapture = () => { capture = null; };
+  const pointer = { pointerId: 1, isPrimary: true, button: 0, clientX: 820, clientY: 450, preventDefault() {} };
+  handle.listeners.pointerdown(pointer);
+  handle.listeners.pointermove({ ...pointer, pointerId: 2, clientX: 920, clientY: 400 });
+  assert.equal(paneWidth, 600);
+  handle.listeners.pointermove({ ...pointer, clientX: 920, clientY: 400 });
+  assert.equal(paneWidth, 500);
+  assert.equal(viewport.style.height, "270px");
+  assert.equal(viewport.style.width, undefined, "preview follows the pane rather than setting its own width");
+  handle.listeners.pointermove({ ...pointer, clientX: 780, clientY: 470 });
+  assert.equal(paneWidth, 640);
+  assert.equal(viewport.style.height, "340px");
+  handle.listeners.pointerup(pointer);
+  assert.equal(capture, null);
+  handle.listeners.keydown({ key: "ArrowRight", shiftKey: true, preventDefault() {} });
+  handle.listeners.keydown({ key: "ArrowUp", preventDefault() {} });
+  assert.equal(paneWidth, 600);
+  assert.equal(viewport.style.height, "330px");
+  nodes.find(n => n.textContent === "Fit preview").listeners.click();
+  assert.equal(viewport.style.height, "");
+  assert.equal(paneWidth, 600);
+  assert.equal(f.mutations("input").length, 0);
+  mounted.dispose();
+});
+
 for (const mode of ["normal", "expanded", "fullscreen"]) {
   test(`layout snapshot restores ${mode} and dimensions without restoring browser authority or drafts`, async () => {
     const doc = { createElement: tag => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
@@ -682,9 +722,10 @@ for (const mode of ["normal", "expanded", "fullscreen"]) {
     const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time, viewState });
     const all = el => [el, ...el.children.flatMap(all)], nodes = all(root);
     const viewport = nodes.find(n => n.className?.startsWith("browser-viewport"));
-    const expected = { mode, width: "875px", height: "62vh" };
+    const expected = { mode, height: "62vh" };
     assert.deepEqual(mounted.getViewState(), expected);
     assert.equal(viewport.className, `browser-viewport${mode === "normal" ? "" : ` is-${mode}`}`);
+    assert.equal(viewport.style.width, undefined);
     const pressed = label => nodes.find(n => n.tag === "button" && n.textContent === label).attributes["aria-pressed"];
     assert.equal(pressed(mode === "expanded" ? "Restore preview" : "Expand preview"), String(mode === "expanded"));
     assert.equal(pressed(mode === "fullscreen" ? "Exit fullscreen" : "Full screen"), String(mode === "fullscreen"));
@@ -693,13 +734,13 @@ for (const mode of ["normal", "expanded", "fullscreen"]) {
     assert.equal(f.calls.filter(c => c.body).length, 0);
     assert.ok(nodes.filter(n => n.tag === "textarea").every(n => n.value === ""));
     assert.equal(nodes.find(n => n.attributes["aria-label"] === "Browser URL").value, "https://example.test/start");
-    viewport.style.width = "940px";
+    viewport.style.height = "540px";
     const snapshot = mounted.getViewState();
-    assert.equal(snapshot.width, "940px");
-    snapshot.mode = "fullscreen"; snapshot.width = "1px";
-    assert.deepEqual(mounted.getViewState(), { ...expected, width: "940px" });
+    assert.equal(snapshot.height, "540px");
+    snapshot.mode = "fullscreen"; snapshot.height = "1px";
+    assert.deepEqual(mounted.getViewState(), { ...expected, height: "540px" });
     nodes.find(n => n.tag === "button" && n.textContent === "Fit preview").listeners.click();
-    assert.deepEqual(mounted.getViewState(), { mode: "normal", width: "", height: "" });
+    assert.deepEqual(mounted.getViewState(), { mode: "normal", height: "" });
     nodes.find(n => n.tag === "button" && n.textContent === "Take control").listeners.click();
     await flush();
     mounted.dispose(); await flush();

@@ -27,7 +27,7 @@ test("divider supports pointer capture, keyboard sizing and cancellation", () =>
     "context-pane": { getBoundingClientRect: () => ({ width: parseInt(properties["--context-width"] || "400") }) },
     sidebar: { getBoundingClientRect: () => ({ width: 260 }) },
   };
-  initContextResize({ getElementById: id => nodes[id], defaultView: { addEventListener: (type, fn) => windowEvents[type] = fn } });
+  const paneResize = initContextResize({ getElementById: id => nodes[id], defaultView: { addEventListener: (type, fn) => windowEvents[type] = fn } });
   const event = { button: 0, isPrimary: true, pointerId: 1, clientX: 800, preventDefault() {} };
   events.pointerdown(event);
   events.pointermove({ ...event, pointerId: 2, clientX: 600 });
@@ -41,4 +41,7 @@ test("divider supports pointer capture, keyboard sizing and cancellation", () =>
   assert.equal(properties["--context-width"], "590px");
   events.keydown({ key: "End", preventDefault() {} });
   assert.equal(properties["--context-width"], "660px");
+  paneResize.setWidth(120);
+  assert.equal(paneResize.getWidth(), 240);
+  assert.equal(attrs["aria-valuenow"], "240");
 });

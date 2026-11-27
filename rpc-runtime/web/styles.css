@@ -707,8 +707,8 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .browser-frame { display: block; position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #090909; }
 .browser-frame[hidden] { display: none; }
 .browser-frame[data-stale="true"] { opacity: .55; }
-.browser-viewport { position: relative; width: 100%; min-width: min(240px, 100%); min-height: 160px; aspect-ratio: 16 / 9; max-width: 100%; max-height: 75dvh; resize: both; overflow: hidden; border: 1px solid #333; border-radius: 8px; background: #090909; }
-.browser-viewport.is-expanded { height: min(65dvh, 720px); resize: both; }
+.browser-viewport { position: relative; width: 100%; min-width: min(240px, 100%); min-height: 160px; aspect-ratio: 16 / 9; max-width: 100%; max-height: 75dvh; overflow: hidden; border: 1px solid #333; border-radius: 8px; background: #090909; }
+.browser-viewport.is-expanded { height: min(65dvh, 720px); }
 /* Expand within the desktop workspace: keep sessions, conversation and composer accessible. */
 @media (min-width: 1001px) {
   .workspace.context-open:has(.browser-viewport.is-expanded) {
@@ -724,8 +724,12 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
 .browser-control-row .text-button:first-child:not(:disabled) { background: var(--accent); color: #201912; border-radius: 5px; }
 .browser-control-row[data-held="true"] .text-button:first-child { display: none; }
 .browser-control-row[data-held="false"] .text-button:nth-child(2) { display: none; }
-.browser-viewport.is-fullscreen .browser-resize-hint { display: none; }
-.browser-resize-hint { position: absolute; right: 18px; bottom: 6px; font-size: 9px; color: #bbb; pointer-events: none; text-shadow: 0 1px 2px #000; }
+.browser-viewport.is-fullscreen .browser-resize-handle { display: none; }
+.browser-resize-handle { position: absolute; left: 0; bottom: 0; z-index: 3; width: 28px; height: 28px; padding: 0; color: #ddd; background: #141414e8; border: 1px solid #555; border-radius: 0 6px 0 0; cursor: nesw-resize; touch-action: none; }
+.browser-resize-handle:hover, .browser-resize-handle:focus-visible { color: var(--accent); outline-offset: -2px; }
+@media (min-width: 1001px) {
+  .browser-viewport:has(.browser-resize-handle):not(.is-fullscreen) .browser-control-row { left: 34px; right: 8px; width: fit-content; }
+}
 .browser-preview-options { display: flex; align-items: center; gap: 10px; }
 .browser-address-bar { display: flex; align-items: center; gap: 3px; min-width: 0; background: #1e1e1e; padding: 4px; border: 1px solid var(--border); border-radius: 8px; }
 .browser-address-bar input { flex: 1; min-width: 0; font-size: 12px; }
@@ -775,9 +779,9 @@ button.file-changes-path:hover { color: var(--accent); text-decoration: underlin
   .session-tools .text-button:hover:not(:disabled) { background: var(--raised); }
   .session-tools button:focus-visible { outline-offset: -2px; }
   .context-resizer { display: none; }
-  .browser-viewport:not(.is-fullscreen) { width: 100% !important; height: auto !important; resize: none; }
+  .browser-viewport:not(.is-fullscreen) { height: auto !important; }
   .browser-viewport.is-expanded { min-height: min(50dvh, 460px); }
-  .browser-resize-hint, .browser-desktop-hint { display: none; }
+  .browser-resize-handle, .browser-desktop-hint { display: none; }
 }
 @media (min-width: 721px) and (max-width: 1000px) {
   /* Use the conversation column without squeezing it beside the preview. */

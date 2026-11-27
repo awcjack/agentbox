@@ -292,11 +292,12 @@ export function mountBrowserPanel(root, options) {
   }
   const acquire = button(controls, "Take control", () => void controller.acquire());
   const release = button(controls, "Release control", () => void controller.release());
-  let viewMode = "normal";
+  let viewMode = "normal", resizeDrag;
   function setViewMode(value) {
+    stopResize();
     viewMode = value;
     viewport.className = `browser-viewport${value === "normal" ? "" : ` is-${value}`}`;
-    viewport.style.width = ""; viewport.style.height = "";
+    viewport.style.height = "";
     expand.textContent = value === "expanded" ? "Restore preview" : "Expand preview";
     expand.setAttribute("aria-pressed", String(value === "expanded"));
     fullscreen.textContent = value === "fullscreen" ? "Exit fullscreen" : "Full screen";
@@ -306,8 +307,51 @@ export function mountBrowserPanel(root, options) {
   expand.setAttribute("aria-pressed", "false");
   const fullscreen = button(controls, "Full screen", () => setViewMode(viewMode === "fullscreen" ? "expanded" : "fullscreen"));
   fullscreen.setAttribute("aria-pressed", "false");
-  const resizeHint = node("span", "↘ Drag corner to resize", "browser-resize-hint");
-  viewport.append(controls, resizeHint);
+  viewport.append(controls);
+  const { paneResize } = options;
+  const resizeHandle = node("button", "↙", "browser-resize-handle");
+  resizeHandle.type = "button";
+  resizeHandle.setAttribute("aria-label", "Resize browser preview and pane");
+  resizeHandle.title = "Drag to resize the preview and pane, or use the arrow keys";
+  function stopResize() {
+    if (!resizeDrag) return;
+    const { pointerId } = resizeDrag;
+    resizeDrag = null;
+    if (resizeHandle.hasPointerCapture(pointerId)) resizeHandle.releasePointerCapture(pointerId);
+  }
+  function setPreviewHeight(height) {
+    const max = Math.round(doc.defaultView.innerHeight * 0.75);
+    viewport.style.height = `${Math.max(160, Math.min(max, Math.round(height)))}px`;
+  }
+  if (paneResize) {
+    viewport.append(resizeHandle);
+    resizeHandle.addEventListener("pointerdown", event => {
+      if (!event.isPrimary || event.button !== 0 || resizeDrag) return;
+      event.preventDefault();
+      resizeHandle.focus({ preventScroll: true });
+      resizeDrag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+        lastX: event.clientX, width: paneResize.getWidth(), height: viewport.getBoundingClientRect().height };
+      resizeHandle.setPointerCapture(event.pointerId);
+    });
+    resizeHandle.addEventListener("pointermove", event => {
+      if (resizeDrag?.pointerId !== event.pointerId) return;
+      if (event.clientX !== resizeDrag.lastX) paneResize.setWidth(resizeDrag.width + resizeDrag.x - event.clientX);
+      setPreviewHeight(resizeDrag.height + event.clientY - resizeDrag.y);
+      resizeDrag.lastX = event.clientX;
+    });
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+      resizeHandle.addEventListener(type, event => { if (resizeDrag?.pointerId === event.pointerId) stopResize(); });
+    }
+    resizeHandle.addEventListener("blur", stopResize);
+    resizeHandle.addEventListener("keydown", event => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const step = event.shiftKey ? 40 : 10;
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") paneResize.setWidth(paneResize.getWidth() + (event.key === "ArrowLeft" ? step : -step));
+      else if (event.key === "ArrowUp" || event.key === "ArrowDown") setPreviewHeight(viewport.getBoundingClientRect().height + (event.key === "ArrowDown" ? step : -step));
+      else return;
+      event.preventDefault();
+    });
+  }
   let addressDraft = false;
   const addressBar = node("div", "", "browser-address-bar");
   addressBar.setAttribute("role", "group"); addressBar.setAttribute("aria-label", "Browser navigation");
@@ -355,7 +399,7 @@ export function mountBrowserPanel(root, options) {
     }).finally(() => { resizing = false; applyResolution.disabled = !controller.getState().canInput; });
   });
   const resolutionNote = node("p", "Viewport size in CSS pixels. Take control to apply.", "field-note");
-  resolutionNote.append(node("span", " Dragging the preview changes its display size.", "browser-desktop-hint"));
+  resolutionNote.append(node("span", " Drag the bottom-left corner to resize the preview and pane.", "browser-desktop-hint"));
   const actions = node("fieldset"); actions.append(node("legend", "Human browser input"));
   function field(label, el) { const wrap = node("label", label); wrap.append(el); actions.append(wrap); return el; }
   const refs = field("Accessibility reference", node("select"));
@@ -472,11 +516,10 @@ export function mountBrowserPanel(root, options) {
   // Never hydrate frames, leases, navigation or input drafts from viewState.
   const initialView = options.viewState;
   setViewMode(["normal", "expanded", "fullscreen"].includes(initialView?.mode) ? initialView.mode : "normal");
-  viewport.style.width = typeof initialView?.width === "string" ? initialView.width : "";
   viewport.style.height = typeof initialView?.height === "string" ? initialView.height : "";
   controller.start();
   return {
-    setVisible: controller.setVisible,
-    getViewState() { return { mode: viewMode, width: viewport.style.width, height: viewport.style.height }; },
-    dispose() { direct.dispose(); controller.dispose(); shownFrame = null; shownRefs = ""; image.removeAttribute("src"); address.value = keyboard.value = text.value = key.value = url.value = ""; root.replaceChildren(); } };
+    setVisible(visible) { if (!visible) stopResize(); controller.setVisible(visible); },
+    getViewState() { return { mode: viewMode, height: viewport.style.height }; },
+    dispose() { stopResize(); direct.dispose(); controller.dispose(); shownFrame = null; shownRefs = ""; image.removeAttribute("src"); address.value = keyboard.value = text.value = key.value = url.value = ""; root.replaceChildren(); } };
 }

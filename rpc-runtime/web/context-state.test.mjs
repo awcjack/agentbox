@@ -19,7 +19,7 @@ function harness() {
   };
   const h = {
     current: null, contextRevision: 0, contextText: null,
-    previewBinding: null, filePreview: null, browserPanel: null, browserBinding: null,
+    previewBinding: null, filePreview: null, browserPanel: null, browserBinding: null, paneResize: {},
     token: "fixture", mounts: [], disposed: 0,
     $: node, closeSubagentPane() {},
     contextPane: node("context-pane"), contextReturnFocus: null,
@@ -31,7 +31,7 @@ function harness() {
     createTransport: () => ({ request() {} }),
     mountBrowserPanel: (_root, options) => {
       h.mounts.push(options);
-      return { getViewState: () => options.viewState || { mode: "normal", width: "", height: "" }, dispose: () => h.disposed++ };
+      return { getViewState: () => options.viewState || { mode: "normal", height: "" }, dispose: () => h.disposed++ };
     },
     visibleMessages: () => [],
     findFilePreview: (_messages, _results, path) => ({ path, text: "Preview text" }),
@@ -53,7 +53,7 @@ test("switching A → B → A restores each pane independently and disposes brow
   const { h, node, session, widths } = harness();
   const a = session("a"), b = session("b");
   h.current = a;
-  h.openBrowserPane({ viewState: { mode: "expanded", width: "640px", height: "55vh" } });
+  h.openBrowserPane({ viewState: { mode: "expanded", height: "55vh" } });
   node("context-pane-body").scrollTop = 120;
   widths.set("--context-width", "700px");
   h.closeContextPane({ remember: true });
@@ -69,7 +69,8 @@ test("switching A → B → A restores each pane independently and disposes brow
   assert.equal(node("context-pane-body").scrollTop, 120);
   assert.equal(widths.get("--context-width"), "700px");
   assert.equal(h.mounts.at(-1).viewState.mode, "expanded");
-  assert.equal(h.mounts.at(-1).viewState.width, "640px");
+  assert.equal(h.mounts.at(-1).viewState.height, "55vh");
+  assert.equal(h.mounts.at(-1).paneResize, h.paneResize);
   assert.equal(node("context-pane-body").focused, true, "only the original explicit open focused the pane");
   h.closeContextPane({ remember: true });
   h.current = b; b.restorePane = true; h.restoreContextPane(b);
@@ -108,7 +109,7 @@ test("Edited files only read workspace media on click in the owning, eligible se
 test("pending restoration survives rapid switches, waits for readiness, and never retakes control", () => {
   const { h, node, session } = harness();
   const a = session("a"); h.current = a;
-  a.record.paneState = { nativeId: "native-a", mode: "browser", browser: { mode: "fullscreen", width: "", height: "" }, scrollTop: 10 };
+  a.record.paneState = { nativeId: "native-a", mode: "browser", browser: { mode: "fullscreen", height: "" }, scrollTop: 10 };
   const saved = a.record.paneState;
   a.restorePane = true; a.ready = false;
   h.restoreContextPane(a); h.closeContextPane({ remember: true });
