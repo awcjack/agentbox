@@ -388,8 +388,10 @@ further input. Renewing the unchanged lease preserves a still-fresh frame, witho
 flashing or interrupting typing. An unchanged reference inventory preserves selection.
 A late preview frame is display-only; polling continues without a manual reconnect.
 
-Closing/hiding the pane, switching sessions, logout and disconnect release control
-best effort; expiry is the fallback. Frames, fill drafts and leases remain in
+Switching away from the host tab pauses the preview and releases control without
+closing the pane. Returning refreshes the preview; take control again explicitly
+if needed. Closing the pane, switching sessions, logout and disconnect also
+release control best effort; expiry is the fallback. Frames, fill drafts and leases remain in
 memory only, outside chat history and SSE replay. Arbitrary shell programs remain
 outside this cooperative arbitration boundary.
 

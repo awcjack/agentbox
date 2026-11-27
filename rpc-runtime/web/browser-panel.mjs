@@ -51,22 +51,23 @@ export function validateInput(request, refs, size = { width: 2560, height: 1600 
 // request must retain the OLD auth/session binding through disposal, including a
 // late acquire acknowledgement. Reads abort; mutations never retry. Release is
 // best effort (including on hidden/logout); server-side lease expiry is the fallback.
-export function createBrowserController({ sessionId, nativeSessionId, request, onChange = () => {}, now = monotonicNow, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createBrowserController({ sessionId, nativeSessionId, request, onChange = () => {}, visible = true, now = monotonicNow, setTimer = setTimeout, clearTimer = clearTimeout }) {
   if (!id(sessionId) || !id(nativeSessionId)) throw new Error("A live native session is required.");
   const base = `/v1/sessions/${encodeURIComponent(sessionId)}/browser`;
-  const reads = new AbortController();
+  const connecting = "Connecting to the main conversation's browser…", paused = "Browser preview paused while this tab is hidden.";
+  let reads = new AbortController();
   let disposed = false, started = false, polling = false, busy = false, revision = 0, failures = 0, pendingOperation = "", lastPollAt = -Infinity;
-  let status = null, frame = null, frameDeadline = -Infinity, lease = null, message = "Connecting to the main conversation's browser…", controlError = "";
+  let status = null, frame = null, frameDeadline = -Infinity, lease = null, message = visible ? connecting : paused, controlError = "";
   let pollTimer, renewTimer, freshnessTimer;
   function getState() {
     const time = now();
     const fresh = Boolean(frame && frameDeadline > time);
     const held = Boolean(lease && lease.deadline > time);
-    const control = !disposed && !busy && status?.permissions.control === true && status?.capabilities.takeover === true;
+    const control = visible && !disposed && !busy && status?.permissions.control === true && status?.capabilities.takeover === true;
     return { status, frame, frameDeadline, message, busy, pendingOperation, disposed, held, fresh,
       canAcquire: control && status.ready === true && status.control.mode === "agent" && !held,
       canInput: control && held && fresh,
-      canRelease: !disposed && !busy && held };
+      canRelease: visible && !disposed && !busy && held };
   }
   function emit() {
     clearTimer(freshnessTimer);
@@ -90,11 +91,11 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
   }
   function schedulePoll(delay = 1000) {
     clearTimer(pollTimer);
-    if (!disposed) pollTimer = setTimer(poll, delay);
+    if (visible && !disposed) pollTimer = setTimer(poll, delay);
   }
   function refreshSoon() { schedulePoll(lease ? Math.max(0, lastPollAt + 250 - now()) : 1000); }
   async function poll() {
-    if (disposed || polling) return;
+    if (disposed || !visible || polling) return;
     if (busy) { schedulePoll(250); return; }
     const { signal } = reads;
     polling = true;
@@ -159,7 +160,8 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
       } else emit();
     } finally {
       polling = false;
-      if (failures) schedulePoll(Math.min(8000, 1000 * 2 ** failures)); else refreshSoon();
+      if (signal.aborted) schedulePoll(0); // A hide/show can occur before the old read settles.
+      else if (failures) schedulePoll(Math.min(8000, 1000 * 2 ** failures)); else refreshSoon();
     }
   }
   function scheduleRenew(delay = RENEW_INTERVAL) {
@@ -187,6 +189,7 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
     // Drop the local lease BEFORE attempting release: a failed release or a
     // concurrent dispose must not retry the same mutation. Expiry is the fallback.
     if (operation === "release") forgetLease(false);
+    const ownRevision = revision;
     emit();
     try {
       const sentAt = now();
@@ -195,8 +198,9 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
       if (["acquire", "renew"].includes(operation)) {
         if (!id(result.leaseId) || !timestamp(result.expiresAt) || !timestamp(result.serverTime)) invalid();
         if (operation === "renew" && result.leaseId !== body.leaseId) invalid();
-        if (disposed) {
-          // Disposal already released any known lease; only acquire can create one.
+        if (disposed || ownRevision !== revision) {
+          // A late acquire created a new lease; a late renewal only touched
+          // the known lease already released by the lifecycle change.
           if (operation === "acquire") bestRelease(result);
           return false;
         }
@@ -209,13 +213,13 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
         message = "You have control. Click, type or scroll in the preview.";
       } else {
         if (result.accepted !== true) invalid();
-        if (disposed) return false;
+        if (disposed || ownRevision !== revision) return false;
         if (operation === "release") { forgetLease(false); message = "Control released to the agent."; }
         else message = "You have control. Click, type or scroll in the preview.";
       }
       return true;
     } catch (error) {
-      if (!disposed) {
+      if (!disposed && ownRevision === revision) {
         message = `${error.message || "Browser control failed."} Nothing was retried; check the preview before another action.`;
         // Ambiguous failures drop authority. An explicit stale-frame rejection
         // performed no input, so retain the lease but never retry the gesture.
@@ -233,6 +237,19 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
   return {
     getState,
     start() { if (!started && !disposed) { started = true; emit(); void poll(); } },
+    setVisible(next) {
+      if (disposed || next === visible) return;
+      visible = next;
+      if (!visible) {
+        reads.abort(); clearTimer(pollTimer);
+        forgetLease(); status = null; frameDeadline = -Infinity;
+        controlError = ""; failures = 0; message = paused;
+      } else {
+        reads = new AbortController(); message = connecting;
+      }
+      emit();
+      if (visible && started) void poll();
+    },
     acquire: () => mutate("acquire"), release: () => mutate("release"), input: (value) => mutate("input", value),
     dispose() {
       if (disposed) return;
@@ -361,7 +378,7 @@ export function mountBrowserPanel(root, options) {
   let shownFrame, shownRefs = "";
   let direct, wheelX = 0, wheelY = 0;
   const now = options.now || monotonicNow;
-  const controller = createBrowserController({ ...options, now, onChange(state) {
+  const controller = createBrowserController({ visible: !doc.hidden, ...options, now, onChange(state) {
     if (notice.textContent !== state.message) notice.textContent = state.message;
     acquire.disabled = !state.canAcquire; release.disabled = !state.canRelease;
     acquire.textContent = state.pendingOperation === "acquire" ? "Taking control…" : "Take control";
@@ -459,6 +476,7 @@ export function mountBrowserPanel(root, options) {
   viewport.style.height = typeof initialView?.height === "string" ? initialView.height : "";
   controller.start();
   return {
+    setVisible: controller.setVisible,
     getViewState() { return { mode: viewMode, width: viewport.style.width, height: viewport.style.height }; },
     dispose() { direct.dispose(); controller.dispose(); shownFrame = null; shownRefs = ""; image.removeAttribute("src"); address.value = keyboard.value = text.value = key.value = url.value = ""; root.replaceChildren(); } };
 }

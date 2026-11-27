@@ -164,7 +164,7 @@ function canExportConversation(ctx) {
 function browserViewAvailable(ctx) {
   return Boolean(ctx && active(ctx) && ctx.ready && ctx.online && ctx.meta?.status === "running"
     && ctx.meta.nativeSessionId && !ctx.record.ending && !ctx.record.conversationBusy
-    && !ctx.replacing && !ctx.meta.conversationReplacing && !document.hidden);
+    && !ctx.replacing && !ctx.meta.conversationReplacing);
 }
 function canDownloadFile(ctx) {
   return canWrite(ctx, "prompt") && Boolean(ctx.meta.nativeSessionId);
@@ -2770,7 +2770,7 @@ document.addEventListener("keydown", (event) => {
 });
 window.addEventListener("focus", () => renderSessions());
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && browserPanel) closeContextPane();
+  browserPanel?.setVisible(!document.hidden);
   renderSessions(); updateControls();
 });
 window.addEventListener("offline", () => { if (current) { current.online = false; current.streamController?.abort(); updateControls(); } setNetwork("reconnecting", "Offline"); });

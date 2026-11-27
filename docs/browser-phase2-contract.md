@@ -159,7 +159,9 @@ switch/close/native replacement/logout. Read-only users may view but cannot
 acquire. Input disabled until lease acknowledged and a fresh frame arrives.
 Ref selector plus explicit Click/Fill, key/scroll/navigation controls; no global
 keyboard interception. Keep drafts/leases/images in memory only. Release best
-effort on close/hidden/logout; expiry is the fallback. No failed input retries.
+effort on close/hidden/logout; expiry is the fallback. A hidden host tab pauses
+polling without closing the pane; it resumes with no local lease and a new frame.
+No failed input retries.
 
 ## Verification and remaining acceptance
 

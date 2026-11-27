@@ -357,6 +357,47 @@ test("late acquire after selection/logout releases old lease without rendering",
   assert.equal(f.time.size, 0);
 });
 
+test("hide/show invalidates pending reads and resumes even if the old response arrives late", async () => {
+  const pending = deferred(); let block = true;
+  const f = fixture({ handle: path => block && path.endsWith("/frame") ? pending.promise : undefined });
+  await f.start();
+  f.controller.setVisible(false);
+  assert.equal(f.calls.at(-1).signal.aborted, true);
+  await f.time.tick(20_000);
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.controller.getState().disposed, false);
+  f.controller.setVisible(true);
+  block = false;
+  pending.resolve(frame(f.time.now(), "before-hide")); await flush();
+  assert.equal(f.controller.getState().frame, null);
+  await f.time.tick(0);
+  assert.equal(f.controller.getState().frame.frameId, "frame-1");
+  assert.equal(f.calls.at(-1).signal.aborted, false);
+  f.controller.dispose();
+});
+
+test("hide/show never restores a late acquire or renewal", async () => {
+  for (const operation of ["acquire", "renew"]) {
+    const pending = deferred();
+    const f = fixture({ handle: (_path, opts) => opts.body?.operation === operation ? pending.promise : undefined });
+    await f.start();
+    let acquire;
+    if (operation === "acquire") acquire = f.controller.acquire();
+    else { await f.controller.acquire(); await f.time.tick(RENEW_INTERVAL); }
+    f.controller.setVisible(false);
+    f.controller.setVisible(true);
+    pending.resolve({ ...binding, leaseId: "lease-old", serverTime: f.time.now(), expiresAt: f.time.now() + 30_000 });
+    if (acquire) assert.equal(await acquire, false);
+    await flush(); await f.time.tick(30_000);
+    assert.equal(f.controller.getState().held, false);
+    assert.equal(f.controller.getState().canInput, false);
+    assert.equal(f.mutations("release").length, 1);
+    assert.equal(f.mutations("acquire").length, 1);
+    assert.equal(f.mutations("renew").length, operation === "renew" ? 1 : 0);
+    f.controller.dispose();
+  }
+});
+
 test("late previews cannot render after disposal or restore pre-acquire frame", async () => {
   const pending = deferred(); let block = false;
   const f = fixture({ handle: (path) => block && path.endsWith("/frame") ? pending.promise : undefined });
@@ -593,13 +634,44 @@ test("app lifecycle seams dispose browser before auth reset and preserve file mo
   assert.match(app, /function logout[^]*?closeContextPane\(\)[^]*?token = ""/);
   assert.match(app, /function closeTab[^]*?if \(current\?\.id === id\) \{\s*closeContextPane\(\{ remember: true \}\)/);
   assert.match(app, /function openContextPane\(path\)[^]*?closeContextPane\(\)[^]*?pane.dataset.mode = "file"/);
-  assert.match(app, /visibilitychange[^]*?document.hidden && browserPanel\) closeContextPane\(\)/);
+  assert.match(app, /visibilitychange[^]*?browserPanel\?\.setVisible\(!document.hidden\)/);
+  assert.doesNotMatch(app, /function browserViewAvailable[^}]*document.hidden/);
   assert.match(app, /browserBinding\?\.ctx === ctx\) closeContextPane\(\)/);
   assert.match(app, /createTransport\(\(\) => ownToken\)/);
   assert.match(app, /if \(block.type === "image"\)/);
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   assert.match(html, /id="open-browser"/);
   assert.match(html, /img-src[^;]*data:/);
+});
+
+test("hiding the host tab leaves the same pane mounted and resumes read-only", async () => {
+  const doc = { createElement: tag => new FakeElement(tag, doc) }, root = new FakeElement("div", doc);
+  const f = fixture();
+  const mounted = mountBrowserPanel(root, { sessionId: "session/old", nativeSessionId: "native-old", request: f.request, ...f.time });
+  await flush();
+  const [panel] = root.children, all = el => [el, ...el.children.flatMap(all)], nodes = all(panel);
+  const button = name => nodes.find(n => n.tag === "button" && n.textContent === name);
+  const image = nodes.find(n => n.tag === "img");
+  button("Expand preview").listeners.click();
+  button("Take control").listeners.click(); await flush(); await f.time.tick(250);
+  assert.equal(image.hidden, false);
+  assert.equal(image.attributes["data-interactive"], "true");
+  mounted.setVisible(false);
+  assert.equal(root.children[0], panel);
+  assert.equal(mounted.getViewState().mode, "expanded");
+  assert.equal(image.hidden, true);
+  assert.equal(f.mutations("release").length, 1);
+  const calls = f.calls.length;
+  await f.time.tick(60_000);
+  assert.equal(f.calls.length, calls);
+  mounted.setVisible(true); await flush();
+  assert.equal(root.children[0], panel);
+  assert.equal(mounted.getViewState().mode, "expanded");
+  assert.equal(image.hidden, false);
+  assert.equal(image.attributes["data-interactive"], "false");
+  assert.equal(button("Take control").disabled, false);
+  assert.equal(f.mutations("acquire").length, 1);
+  mounted.dispose();
 });
 
 for (const mode of ["normal", "expanded", "fullscreen"]) {
