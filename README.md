@@ -700,6 +700,9 @@ unrelated main session is carved out: Auto still allows same-main
 - `/agentbox-defaults` or `/agentbox-defaults status`: show saved model/auto,
   policy availability, and live auto state.
 - `/agentbox-defaults model current`: save the current provider/model pair.
+- `/agentbox-defaults model <provider>/<id>`: save a catalog model directly,
+  without switching the current session. Defaults are global across projects
+  sharing the same Pi agent directory, not per-project.
 - `/agentbox-defaults auto on`: save auto-on after a broad-authorization warning
   and explicit confirmation. Without a UI or on cancellation, nothing is saved.
 - `/agentbox-defaults auto off`: save auto-off (no confirmation needed).

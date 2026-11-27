@@ -8,12 +8,12 @@ import { createAgentboxDefaultsStore, createPiPolicyExtension } from "../extensi
 function harness(saved: unknown, available = true, overrides: any = {}) {
   const handlers = new Map<string, any>(), commands = new Map<string, any>(), events = new Map<string, any>()
   let settings: Record<string, unknown> = { agentboxAutoDefault: saved, theme: "dark" }, writes = 0
-  const notices: string[] = [], selected: any[] = [], entries: any[] = []
+  const notices: string[] = [], selected: any[] = [], entries: any[] = [], statuses = new Map<string, string>()
   let confirmed = false
   const ctx: any = { cwd: "/workspace", hasUI: true, mode: "tui", model: { provider: "example", id: "model" },
     modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
     sessionManager: { getSessionId: () => "test-session", getSessionFile: () => undefined, getHeader: () => ({}), getEntries: () => entries },
-    ui: { setStatus() {}, select: async () => "Deny", notify: (text: string) => notices.push(text),
+    ui: { setStatus(key: string, value: string) { statuses.set(key, value) }, select: async () => "Deny", notify: (text: string) => notices.push(text),
       confirm: async (_title: string, warning: string) => { assert.match(warning, /broad authorization/); return confirmed } } }
   createPiPolicyExtension({
     env: {}, argv: [], realpath: async p => p, signal() {},
@@ -29,7 +29,7 @@ function harness(saved: unknown, available = true, overrides: any = {}) {
     setModel: async (model: any) => { selected.push(model); ctx.model = model; return true },
     appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     events: { on: (name: string, fn: any) => events.set(name, fn) } } as any)
-  return { ctx, notices, settings, selected, entries, confirm: () => { confirmed = true }, writes: () => writes,
+  return { ctx, notices, settings, selected, entries, statuses, confirm: () => { confirmed = true }, writes: () => writes,
     start: (reason?: string) => handlers.get("session_start")({ reason }, ctx),
     event: (name: string) => handlers.get(name)({}, ctx),
     command: (args: string) => commands.get("agentbox-defaults").handler(args, ctx),
@@ -170,6 +170,25 @@ await unavailable.start("startup")
 assert.deepEqual(unavailable.selected, [])
 assert.match(unavailable.notices.at(-1)!, /unavailable/)
 assert.deepEqual(unavailable.settings.agentboxDefaultModel, { provider: "missing", model: "missing" })
+
+// Direct default selection preserves case and slash-containing IDs and never
+// changes the active session. Missing models must not overwrite saved settings.
+const direct = harness(false)
+direct.ctx.mode = "rpc"
+await direct.start("resume")
+assert.deepEqual(JSON.parse(direct.statuses.get("agentbox-default-model")!), { scope: "global", model: null })
+await direct.command("model codex-work/Org/TargetModel")
+assert.deepEqual(direct.settings.agentboxDefaultModel, { provider: "codex-work", model: "Org/TargetModel" })
+assert.deepEqual(direct.selected, [])
+assert.equal(direct.ctx.model.provider, "example")
+assert.deepEqual(JSON.parse(direct.statuses.get("agentbox-default-model")!), {
+  scope: "global", model: { provider: "codex-work", id: "Org/TargetModel" },
+})
+direct.ctx.modelRegistry.find = () => undefined
+await direct.command("model missing/model")
+assert.equal(direct.writes(), 1)
+await direct.start("resume")
+assert.deepEqual(JSON.parse(direct.statuses.get("agentbox-default-model")!).model, { provider: "codex-work", id: "Org/TargetModel" })
 
 // Integration against the installed Pi package; no global user files touched.
 if (process.argv[2]) {
