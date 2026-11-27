@@ -372,9 +372,10 @@ panel scrolling, and pinch-to-zoom is not forwarded as scrolling.
 pixel sizes (width 320–2560, height 240–1600). **Apply resolution** changes the
 actual remote viewport under the existing lease and fresh-frame checks; the size
 label updates only from the acknowledged frame. The initial size is 1280×720.
-These are viewport dimensions, not device/UA/DPR emulation. Drag the preview's
-bottom-right corner to resize its local display, use **Fit preview** to reset it,
-or **Expand preview** for more room; those display controls do not resize the page.
+These are viewport dimensions, not device/UA/DPR emulation. On desktop, drag the
+preview's bottom-left corner to resize its display and the right-hand pane together.
+**Fit preview** fits the preview to the current pane width again; **Expand preview**
+gives the preview more room. These display controls do not resize the page.
 Frames expire after 5 seconds; each new snapshot invalidates older references.
 Up to four recent direct-input frame bindings are retained to cover a preview
 refresh racing with direct input, navigation, or a resize request. Reference
