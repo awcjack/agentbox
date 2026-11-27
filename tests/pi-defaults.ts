@@ -8,11 +8,11 @@ import { createAgentboxDefaultsStore, createPiPolicyExtension } from "../extensi
 function harness(saved: unknown, available = true, overrides: any = {}) {
   const handlers = new Map<string, any>(), commands = new Map<string, any>(), events = new Map<string, any>()
   let settings: Record<string, unknown> = { agentboxAutoDefault: saved, theme: "dark" }, writes = 0
-  const notices: string[] = [], selected: any[] = []
+  const notices: string[] = [], selected: any[] = [], entries: any[] = []
   let confirmed = false
   const ctx: any = { cwd: "/workspace", hasUI: true, mode: "tui", model: { provider: "example", id: "model" },
     modelRegistry: { find: (provider: string, id: string) => ({ provider, id }) },
-    sessionManager: { getSessionId: () => "test-session", getSessionFile: () => undefined, getHeader: () => ({}), getEntries: () => [] },
+    sessionManager: { getSessionId: () => "test-session", getSessionFile: () => undefined, getHeader: () => ({}), getEntries: () => entries },
     ui: { setStatus() {}, select: async () => "Deny", notify: (text: string) => notices.push(text),
       confirm: async (_title: string, warning: string) => { assert.match(warning, /broad authorization/); return confirmed } } }
   createPiPolicyExtension({
@@ -27,8 +27,9 @@ function harness(saved: unknown, available = true, overrides: any = {}) {
     ...overrides,
   })({ on: (name: string, fn: any) => handlers.set(name, fn), registerCommand: (name: string, cmd: any) => commands.set(name, cmd),
     setModel: async (model: any) => { selected.push(model); ctx.model = model; return true },
+    appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }),
     events: { on: (name: string, fn: any) => events.set(name, fn) } } as any)
-  return { ctx, notices, settings, selected, confirm: () => { confirmed = true }, writes: () => writes,
+  return { ctx, notices, settings, selected, entries, confirm: () => { confirmed = true }, writes: () => writes,
     start: (reason?: string) => handlers.get("session_start")({ reason }, ctx),
     event: (name: string) => handlers.get(name)({}, ctx),
     command: (args: string) => commands.get("agentbox-defaults").handler(args, ctx),
@@ -54,6 +55,17 @@ for (const overrides of [
   await probe.start("startup")
   assert.equal(probe.enabled(), false)
 }
+const rpc = harness(true)
+rpc.ctx.mode = "rpc"
+await rpc.start("startup")
+assert.equal(rpc.enabled(), true)
+assert.deepEqual(rpc.entries, [{ type: "custom", customType: "agentbox-auto-mode", data: { version: 1, sessionId: "test-session", mode: "on" } }])
+const reopened = harness(false)
+reopened.ctx.mode = "rpc"
+reopened.entries.push(...rpc.entries)
+await reopened.start("resume")
+assert.equal(reopened.enabled(), true, "reopen uses the original RPC session choice even when the global default is now off")
+
 const disabled = harness(true, false)
 await disabled.start("new")
 assert.equal(disabled.enabled(), false)

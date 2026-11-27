@@ -820,7 +820,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     }
     function showAuto(ctx: ExtensionContext, available: boolean) {
       ctx.ui.setStatus("agentbox-auto", ctx.mode === "rpc"
-        ? JSON.stringify({ available, enabled: autoEnabled })
+        ? JSON.stringify({ available, enabled: autoEnabled, ...(reviewEnabled ? { review: true } : {}) })
         : available ? `Auto: ${autoEnabled ? "on" : reviewEnabled ? "review (may ask)" : "off"}` : undefined)
     }
     async function publishAuto(ctx: ExtensionContext) {
@@ -966,8 +966,8 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         // Startup also covers CLI --resume/--continue. Inspect all entries, not
         // just the active branch (which may have been navigated back to root).
         if (event.reason === "startup") {
-          // Fresh Pi sessions are not flushed to disk until an assistant reply.
-          // An existing file is a restore even if it has no conversation entries.
+          // A fresh Pi session may not have a file yet. An existing file is
+          // a restore even if it has no conversation entries.
           const file = ctx.sessionManager.getSessionFile()
           if (file) {
             try { await fs.stat(file); return } catch (error) {
@@ -994,7 +994,15 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
           }
         }
         if (epoch !== session || epoch.signal.aborted || request !== modeRequest) return
-        autoEnabled = available && settings.agentboxAutoDefault === true
+        if (available && settings.agentboxAutoDefault === true && activeSessionId) {
+          try {
+            if (ctx.mode === "rpc") pi.appendEntry(AUTO_SESSION_ENTRY, { version: 1, sessionId: activeSessionId, mode: "on" })
+            autoEnabled = true
+          } catch {
+            failedSaves.add(activeSessionId)
+            ctx.ui.notify("Could not save session Auto mode; live Auto is off.", "error")
+          }
+        }
         showAuto(ctx, available)
       } catch { /* Unreadable or invalid defaults never enable auto. */ }
     })
