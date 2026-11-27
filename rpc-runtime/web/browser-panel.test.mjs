@@ -33,7 +33,7 @@ function clock() {
 }
 const binding = { version: 1, nativeSessionId: "native-old", browserSessionId: "browser-old" };
 function frame(now = 100_000, frameId = "frame-1") {
-  return { ...binding, frameId, createdAt: now, width: 1280, height: 720, url: "https://example.test/start", mimeType: "image/jpeg", data: "/9j/AA==", refs: [{ ref: "@e1", role: "textbox", name: "Page name" }], control: { mode: "agent" } };
+  return { ...binding, frameId, createdAt: now, serverTime: now, width: 1280, height: 720, url: "https://example.test/start", mimeType: "image/jpeg", data: "/9j/AA==", refs: [{ ref: "@e1", role: "textbox", name: "Page name" }], control: { mode: "agent" } };
 }
 function fixture(options = {}) {
   const time = clock(), calls = [], changes = [];
@@ -48,7 +48,7 @@ function fixture(options = {}) {
       const op = opts.body.operation;
       if (["acquire", "renew"].includes(op)) {
         mode = "human";
-        return { ...binding, leaseId: "lease-old", expiresAt: time.now() + 30_000 };
+        return { ...binding, leaseId: "lease-old", serverTime: time.now(), expiresAt: time.now() + 30_000 };
       }
       if (op === "release") mode = "agent";
       return { ...binding, accepted: true };
@@ -151,8 +151,23 @@ test("agent browser close/reopen drops old frames and leases but keeps the panel
   }
 });
 
-test("frames from a different browser than the latest status still fail closed", async () => {
-  const f = fixture({ handle: path => path.endsWith("/frame") ? { ...frame(), browserSessionId: "browser-other" } : undefined });
+test("browser rotation between status and frame requires status to confirm the new browser", async () => {
+  const status = {};
+  const f = fixture({ status, handle: (path, _opts, time) => path.endsWith("/frame") ? { ...frame(time.now()), browserSessionId: "browser-new" } : undefined });
+  await f.start();
+  assert.equal(f.controller.getState().disposed, false);
+  assert.equal(f.controller.getState().frame, null);
+  assert.equal(f.controller.getState().canAcquire, false);
+  await f.time.tick(2000);
+  assert.equal(f.controller.getState().frame, null);
+  status.browserSessionId = "browser-new";
+  await f.time.tick(4000);
+  assert.equal(f.controller.getState().frame.browserSessionId, "browser-new");
+  f.controller.dispose();
+});
+
+test("a frame with the wrong native session still stops polling", async () => {
+  const f = fixture({ handle: path => path.endsWith("/frame") ? { ...frame(), nativeSessionId: "native-other" } : undefined });
   await f.start();
   assert.equal(f.controller.getState().disposed, true);
   assert.equal(f.controller.getState().frame, null);
@@ -246,6 +261,53 @@ test("successful input also needs a newly fetched frame", async () => {
   f.controller.dispose();
 });
 
+test("server-relative frame and lease expiry tolerate clock skew and recover from a delayed frame", async () => {
+  for (const offset of [-50_000, 600_000]) {
+    const delayed = deferred(), status = { control: { mode: "agent" } }; let block = false;
+    const f = fixture({ status, handle(path, opts, time) {
+      const serverTime = time.now() + offset;
+      if (opts.body?.operation === "acquire") {
+        status.control = { mode: "human" };
+        return { ...binding, leaseId: "lease-old", serverTime, expiresAt: serverTime + 30_000 };
+      }
+      if (path.endsWith("/frame")) return block ? delayed.promise : { ...frame(serverTime), control: status.control };
+    } });
+    await f.start();
+    assert.equal(f.controller.getState().fresh, true);
+    assert.equal(await f.controller.acquire(), true);
+    await f.time.tick(250);
+    assert.equal(f.controller.getState().canInput, true);
+    block = true;
+    await f.time.tick(250);
+    const captured = { ...frame(f.time.now() + offset, "delayed"), control: status.control };
+    await f.time.tick(FRAME_TTL);
+    delayed.resolve(captured); await flush();
+    assert.equal(f.controller.getState().frame.frameId, "delayed");
+    assert.equal(f.controller.getState().disposed, false);
+    assert.equal(f.controller.getState().held, true);
+    assert.equal(await f.controller.input({ action: "reload" }), false);
+    block = false;
+    await f.time.tick(250);
+    assert.equal(f.controller.getState().canInput, true);
+    assert.equal(f.mutations("input").length, 0);
+    f.controller.dispose();
+  }
+});
+
+test("frames outside the server freshness window are display-only until a fresh frame arrives", async () => {
+  for (const age of [-1, FRAME_TTL]) {
+    let offset = age;
+    const f = fixture({ handle: (path, _opts, time) => path.endsWith("/frame") ? { ...frame(time.now()), createdAt: time.now() - offset, control: { mode: "human" } } : undefined });
+    await f.start(); await f.controller.acquire(); await f.time.tick(250);
+    assert.equal(f.controller.getState().disposed, false);
+    assert.equal(f.controller.getState().canInput, false);
+    offset = 0;
+    await f.time.tick(250);
+    assert.equal(f.controller.getState().canInput, true);
+    f.controller.dispose();
+  }
+});
+
 test("five-second freshness disables controls even while next poll is hung", async () => {
   const pending = deferred(); let block = false;
   const f = fixture({ handle: (path) => block && path.endsWith("/frame") ? pending.promise : undefined });
@@ -266,7 +328,7 @@ test("failed renewal drops authority without retry; expiry disables hung renewal
     assert.equal(f.controller.getState().held, false);
     assert.equal(f.controller.getState().canInput, false);
     f.controller.dispose();
-    if (hang) { pending.resolve({ ...binding, leaseId: "lease-old", expiresAt: f.time.now() + 30_000 }); await flush(); }
+    if (hang) { pending.resolve({ ...binding, leaseId: "lease-old", serverTime: f.time.now(), expiresAt: f.time.now() + 30_000 }); await flush(); }
   }
 });
 
@@ -288,7 +350,7 @@ test("late acquire after selection/logout releases old lease without rendering",
   const f = fixture({ handle: (_path, opts) => opts.body?.operation === "acquire" ? pending.promise : undefined });
   await f.start(); const acquire = f.controller.acquire(); f.controller.dispose();
   const count = f.changes.length;
-  pending.resolve({ ...binding, leaseId: "late-lease", expiresAt: f.time.now() + 30_000 });
+  pending.resolve({ ...binding, leaseId: "late-lease", serverTime: f.time.now(), expiresAt: f.time.now() + 30_000 });
   assert.equal(await acquire, false);
   assert.equal(f.changes.length, count);
   assert.equal(f.mutations("release")[0].body.leaseId, "late-lease");
@@ -332,20 +394,20 @@ test("read errors use bounded backoff; authorization errors stop polling", async
   assert.equal(g.controller.getState().canAcquire, false);
 });
 
-test("bounded canonical JPEG frames, identities, freshness and refs validated", () => {
-  assert.equal(validateFrame(frame(), "native-old", "browser-old", 100_000).frameId, "frame-1");
+test("bounded canonical JPEG frames, identities, timestamps and refs validated", () => {
+  assert.equal(validateFrame(frame(), "native-old").frameId, "frame-1");
   const bad = [
     { data: "PHN2Zz4=" }, { data: "/9j/AB==" }, { data: "/9j/AA==\n" }, { data: "A".repeat(819204) },
-    { mimeType: "image/svg+xml" }, { width: 1 }, { nativeSessionId: "new" }, { browserSessionId: "new" },
-    { createdAt: 95_000 }, { createdAt: 100_001 }, { createdAt: NaN }, { frameId: "" },
+    { mimeType: "image/svg+xml" }, { width: 1 }, { nativeSessionId: "new" }, { browserSessionId: "" },
+    { createdAt: NaN }, { createdAt: -1 }, { serverTime: undefined }, { frameId: "" },
     { refs: Array.from({ length: 101 }, () => ({ ref: "@e1", role: "button", name: "x" })) },
     { refs: [{ ref: "@e1", role: "button", name: "x".repeat(513) }] },
     { refs: [{ ref: "#selector", role: "button", name: "x" }] },
     { url: "javascript:alert(1)" }, { url: "ws://127.0.0.1/private" }, { url: "https://user:secret@example.test/" }, { url: "x".repeat(4097) },
   ];
-  for (const patch of bad) assert.throws(() => validateFrame({ ...frame(), ...patch }, "native-old", "browser-old", 100_000));
+  for (const patch of bad) assert.throws(() => validateFrame({ ...frame(), ...patch }, "native-old"));
   const bytes = Buffer.alloc(600 * 1024); bytes[0] = 255; bytes[1] = 216; bytes[2] = 255;
-  assert.doesNotThrow(() => validateFrame({ ...frame(), data: bytes.toString("base64") }, "native-old", "browser-old", 100_000));
+  assert.doesNotThrow(() => validateFrame({ ...frame(), data: bytes.toString("base64") }, "native-old"));
 });
 
 test("human input allows only strict ref/key/scroll/navigation shapes", () => {

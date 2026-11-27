@@ -1893,6 +1893,9 @@ export function createRuntime(runtimeConfig, dependencies = {}) {
           let result;
           try { result = browserResult(data, operation, nativeSessionId, payload, canControl); }
           catch (error) { channel.close(); throw error; }
+          // Browser deadlines are server timestamps. Include a server clock
+          // sample so web clients need not compare them to their wall clock.
+          if (operation === "frame" || operation === "acquire" || operation === "renew") result.serverTime = now();
           return json(response, 200, result);
         } finally { session.browserPending--; session.touch(); }
       }

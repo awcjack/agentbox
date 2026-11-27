@@ -77,7 +77,9 @@ UI schema accepts the additional scope strings. Human requests are explicit
 operator actions, not model tool calls; they do not claim Pi tool approval.
 
 - GET `/v1/sessions/:id/browser`: bridge `status`, supervisor adds permissions.
-- GET `/v1/sessions/:id/browser/frame`: bridge `frame`.
+- GET `/v1/sessions/:id/browser/frame`: bridge `frame`, with supervisor `serverTime`.
+  Successful acquire/renew responses also include `serverTime` (Unix milliseconds),
+  so the client can derive deadlines without using its own wall clock.
 - POST `/v1/sessions/:id/browser/control`: bounded JSON body, strict known fields:
   - `{operation:"acquire",browserSessionId}`
   - `{operation:"renew"|"release",browserSessionId,leaseId}`

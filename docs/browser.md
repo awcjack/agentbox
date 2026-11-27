@@ -386,6 +386,7 @@ During takeover transitions the last preview stays visible; only genuinely stale
 frames are dimmed. Acquiring control and page input require a fresh frame before
 further input. Renewing the unchanged lease preserves a still-fresh frame, without
 flashing or interrupting typing. An unchanged reference inventory preserves selection.
+A late preview frame is display-only; polling continues without a manual reconnect.
 
 Closing/hiding the pane, switching sessions, logout and disconnect release control
 best effort; expiry is the fallback. Frames, fill drafts and leases remain in

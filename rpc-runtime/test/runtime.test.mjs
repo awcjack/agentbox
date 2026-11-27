@@ -2403,8 +2403,8 @@ test("control is narrow, principal is injected, responses are projected and neve
   const f = await fixture(t, browserConfig(), { browserHandler: (req) => {
     seen.push(req);
     if (req.operation === "status") return { ...browserStatus(req.nativeSessionId), principal: "secret", leaseId: "secret", permissions: { control: false } };
-    if (req.operation === "frame") return { ...browserFrame(req.nativeSessionId), principal: "secret", leaseId: "secret" };
-    return { ...browserBase(req.nativeSessionId), leaseId: "lease-one", expiresAt: Date.now() + 30000, accepted: true, principal: "secret" };
+    if (req.operation === "frame") return { ...browserFrame(req.nativeSessionId), serverTime: -1, principal: "secret", leaseId: "secret" };
+    return { ...browserBase(req.nativeSessionId), leaseId: "lease-one", serverTime: -1, expiresAt: Date.now() + 30000, accepted: true, principal: "secret" };
   } });
   const id = await createSession(f.baseUrl), path = `/v1/sessions/${id}/browser`;
   const session = f.runtime.sessions.get(id), eventCount = session.events.records.length;
@@ -2414,6 +2414,8 @@ test("control is narrow, principal is injected, responses are projected and neve
     assert.equal(result.response.headers.get("cache-control"), "no-store");
     assert.equal(result.body.principal, undefined);
     assert.equal(result.body.leaseId, undefined);
+    if (suffix) assert.ok(Number.isSafeInteger(result.body.serverTime) && result.body.serverTime >= result.body.createdAt);
+    else assert.equal(result.body.serverTime, undefined);
   }
   for (const operation of ["acquire", "renew", "release", "input"]) {
     const body = { operation, browserSessionId: "browser-incarnation", ...(operation === "acquire" ? {} : { leaseId: "lease-one" }),
@@ -2421,7 +2423,14 @@ test("control is narrow, principal is injected, responses are projected and neve
     const result = await request(f.baseUrl, `${path}/control`, { method: "POST", headers: browserHeaders(id, true), body });
     assert.equal(result.response.status, 200, JSON.stringify(result.body));
     assert.equal(result.body.principal, undefined);
-    assert.equal(result.body.leaseId, ["acquire", "renew"].includes(operation) ? "lease-one" : undefined);
+    if (["acquire", "renew"].includes(operation)) {
+      assert.equal(result.body.leaseId, "lease-one");
+      const remaining = result.body.expiresAt - result.body.serverTime;
+      assert.ok(Number.isSafeInteger(result.body.serverTime) && remaining > 0 && remaining <= 30_000);
+    } else {
+      assert.equal(result.body.leaseId, undefined);
+      assert.equal(result.body.serverTime, undefined);
+    }
   }
   assert.equal(seen.length, 6);
   for (const requestBody of [{ action: "pointer", x: 0, y: 0 }, { action: "pointer", x: 1279, y: 719 }, { action: "type", text: "--config '世界'" }, { action: "wheel", x: 120, y: 200, deltaX: -20, deltaY: 100 }, { action: "resize", width: 390, height: 844 }]) {

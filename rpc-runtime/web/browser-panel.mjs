@@ -4,20 +4,22 @@ import { createPreviewInput, previewPoint, previewWheel } from "./browser-input.
 export const FRAME_TTL = 5_000, LEASE_TTL = 30_000, RENEW_INTERVAL = 10_000;
 const id = (value) => typeof value === "string" && value.length > 0 && value.length <= 512;
 const refPattern = /^@e[1-9][0-9]{0,8}$/;
-function invalid() { throw new Error("Invalid browser response. Close and reopen Browser to reconnect."); }
+const timestamp = (value) => Number.isSafeInteger(value) && value >= 0;
+const monotonicNow = () => performance.now();
+function invalid() { throw Object.assign(new Error("Invalid browser response. Close and reopen Browser to reconnect."), { code: "invalid_browser_response" }); }
 
-export function validateFrame(frame, nativeSessionId, browserSessionId, now = Date.now()) {
-  if (frame?.version !== 1 || frame.nativeSessionId !== nativeSessionId || frame.browserSessionId !== browserSessionId
-    || !id(frame.frameId) || !Number.isFinite(frame.createdAt) || frame.createdAt > now || now - frame.createdAt >= FRAME_TTL
+export function validateFrame(frame, nativeSessionId) {
+  if (frame?.version !== 1 || frame.nativeSessionId !== nativeSessionId || !id(frame.browserSessionId)
+    || !id(frame.frameId) || !timestamp(frame.createdAt) || !timestamp(frame.serverTime)
     || !Number.isInteger(frame.width) || frame.width < 320 || frame.width > 2560 || !Number.isInteger(frame.height) || frame.height < 240 || frame.height > 1600 || frame.mimeType !== "image/jpeg"
     || typeof frame.data !== "string" || frame.data.length > 819200 || !frame.data.length
-    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(frame.data)
+    || frame.data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(frame.data)
     || !Array.isArray(frame.refs) || frame.refs.length > 100
     || frame.refs.some((r) => typeof r?.ref !== "string" || !refPattern.test(r.ref) || typeof r.role !== "string" || r.role.length > 512 || typeof r.name !== "string" || r.name.length > 512)
     || new Set(frame.refs.map((r) => r.ref)).size !== frame.refs.length
     || !["agent", "human"].includes(frame.control?.mode)) invalid();
   const bytes = atob(frame.data);
-  if (bytes.length > 600 * 1024 || bytes.length < 3 || btoa(bytes) !== frame.data
+  if (bytes.length > 600 * 1024 || bytes.length < 4 || btoa(bytes) !== frame.data
     || bytes.charCodeAt(0) !== 255 || bytes.charCodeAt(1) !== 216 || bytes.charCodeAt(2) !== 255) invalid();
   if (frame.url !== undefined && frame.url !== null) {
     let location;
@@ -49,26 +51,27 @@ export function validateInput(request, refs, size = { width: 2560, height: 1600 
 // request must retain the OLD auth/session binding through disposal, including a
 // late acquire acknowledgement. Reads abort; mutations never retry. Release is
 // best effort (including on hidden/logout); server-side lease expiry is the fallback.
-export function createBrowserController({ sessionId, nativeSessionId, request, onChange = () => {}, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout }) {
+export function createBrowserController({ sessionId, nativeSessionId, request, onChange = () => {}, now = monotonicNow, setTimer = setTimeout, clearTimer = clearTimeout }) {
   if (!id(sessionId) || !id(nativeSessionId)) throw new Error("A live native session is required.");
   const base = `/v1/sessions/${encodeURIComponent(sessionId)}/browser`;
   const reads = new AbortController();
   let disposed = false, started = false, polling = false, busy = false, revision = 0, failures = 0, pendingOperation = "", lastPollAt = -Infinity;
-  let status = null, frame = null, lease = null, message = "Connecting to the main conversation's browser…", controlError = "";
+  let status = null, frame = null, frameDeadline = -Infinity, lease = null, message = "Connecting to the main conversation's browser…", controlError = "";
   let pollTimer, renewTimer, freshnessTimer;
   function getState() {
-    const fresh = Boolean(frame && now() >= frame.createdAt && now() - frame.createdAt < FRAME_TTL);
-    const held = Boolean(lease && lease.expiresAt > now());
-    const control = status?.permissions.control === true && status?.capabilities.takeover === true;
-    return { status, frame, message, busy, pendingOperation, disposed, held, fresh,
-      canAcquire: !disposed && !busy && control && status?.ready === true && status?.control.mode === "agent" && !held,
-      canInput: !disposed && !busy && control && held && fresh,
+    const time = now();
+    const fresh = Boolean(frame && frameDeadline > time);
+    const held = Boolean(lease && lease.deadline > time);
+    const control = !disposed && !busy && status?.permissions.control === true && status?.capabilities.takeover === true;
+    return { status, frame, frameDeadline, message, busy, pendingOperation, disposed, held, fresh,
+      canAcquire: control && status.ready === true && status.control.mode === "agent" && !held,
+      canInput: control && held && fresh,
       canRelease: !disposed && !busy && held };
   }
   function emit() {
     clearTimer(freshnessTimer);
     if (disposed) return;
-    const deadlines = [frame && frame.createdAt + FRAME_TTL, lease?.expiresAt].filter((v) => v > now());
+    const deadlines = [frameDeadline, lease?.deadline].filter((v) => v > now());
     if (deadlines.length) freshnessTimer = setTimer(emit, Math.min(...deadlines) - now());
     onChange(getState());
   }
@@ -93,11 +96,12 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
   async function poll() {
     if (disposed || polling) return;
     if (busy) { schedulePoll(250); return; }
+    const { signal } = reads;
     polling = true;
     lastPollAt = now();
     let ownRevision = revision;
     try {
-      const next = await call("", undefined, reads.signal);
+      const next = await call("", undefined, signal);
       if (disposed || ownRevision !== revision) return;
       // Status discovers the current browser within this native conversation.
       // Agent close/reopen rotates that browser ID; frames and mutations must
@@ -113,18 +117,33 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
         ownRevision = revision;
       }
       status = next;
-      if (lease && (!next.ready || next.permissions.control !== true || next.capabilities.takeover !== true || next.control.mode !== "human" || lease.expiresAt <= now())) forgetLease();
+      if (lease && (!next.ready || next.permissions.control !== true || next.capabilities.takeover !== true || next.control.mode !== "human" || lease.deadline <= now())) {
+        forgetLease(); ownRevision = revision;
+      }
       message = controlError || (!next.ready ? "The agent has not opened a browser. Preview never starts it."
         : lease ? "You have control. Agent browser actions are paused."
         : next.control.mode === "human" ? "Another human control lease is active."
         : next.permissions.control && next.capabilities.takeover === true ? "Viewing the main conversation's tab. Take control to interact." : "Read-only browser preview (server permission/capability).");
-      if (!next.ready) { frame = null; failures = 0; emit(); return; }
+      if (!next.ready) { frame = null; frameDeadline = -Infinity; failures = 0; emit(); return; }
       if (replaced) emit();
-      const frameRevision = revision;
-      const nextFrame = await call("/frame", undefined, reads.signal);
-      if (disposed || frameRevision !== revision) return;
-      frame = validateFrame(nextFrame, nativeSessionId, status.browserSessionId, now());
-      if (lease && frame.control.mode !== "human") forgetLease();
+      const sentAt = now();
+      const nextFrame = await call("/frame", undefined, signal);
+      if (disposed || ownRevision !== revision) return;
+      validateFrame(nextFrame, nativeSessionId);
+      if (nextFrame.browserSessionId !== status.browserSessionId) {
+        // The agent can close/reopen between the two reads. Never show a
+        // mismatched frame or bind to it: rediscover through status instead.
+        forgetLease(); status = null; frameDeadline = -Infinity;
+        message = "Browser changed. Waiting for the preview to refresh…";
+        failures = Math.min(failures + 1, 4);
+        emit(); return;
+      }
+      if (lease && nextFrame.control.mode !== "human") forgetLease();
+      frame = nextFrame;
+      const age = frame.serverTime - frame.createdAt;
+      // Convert server-relative time to a conservative local deadline, charging
+      // the whole request to freshness. Late frames can be viewed, not used.
+      frameDeadline = age >= 0 && age < FRAME_TTL ? sentAt + FRAME_TTL - age : -Infinity;
       failures = 0;
       emit();
     } catch (error) {
@@ -133,7 +152,7 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
       message = error.message || "Browser preview unavailable.";
       failures = Math.min(failures + 1, 4);
       // Auth/identity/protocol errors fail closed until an explicit reopen.
-      if ([401, 403, 404, 409].includes(error.status) || ["browser_session_changed", "invalid_browser_request", "browser_bridge_closed"].includes(error.code) || message.startsWith("Invalid browser response")) {
+      if ([401, 403, 404, 409].includes(error.status) || ["browser_session_changed", "invalid_browser_request", "invalid_browser_response", "browser_bridge_closed"].includes(error.code)) {
         if (error.code === "browser_bridge_closed") message = "Browser bridge closed. Restart the conversation process to reconnect; reopening this pane cannot reconnect it.";
         status = null; forgetLease(); disposed = true; reads.abort();
         clearTimer(renewTimer); clearTimer(freshnessTimer); onChange(getState());
@@ -146,7 +165,7 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
   function scheduleRenew(delay = RENEW_INTERVAL) {
     clearTimer(renewTimer);
     if (!disposed && lease) renewTimer = setTimer(() => {
-      if (!lease || lease.expiresAt <= now()) { forgetLease(); message = "Control lease expired. Take control again explicitly."; emit(); return; }
+      if (!lease || lease.deadline <= now()) { forgetLease(); message = "Control lease expired. Take control again explicitly."; emit(); return; }
       if (busy) { scheduleRenew(250); return; }
       void mutate("renew");
     }, delay);
@@ -170,13 +189,23 @@ export function createBrowserController({ sessionId, nativeSessionId, request, o
     if (operation === "release") forgetLease(false);
     emit();
     try {
+      const sentAt = now();
       const result = await call("/control", body);
       binding(result, browserSessionId);
       if (["acquire", "renew"].includes(operation)) {
-        if (!id(result.leaseId) || !Number.isFinite(result.expiresAt) || result.expiresAt <= now() || result.expiresAt > now() + LEASE_TTL) invalid();
-        if (disposed) { bestRelease(result); return false; }
-        if (operation === "renew" && result.leaseId !== lease?.leaseId) invalid();
-        lease = result; scheduleRenew();
+        if (!id(result.leaseId) || !timestamp(result.expiresAt) || !timestamp(result.serverTime)) invalid();
+        if (operation === "renew" && result.leaseId !== body.leaseId) invalid();
+        if (disposed) {
+          // Disposal already released any known lease; only acquire can create one.
+          if (operation === "acquire") bestRelease(result);
+          return false;
+        }
+        const remaining = result.expiresAt - result.serverTime, deadline = sentAt + remaining;
+        if (deadline <= now() || remaining > LEASE_TTL) {
+          if (operation === "acquire") bestRelease(result);
+          throw new Error("Control lease is no longer fresh. Take control again explicitly.");
+        }
+        lease = { ...result, deadline }; scheduleRenew();
         message = "You have control. Click, type or scroll in the preview.";
       } else {
         if (result.accepted !== true) invalid();
@@ -331,7 +360,8 @@ export function mountBrowserPanel(root, options) {
   panel.append(notice, addressBar, viewport, age, previewOptions, directHint, resolutionFields, resolutionNote, advanced); root.replaceChildren(panel);
   let shownFrame, shownRefs = "";
   let direct, wheelX = 0, wheelY = 0;
-  const controller = createBrowserController({ ...options, onChange(state) {
+  const now = options.now || monotonicNow;
+  const controller = createBrowserController({ ...options, now, onChange(state) {
     if (notice.textContent !== state.message) notice.textContent = state.message;
     acquire.disabled = !state.canAcquire; release.disabled = !state.canRelease;
     acquire.textContent = state.pendingOperation === "acquire" ? "Taking control…" : "Take control";
@@ -349,9 +379,9 @@ export function mountBrowserPanel(root, options) {
     // preview or reset a reference the operator is using on every lease renewal.
     // Retained pixels/refs are display-only until a fresh frame is acknowledged.
     const preview = state.frame || (!state.disposed && state.status?.ready && shownFrame?.browserSessionId === state.status.browserSessionId ? shownFrame : null);
-    const stale = preview && (options.now || Date.now)() - preview.createdAt >= FRAME_TTL;
+    const stale = preview && now() >= state.frameDeadline;
     image.setAttribute("data-stale", String(Boolean(stale)));
-    age.textContent = !preview ? "Waiting for browser preview…" : stale ? "Preview is stale · waiting to reconnect." : state.pendingOperation === "acquire" ? "Taking control…" : state.held ? "Live · you have control" : "Live · viewing browser";
+    age.textContent = !preview ? "Waiting for browser preview…" : stale ? "Preview is stale · waiting for a fresh frame." : state.pendingOperation === "acquire" ? "Taking control…" : state.held ? "Live · you have control" : "Live · viewing browser";
     if (state.frame) {
       if (shownFrame && (shownFrame.width !== state.frame.width || shownFrame.height !== state.frame.height)) wheelX = wheelY = 0;
       if (!addressDraft && doc.activeElement !== address) address.value = state.frame.url || "";
@@ -383,7 +413,7 @@ export function mountBrowserPanel(root, options) {
     click.disabled = fill.disabled = !state.canInput || !refs.value;
   } });
   direct = createPreviewInput({ getState: controller.getState, send: controller.input,
-    ...(options.now ? { now: options.now } : {}), ...(options.setTimer ? { setTimer: options.setTimer } : {}), ...(options.clearTimer ? { clearTimer: options.clearTimer } : {}),
+    now, ...(options.setTimer ? { setTimer: options.setTimer } : {}), ...(options.clearTimer ? { clearTimer: options.clearTimer } : {}),
     onStatus(message) { directHint.textContent = message || directHelp; } });
   image.addEventListener("click", (event) => {
     const state = controller.getState();
