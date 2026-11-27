@@ -90,26 +90,43 @@ assert.equal(failure.enabled(), false)
 await failure.auto('review')
 assert.equal(failure.enabled(), false)
 
-let delay = false, release
+let delay = false, release, readEntered
+function pausePolicyRead() {
+  delay = true
+  release = undefined
+  return new Promise(resolve => { readEntered = resolve })
+}
+async function awaitPolicyRead(entered) {
+  let timer
+  try {
+    await Promise.race([entered, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('Policy read checkpoint timed out')), 2000)
+    })])
+  } finally { clearTimeout(timer) }
+}
 const race = harness({ readFile: async () => {
-  if (delay) await new Promise(resolve => { release = resolve })
+  if (delay) await new Promise(resolve => { release = resolve; readEntered() })
   return JSON.stringify({ version: 1, defaultDecision: 'ask', rules: [], auto: { enable: true } })
 } })
 await race.auto('on')
-delay = true
+const restoreRead = pausePolicyRead()
 const restoring = race.start('resume')
+await awaitPolicyRead(restoreRead)
 delay = false
 await race.auto('off')
 release()
 await restoring
 assert.equal(race.enabled(), false)
 await race.auto('on')
-delay = true
+const disableRead = pausePolicyRead()
 const disabling = race.auto('off')
 assert.equal(race.enabled(), false) // revocation precedes policy I/O
+await awaitPolicyRead(disableRead)
 release()
 await disabling
+const enableRead = pausePolicyRead()
 const enabling = race.auto('on')
+await awaitPolicyRead(enableRead)
 race.shutdown()
 release()
 await enabling
