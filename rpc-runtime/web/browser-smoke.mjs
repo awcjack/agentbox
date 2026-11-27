@@ -347,6 +347,8 @@ async function responsiveSmoke() {
   const screenshot = (name) => page.screenshot({ path: join(output, `pi-responsive-${name}.png`) });
   const toggle = el("actions-toggle"), pane = el("context-pane"), sidebar = el("sidebar");
   const prompt = el("prompt"), close = el("close-context-pane");
+  const preview = page.locator(".browser-viewport");
+  const browserResize = page.getByRole("button", { name: "Resize browser preview and pane" });
   const mainInert = () => page.locator(".main").evaluate((node) => node.inert);
   const focused = (locator) => locator.evaluate((node) => node === document.activeElement);
   try {
@@ -387,7 +389,7 @@ async function responsiveSmoke() {
     assert.equal(await el("context-resizer").isVisible(), false);
     await page.getByRole("button", { name: "Expand preview", exact: true }).tap();
     assert.deepEqual(await pane.boundingBox(), phonePane, "expanding does not split a phone screen");
-    assert.equal(await page.locator(".browser-viewport").evaluate((node) => getComputedStyle(node).resize), "none");
+    assert.equal(await browserResize.isVisible(), false);
     await page.getByRole("button", { name: "Full screen", exact: true }).tap();
     await page.getByRole("button", { name: "Exit fullscreen", exact: true }).tap();
     await screenshot("browser"); await page.keyboard.press("Escape");
@@ -428,6 +430,25 @@ async function responsiveSmoke() {
     await page.setViewportSize({ width: 1440, height: 1000 });
     assert.equal(await toggle.isVisible(), false);
     assert.equal(await el("open-browser").isVisible(), true, "desktop keeps inline actions");
+    await el("open-browser").click();
+    await page.getByRole("button", { name: "Expand preview", exact: true }).click();
+    await browserResize.scrollIntoViewIfNeeded();
+    const beforePane = await pane.boundingBox(), beforePreview = await preview.boundingBox();
+    const corner = await browserResize.boundingBox();
+    assert.ok(Math.abs(corner.x - beforePreview.x) <= 2);
+    assert.ok(Math.abs(corner.y + corner.height - beforePreview.y - beforePreview.height) <= 2);
+    const x = corner.x + corner.width / 2, y = corner.y + corner.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down(); await page.mouse.move(x + 120, y - 80, { steps: 4 }); await page.mouse.up();
+    const afterPane = await pane.boundingBox(), afterPreview = await preview.boundingBox();
+    assert.equal(afterPane.width, beforePane.width - 120, "narrowing the preview gives width back to the conversation");
+    assert.equal(afterPane.x + afterPane.width, beforePane.x + beforePane.width);
+    assert.equal(afterPreview.width, beforePreview.width - 120);
+    assert.equal(afterPreview.height, beforePreview.height - 80);
+    await page.getByRole("button", { name: "Full screen", exact: true }).click();
+    assert.equal(await browserResize.isVisible(), false);
+    await page.getByRole("button", { name: "Exit fullscreen", exact: true }).click();
+    await close.click();
     await link.click(); await page.locator("#context-pane-body h1").waitFor();
     assert.equal(await mainInert(), false, "desktop keeps the composer available alongside the preview");
     assert.equal(await el("context-resizer").isVisible(), true);
