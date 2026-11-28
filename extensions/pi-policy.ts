@@ -8,17 +8,19 @@ import { commandInspectionVariants, isSensitivePath, shellPathTokens, shellToken
 
 // Local pi-post replies synchronously; sandbox broker mode explicitly defers.
 // An unavailable/slow broker must never turn an unrelated send into same-main.
-export function sessionMessageSameMain(pi: Pick<ExtensionAPI, "events">, to: unknown, signal?: AbortSignal, timeout = 2000): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false)
+export function sessionMessageScope(pi: Pick<ExtensionAPI, "events">, to: unknown, signal?: AbortSignal, timeout = 2000): Promise<{ sameMain: boolean; addresses?: string[] }> {
+  if (signal?.aborted) return Promise.resolve({ sameMain: false })
   return new Promise(resolve => {
     let deferred = false, settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    const finish = (value: boolean) => {
+    const finish = (value: boolean, addresses?: unknown) => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
       signal?.removeEventListener("abort", abort)
-      resolve(value === true)
+      resolve({ sameMain: value === true, ...(Array.isArray(addresses) && addresses.length > 0 && addresses.length <= 8
+        && addresses.every(address => typeof address === "string" && /^s-[0-9a-f]{12}$/.test(address))
+        ? { addresses: [...new Set(addresses as string[])] } : {}) })
     }
     const abort = () => finish(false)
     signal?.addEventListener("abort", abort, { once: true })
@@ -32,6 +34,10 @@ export function sessionMessageSameMain(pi: Pick<ExtensionAPI, "events">, to: unk
       else timer = setTimeout(() => finish(false), timeout)
     }
   })
+}
+
+export async function sessionMessageSameMain(pi: Pick<ExtensionAPI, "events">, to: unknown, signal?: AbortSignal, timeout = 2000): Promise<boolean> {
+  return (await sessionMessageScope(pi, to, signal, timeout)).sameMain
 }
 
 const DEFAULT_CONFIG_PATH = "/etc/pi/agentbox-policy.json"
@@ -626,8 +632,8 @@ function defaultSignal(state: "waiting" | "working") {
   })
 }
 
-async function selectWithTimeout(ctx: any, title: string, timeout: number) {
-  return await selectApproval(ctx, title, Date.now() + timeout, ctx.signal) ? "Allow once" : undefined
+async function selectWithTimeout(ctx: any, title: string, timeout: number, allowLabel = "Allow once") {
+  return await selectApproval(ctx, title, Date.now() + timeout, ctx.signal, allowLabel) ? "Allow once" : undefined
 }
 
 async function autoApprove(ctx: ExtensionContext, config: AutoConfig, toolName: string, input: Record<string, unknown>, targets: string[], toolCallId: string) {
@@ -804,6 +810,8 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
     let autoAttempt = new AbortController()
     let session = new AbortController()
     let activeSessionId: string | undefined
+    // Live grants belong only to this sender runtime, never a child or fork.
+    const approvedMessageRecipients = new Set<string>()
     let queue = Promise.resolve()
     const reset = (shutdown = false) => {
       session.abort()
@@ -972,6 +980,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       },
     })
     pi.on("session_start", async (event, ctx) => {
+      approvedMessageRecipients.clear()
       reset()
       activeSessionId = ctx.sessionManager?.getSessionId?.()
       const epoch = session, request = modeRequest
@@ -1035,6 +1044,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       } catch { /* Unreadable or invalid defaults never enable auto. */ }
     })
     pi.on("session_tree", async (_event, ctx) => {
+      if (activeSessionId !== ctx.sessionManager?.getSessionId?.()) approvedMessageRecipients.clear()
       reset()
       activeSessionId = ctx.sessionManager?.getSessionId?.()
       const epoch = session, request = modeRequest
@@ -1042,11 +1052,12 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
       if (epoch === session && !epoch.signal.aborted && request === modeRequest) restoreAuto(ctx, available)
     })
     pi.on("session_shutdown", () => {
+      approvedMessageRecipients.clear()
       reset(true)
       approvalClient?.close()
     })
 
-    async function askHuman(ctx: ExtensionContext, config: Pick<PolicyConfig, "timeout">, summary: string) {
+    async function askHuman(ctx: ExtensionContext, config: Pick<PolicyConfig, "timeout">, summary: string, allowLabel = "Allow once") {
       if (env.PI_WORKFLOW_CHILD === "1" || env[APPROVAL_ENV] !== undefined) {
         if (!transportOpened) {
           transportOpened = true
@@ -1059,7 +1070,7 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
 
       try {
         await Promise.resolve(signal("waiting")).catch(() => undefined)
-        const selected = await selectWithTimeout(ctx, `Approve tool call? ${summary}`, config.timeout)
+        const selected = await selectWithTimeout(ctx, `Approve tool call? ${summary}`, config.timeout, allowLabel)
         if (selected === "Allow once") return
         return { block: true, reason: "Managed Pi policy approval was denied, cancelled, or timed out" }
       } finally {
@@ -1094,15 +1105,23 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         const decision = managedDecision(config, event.toolName, targetGroups)
         if (decision === "allow") return
         if (decision === "deny") return { block: true, reason: "Denied by managed Pi policy" }
-        // Cross-main send_message always asks a human: Auto/classifier must not
-        // silently wake unrelated sessions (ack ping-pong under Auto-on).
+        // Auto/classifier must never manufacture a cross-main messaging grant.
+        // Only a direct human approval can authorize a recipient for this runtime.
         let crossMainSend = false
+        let messageAddresses: string[] | undefined
         if (decision === "defaultAsk") {
           if (event.toolName === "list_sessions") return
           if (event.toolName === "send_message") {
-            const sameMain = await sessionMessageSameMain(pi, input.to, ctx.signal)
-            if (sameMain) return
+            const scope = await sessionMessageScope(pi, input.to, ctx.signal)
+            if (ctx.signal.aborted) return cancelled
+            if (scope.sameMain) return
             crossMainSend = true
+            if (env.PI_WORKFLOW_CHILD !== "1" && env[APPROVAL_ENV] === undefined && scope.addresses) {
+              messageAddresses = scope.addresses
+              // Pin execution to the identities approved here, not mutable aliases.
+              input.to = messageAddresses
+              if (messageAddresses.every(address => approvedMessageRecipients.has(address))) return
+            }
           }
         } else if (decision === "ask" && event.toolName === "send_message") {
           const sameMain = await sessionMessageSameMain(pi, input.to, ctx.signal)
@@ -1126,9 +1145,15 @@ export function createPiPolicyExtension(dependencies: PiPolicyDependencies = {})
         if (!crossMainSend && autoEnabled && config.auto?.enable) return
         // A classifier rejection/error is not a policy deny. Insufficient
         // context, missing credentials, timeouts, etc. ask on the FIRST call.
-        const summary = boundedDisplay(autoFallback ? `Auto could not approve; ${event.toolName}` : event.toolName, targets)
-        const result = await askHuman(ctx, config, summary)
-        return ctx.signal.aborted ? cancelled : result
+        const summary = boundedDisplay(messageAddresses ? "send_message (allow these recipients for current session)"
+          : autoFallback ? `Auto could not approve; ${event.toolName}` : event.toolName,
+          messageAddresses ? [messageAddresses.join(", ")] : targets)
+        const result = await askHuman(ctx, config, summary, messageAddresses ? "Allow for this session" : "Allow once")
+        if (ctx.signal.aborted) return cancelled
+        if (!result?.block && messageAddresses) {
+          for (const address of messageAddresses) approvedMessageRecipients.add(address)
+        }
+        return result
       }).then((result) => ctx.signal.aborted ? cancelled : result, () => ({ block: true, reason: "Pi policy check failed; failing closed" }))
       queue = pending.then(() => undefined)
       return pending

@@ -17,7 +17,7 @@ export type ApprovalContext = {
 }
 
 // Race explicitly: some UI implementations ignore abort, and late answers must never authorize.
-export async function selectApproval(ctx: ApprovalContext, title: string, deadline: number, signal?: AbortSignal): Promise<boolean> {
+export async function selectApproval(ctx: ApprovalContext, title: string, deadline: number, signal?: AbortSignal, allowLabel = "Allow once"): Promise<boolean> {
   const controller = new AbortController()
   const abort = () => controller.abort()
   signal?.addEventListener("abort", abort, { once: true })
@@ -32,9 +32,9 @@ export async function selectApproval(ctx: ApprovalContext, title: string, deadli
   const timer = setTimeout(abort, timeout)
   try {
     const selected = await Promise.race([
-      ctx.ui.select(title, ["Allow once", "Deny"], { signal: controller.signal, timeout }), cancelled,
+      ctx.ui.select(title, [allowLabel, "Deny"], { signal: controller.signal, timeout }), cancelled,
     ])
-    return !controller.signal.aborted && Date.now() < deadline && selected === "Allow once"
+    return !controller.signal.aborted && Date.now() < deadline && selected === allowLabel
   } catch {
     return false
   } finally {

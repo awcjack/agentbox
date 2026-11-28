@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert"
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createPiPolicyExtension, sessionMessageSameMain } from "../extensions/pi-policy.ts"
+import { createPiPolicyExtension, sessionMessageSameMain, sessionMessageScope } from "../extensions/pi-policy.ts"
 
 const scopePi = (handler?: (event: any) => void) => ({ events: { emit: (_name: string, event: any) => handler?.(event) } }) as any
 assert.equal(await sessionMessageSameMain(scopePi(event => event.reply(true)), "child"), true)
@@ -24,12 +24,13 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
   const signals: string[] = []
   const events = new Map<string, (request: unknown) => void>()
   let sameMain = false
+  let messageAddresses: unknown
   const pi = {
     appendEntry() {},
     events: {
       on: (name: string, handler: (request: unknown) => void) => events.set(name, handler),
       emit: (name: string, request: any) => {
-        if (name === "agentbox:session-message-scope") request.reply(sameMain)
+        if (name === "agentbox:session-message-scope") request.reply(sameMain, messageAddresses)
       },
     },
     registerCommand(name: string, command: any) { commands.set(name, command) },
@@ -78,6 +79,7 @@ function harness(config: string | Error = allowConfig, overrides: any = {}, star
       return answer
     },
     setSameMain(value: boolean) { sameMain = value },
+    setMessageAddresses(value: unknown) { messageAddresses = value },
     requestApproval(ctx: any, summary = "MCP tool: docs/search", timeout = 1000) {
       let answer = Promise.resolve(false)
       events.get("agentbox:approval-request")?.({ context: ctx, summary, timeout, reply: (value: Promise<boolean>) => { answer = value } })
@@ -126,6 +128,122 @@ for (const decision of ["ask", "deny"]) {
   explicit.setSameMain(true)
   assert.ok((await call(explicit.toolCall, "send_message", { to: "sibling", body: "Status?" })).block)
 }
+
+// Human approvals are reusable by resolved recipient identity, never by alias.
+{
+  const a = "s-aaaaaaaaaaaa", b = "s-bbbbbbbbbbbb", c = "s-cccccccccccc"
+  let config = { version: 1, defaultDecision: "ask", auto: { enable: true }, rules: [] as any[] }
+  const probe = harness(JSON.stringify(config), { readFile: async () => JSON.stringify(config) }, false)
+  await probe.lifecycle("session_start")
+  let prompts = 0, allow = true
+  const ctx = context({ ui: { select: async (title: string, choices: string[]) => {
+    prompts++
+    if (!config.rules.length) {
+      assert.match(title, /recipients for current session/)
+      assert.deepEqual(choices, ["Allow for this session", "Deny"])
+    }
+    return allow ? choices[0] : "Deny"
+  } } })
+  const send = (to: string | string[], body = "Finding") => call(probe.toolCall, "send_message", { to, body }, ctx)
+  probe.setMessageAddresses([a])
+  const input = { to: "peer", body: "First finding" }
+  assert.equal(await call(probe.toolCall, "send_message", input, ctx), undefined)
+  assert.deepEqual(input.to, [a], "pin execution to the resolved identity")
+  assert.equal(prompts, 1)
+  allow = false
+  assert.equal(await send(a, "Different body"), undefined)
+  assert.equal(await send("renamed-peer"), undefined)
+  assert.equal(prompts, 1)
+  probe.setMessageAddresses([b])
+  assert.ok((await send("peer")).block, "a reused name must not transfer the grant")
+  assert.ok((await send(b)).block, "denials must not create grants")
+  assert.equal(prompts, 3)
+  probe.setMessageAddresses([a, b])
+  assert.ok((await send([a, b])).block, "all recipients need authorization")
+  allow = true
+  assert.equal(await send([a, b]), undefined)
+  allow = false
+  probe.setMessageAddresses([b])
+  assert.equal(await send(b), undefined, "batch approval grants each recipient")
+  assert.equal(prompts, 5)
+  await probe.command("on")
+  probe.setMessageAddresses([c])
+  assert.ok((await send(c)).block, "Auto cannot manufacture a grant")
+  await probe.command("review")
+  assert.ok((await send(c)).block, "Review cannot manufacture a grant")
+  probe.setMessageAddresses([a])
+  assert.equal(await send(a), undefined)
+  await probe.lifecycle("session_tree")
+  assert.equal(await send(a), undefined, "same-session tree navigation retains grants")
+  await probe.command("off")
+  config.rules = [{ tools: ["send_message"], patterns: ["*"], decision: "ask" }]
+  assert.ok((await send(a)).block, "explicit asks override grants")
+  config.rules[0].decision = "deny"
+  assert.ok((await send(a)).block, "managed denials override grants")
+  config.rules = []
+  await probe.lifecycle("session_tree", context({ sessionManager: { getSessionId: () => "other-session" } }))
+  assert.ok((await send(a)).block, "a changed native session cannot reuse grants")
+  await probe.lifecycle("session_shutdown")
+  await probe.lifecycle("session_start")
+  assert.ok((await send(a)).block, "replacement/resume/reload clears grants")
+}
+
+// Parent transport approvals (including Auto replies) never become live grants.
+for (const env of [{ PI_WORKFLOW_CHILD: "1" }, { PI_WORKFLOW_APPROVAL_VERSION: "1" }]) {
+  let approvals = 0
+  const probe = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {
+    env,
+    approvalClient: { ask: async () => { approvals++; return true }, close() {} },
+  }, false)
+  probe.setMessageAddresses(["s-aaaaaaaaaaaa"])
+  for (let i = 0; i < 2; i++) assert.equal(await call(probe.toolCall, "send_message", { to: "peer" }), undefined)
+  assert.equal(approvals, 2)
+}
+
+// Failed/legacy resolution can authorize one call, never a reusable grant.
+for (const addresses of [undefined, [], ["peer-name"], ["s-aaaaaaaaaaaa", 3]]) {
+  const probe = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {}, false)
+  probe.setMessageAddresses(addresses)
+  let prompts = 0
+  const ctx = context({ ui: { select: async (_title: string, choices: string[]) => {
+    prompts++; assert.deepEqual(choices, ["Allow once", "Deny"]); return choices[0]
+  } } })
+  for (let i = 0; i < 2; i++) assert.equal(await call(probe.toolCall, "send_message", { to: "peer" }, ctx), undefined)
+  assert.equal(prompts, 2)
+}
+
+// A cancelled or replaced session cannot install a late grant.
+for (const replaceSession of [false, true]) {
+  const probe = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {}, false)
+  probe.setMessageAddresses(["s-aaaaaaaaaaaa"])
+  const controller = new AbortController()
+  let started!: () => void, answer!: (value: string) => void
+  const ready = new Promise<void>(resolve => { started = resolve })
+  const ctx = context({ signal: controller.signal, ui: { select: () => { started(); return new Promise<string>(resolve => { answer = resolve }) } } })
+  const pending = call(probe.toolCall, "send_message", { to: "peer" }, ctx)
+  await ready
+  if (replaceSession) {
+    await probe.lifecycle("session_shutdown")
+    await probe.lifecycle("session_start")
+  } else controller.abort()
+  answer("Allow for this session")
+  assert.ok((await pending).block)
+  assert.ok((await call(probe.toolCall, "send_message", { to: "peer" })).block)
+}
+
+// Concurrent decisions serialize; the second sees the first human grant.
+{
+  const probe = harness(JSON.stringify({ version: 1, defaultDecision: "ask", rules: [] }), {}, false)
+  probe.setMessageAddresses(["s-aaaaaaaaaaaa"])
+  let prompts = 0
+  const ctx = context({ ui: { select: async (_title: string, choices: string[]) => { prompts++; return choices[0] } } })
+  assert.deepEqual(await Promise.all([1, 2].map(i => call(probe.toolCall, "send_message", { to: "peer", body: `Finding ${i}` }, ctx))), [undefined, undefined])
+  assert.equal(prompts, 1)
+}
+assert.deepEqual(await sessionMessageScope(scopePi(event => event.reply(false, ["s-aaaaaaaaaaaa"])), "peer"),
+  { sameMain: false, addresses: ["s-aaaaaaaaaaaa"] })
+assert.deepEqual(await sessionMessageScope(scopePi(event => { event.defer(); queueMicrotask(() => event.reply(false, ["s-aaaaaaaaaaaa"])) }), "peer"),
+  { sameMain: false, addresses: ["s-aaaaaaaaaaaa"] })
 
 for (const malformed of [
   "{",
