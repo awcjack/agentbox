@@ -31,7 +31,7 @@
 +
    function senderFrom(ctx: ExtensionContext) {
      return {
-@@ -57,6 +59,25 @@
+@@ -57,6 +59,26 @@
        cwd: ctx.cwd,
      };
    }
@@ -40,7 +40,7 @@
 +  // Message text and model-supplied flags never grant a same-main exemption.
 +  pi.events.on("agentbox:session-message-scope", (value: unknown) => {
 +    if (!value || typeof value !== "object") return;
-+    const request = value as { to?: unknown; reply?: (sameMain: boolean) => void };
++    const request = value as { to?: unknown; reply?: (sameMain: boolean, addresses?: string[]) => void };
 +    if (typeof request.reply !== "function") return;
 +    const targets = Array.isArray(request.to) ? request.to : [request.to];
 +    if (!rootSessionId || !targets.length || !targets.every((target) => typeof target === "string")) {
@@ -48,8 +48,9 @@
 +      return;
 +    }
 +    try {
-+      request.reply(resolveTargets(root, targets as string[], sessionCwd)
-+        .every((target) => target.record?.rootSessionId === rootSessionId));
++      const resolved = resolveTargets(root, targets as string[], sessionCwd);
++      request.reply(resolved.every((target) => target.record?.rootSessionId === rootSessionId),
++        resolved.map((target) => target.address));
 +    } catch {
 +      request.reply(false);
 +    }
@@ -58,7 +59,7 @@
 +
    async function deliver(ctx: ExtensionContext, message: Message, deliverAs: "steer" | "nextTurn") {
      const mode = inboundMode();
-@@ -98,6 +119,10 @@
+@@ -98,6 +120,10 @@
 -
 +
    pi.on("session_start", async (_event, ctx) => {
@@ -70,7 +71,7 @@
      const canonical = canonicalPath(ctx.cwd);
      selfAddress = sessionAddress(sessionId);
      selfName = pi.getSessionName() ?? defaultSessionName(canonical, selfAddress);
-@@ -112,6 +137,7 @@
+@@ -112,6 +138,7 @@
        v: 1,
        address: selfAddress,
        sessionId,

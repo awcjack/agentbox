@@ -63,6 +63,11 @@ async function start(id: string, name: string, cwd = root, mainSessionId?: strin
   }
   const session = {
     messages,
+    resolvedAddresses(to: unknown) {
+      let addresses: string[] | undefined
+      events.emit("agentbox:session-message-scope", { to, reply: (_value: boolean, resolved: string[]) => { addresses = resolved } })
+      return addresses
+    },
     sameMain(to: unknown) {
       let allowed = false
       events.emit("agentbox:session-message-scope", { to, reply: (value: boolean) => { allowed = value } })
@@ -94,6 +99,11 @@ try {
   assert.equal(unrelated.sameMain("child"), false)
   assert.equal(parent.sameMain(["child", "unrelated"]), false)
   assert.equal(parent.sameMain("missing"), false)
+  const childAddresses = parent.resolvedAddresses("child")
+  assert.equal(childAddresses?.length, 1)
+  assert.match(childAddresses[0], /^s-[0-9a-f]{12}$/)
+  assert.deepEqual(parent.resolvedAddresses(childAddresses[0]), childAddresses)
+  assert.equal(parent.resolvedAddresses("missing"), undefined)
   const listing = await parent.tool("list_sessions", {})
   assert.match(listing.content[0].text, /parent.*live/)
   assert.match(listing.content[0].text, /child.*live/)

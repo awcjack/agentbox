@@ -86,7 +86,7 @@ export default function brokerPost(pi: ExtensionAPI) {
   pi.on("session_info_changed", async event => { if (self) await request("rename", { name: event.name }) })
   pi.events.on("agentbox:session-message-scope", (event: any) => {
     event.defer?.()
-    void request("resolve", { to: event.to }).then(value => event.reply(value.sameMain === true), () => event.reply(false))
+    void request("resolve", { to: event.to }).then(value => event.reply(value.sameMain === true, value.targets.map((target: any) => target.address)), () => event.reply(false))
   })
   pi.registerTool({
     name: "send_message", label: "Send Message",

@@ -70,6 +70,10 @@ try {
   assert.equal((await parent.request("inbox")).messages.length, 0)
   const scope = await new Promise(done => s.events.emit("agentbox:session-message-scope", { to: "supervisor", reply: done }))
   assert.equal(scope, true)
+  const resolved = await new Promise(done => s.events.emit("agentbox:session-message-scope", {
+    to: "supervisor", reply: (sameMain: boolean, addresses: string[]) => done({ sameMain, addresses }),
+  }))
+  assert.deepEqual(resolved, { sameMain: true, addresses: [(await parent.request("list")).selfAddress] })
   assert.match((await s.tool("list_sessions", {})).content[0].text, /supervisor.*live/)
   assert.equal(await cli(["whoami"]), s.record.address, "shell CLI authenticates as extension, not supervisor")
   await s.tool("send_message", { to: "supervisor", body: "extension finding" })
