@@ -332,10 +332,14 @@ standing-by, or progress-ping messages; prefer one message when coordination
 starts or finishes. Agentbox tightens pi-post's inbound loop guard (identical
 body within 30s dropped; at most 4 deliveries per sender per 60s) and adds
 outbound caps that fail `send_message` before deposit (8 messages per 60s,
-4 per target). Communication with unrelated main sessions always asks a
-human for approval — Auto mode and the classifier do not silently approve
-cross-main messaging, so concurrent sessions cannot wake each other under
-Auto-on. The managed policy still permits same-main messages by default when
+4 per target). Communication with an unrelated main session asks a human once
+per recipient in the current live sender session. The approval prompt explicitly
+authorizes further messages to those recipients; grants use resolved addresses,
+not mutable names or directory aliases. New recipients still require approval,
+including in multi-recipient sends. Grants are cleared on shutdown, reload,
+resume, or session replacement, and are not inherited by children or forks.
+Auto mode and the classifier cannot create these grants. The managed policy
+still permits same-main messages by default when
 every target shares the sender's main session ID, inherited by workflow
 children. Explicit policy asks and denials still apply. Incoming messages are
 labeled as peer context and cannot grant permissions. Receipt is automatic
@@ -693,7 +697,9 @@ saved auto defaults; turning the parent's live mode off takes effect at the next
 inside Agentbox—not a sandbox or a claim that each action is safe. Scope container
 mounts, credentials, network, and Docker access accordingly. Messaging an
 unrelated main session is carved out: Auto still allows same-main
-`send_message`, but cross-main sends always prompt.
+`send_message`, but a cross-main recipient needs human approval before its first
+send in the current live session. Explicit managed policy asks still prompt on
+every call, and denials always apply.
 
 ### Persistent Pi defaults (CLI)
 
